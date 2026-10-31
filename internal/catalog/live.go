@@ -92,6 +92,24 @@ func LiveByID(provider, model string) []Model {
 	return slices.Clone(f.byID[model])
 }
 
+// LiveByIDShared is LiveByID without the copy, for a caller that only
+// reads it: asked for a model's APIs, price or tiers for every model a
+// page lists, the copies were 32 MB of a live magpie's 2.6 GB in a minute
+// and a half.
+func LiveByIDShared(provider, model string) []Model {
+	f, err := readLive(provider)
+	if err != nil {
+		return nil
+	}
+	return slices.Clip(f.byID[model])
+}
+
+// LiveListed is whether Live lists any model, without the list copied.
+func LiveListed(provider string) bool {
+	f, err := readLive(provider)
+	return err == nil && len(f.byID) > 0
+}
+
 // Live returns the model list last fetched from the provider, if any: the
 // models to talk to, without the ones that draw (LiveDrawers).
 func Live(provider string) (models []Model, fetched time.Time, ok bool) {

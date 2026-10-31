@@ -356,6 +356,13 @@ type Settings struct {
 	// images, safeguards or client cache marks): the plan counts a -p
 	// request at about twice an interactive one.
 	ClaudePrintMode bool `json:"claudePrintMode,omitempty"`
+	// ClaudeTUIOnly has a Claude subscription's model requests never run
+	// as `claude -p`: one the interactive mode can't take (safeguards, a
+	// JSON schema, …), or whose interactive mode doesn't come up, fails,
+	// saying why, where it would otherwise be -p. Reading the plan's
+	// allowance (/usage, no model request) is still -p. ClaudePrintMode,
+	// when set too, wins.
+	ClaudeTUIOnly bool `json:"claudeTUIOnly,omitempty"`
 	// ClaudeRunsMost is how many Claude Code processes a Claude
 	// subscription may have running at once: conversations' runs, those
 	// waiting for a next turn or on tool results, and one-off tests and
