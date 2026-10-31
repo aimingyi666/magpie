@@ -36,6 +36,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/wslrun"
 )
 
@@ -207,7 +208,7 @@ func wslArgs(wsl *WSL) []string {
 
 // configDir is the folder Claude Code keeps its state in.
 func configDir() string {
-	if d := os.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
+	if d := appdir.Getenv("CLAUDE_CONFIG_DIR"); d != "" {
 		return d
 	}
 	home, _ := os.UserHomeDir()

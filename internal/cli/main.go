@@ -133,6 +133,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie gateway-key issue --ttl 1h [--name n] [--models a,b] [--accounts a,b] [--tokens N] [--cost USD] [--read-only] [--from <id>] [--json]
                                          a short-lived key (1m to 30 days) that stops working by itself; --from holds it to a key that issues keys; prints the key
   magpie gateway-key issuer <id> [on|off]   let a key issue short-lived keys under itself (POST /v1/magpie/keys with it), each held to its models, accounts, limits and life
+  magpie gateway-key oidc add --key <id> --repo owner/name [--ref refs/heads/main] [--environment name] [--claim name=value]… [--ttl 1h] [--issuer URL] [--audience aud]
+                                         let a CI job's OIDC token (GitHub Actions by default) be traded for a key issued under <id> (POST /v1/magpie/keys/oidc); oidc list | remove <rule id>
   magpie mcp image                the image and video generation MCP server an agent is given from the library (stdio)
   magpie tools [<name>]           the tools magpie's MCP servers give agents (images, vision, web search, plugins'), with their parameters
   magpie tool <name> [--<param> <value>…] [<words>] [-o <file|folder>] [--json]   call one through the running magpie; an image or video it makes is saved

@@ -223,8 +223,8 @@
 #view-routing .row-head { margin: 14px 0 6px; padding: 0 2px; gap: 0; }
 #view-routing .row-head .note { font-size: 11px; color: var(--faint); margin-left: 8px; }
 #view-routing .row-head .rt-livedot + .note { margin-left: 8px; }
-.rt-mask, .rt-newgroup, .rt-gogroups { display: inline-flex; align-items: center; gap: 5px; }
-.rt-mask svg, .rt-newgroup svg, .rt-gogroups svg { width: 13px; height: 13px; flex: none; }
+.rt-newgroup, .rt-gogroups { display: inline-flex; align-items: center; gap: 5px; }
+.rt-newgroup svg, .rt-gogroups svg { width: 13px; height: 13px; flex: none; }
 /* the routing groups, far below with many models: the head goes to them */
 .rt-gogroups { margin-right: 6px; flex: none; }
 .rt-gogroups[data-fit="icon"] > span { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
@@ -234,9 +234,6 @@
    requests, out of sight on a first look (#944) */
 .rt-newgroup { margin-right: 6px; }
 .rt-gnew { display: inline-flex; align-items: center; gap: 4px; }
-/* on, it says so in its struck eye and its words, a shade darker: a
-   page tool, not a banner */
-.rt-mask[aria-pressed="true"] { color: var(--fg-2); }
 /* an email, hidden: stand-in letters of its shape, softly blurred —
    coming in out of focus when asked for */
 .pii { filter: blur(2.2px); opacity: .5; user-select: none; }

@@ -257,6 +257,7 @@ func onMachine(home, cfg string) []*Agent {
 		empryo(home),
 		ante(home),
 		astrbot(home),
+		qwenpaw(home),
 		openClaw(home),
 		jcode(home),
 		miniMax(home),
@@ -283,7 +284,7 @@ func onMachine(home, cfg string) []*Agent {
 		cindy(),
 		aionui(),
 		lody(home),
-	}, ompProfiles(home)...)
+	}, append(ompProfiles(home), qwenpawAgents(home)...)...)
 }
 
 // ---- accessors -------------------------------------------------------------
@@ -445,32 +446,47 @@ func ownOptionsFrom(native func(p string) []catalog.Model, authFile string, cur 
 	sort.Strings(providers)
 	var out []Option
 	for _, p := range providers {
-		name := catalog.ProviderName(p)
-		if name == "" {
-			name = nativeProviderNames[p]
+		if native == nil {
+			out = append(out, ownBuilt.shared(p, func() []Option { return ownProvider(nil, p) })...)
+		} else {
+			out = append(out, ownProvider(native, p)...)
 		}
-		if name == "" {
-			name = p
-		}
-		var ms []catalog.Model
-		if native != nil {
-			ms = native(p)
-		}
-		if len(ms) == 0 {
-			ms = catalog.Provider(p)
-		}
-		if len(ms) == 0 {
-			ms = codexServed(p)
-		}
-		opts := group(name, options(ms, p+"/"))
-		if ic := providerIcon(p); ic != "" {
-			for i := range opts {
-				opts[i].GroupIcon = ic
-			}
-		}
-		out = append(out, opts...)
 	}
 	return out
+}
+
+// ownBuilt is ownProvider's options built last per provider, for agents
+// without a registry of their own: Goose's model field asked them each
+// poll, for the picker and again for Drift, each provider's models made
+// into options anew, 20 MB of forty polls with real accounts.
+var ownBuilt stampedLists[Option]
+
+// ownProvider is the options of one provider an agent reaches on its own.
+func ownProvider(native func(p string) []catalog.Model, p string) []Option {
+	name := catalog.ProviderName(p)
+	if name == "" {
+		name = nativeProviderNames[p]
+	}
+	if name == "" {
+		name = p
+	}
+	var ms []catalog.Model
+	if native != nil {
+		ms = native(p)
+	}
+	if len(ms) == 0 {
+		ms = catalog.Provider(p)
+	}
+	if len(ms) == 0 {
+		ms = codexServed(p)
+	}
+	opts := group(name, options(ms, p+"/"))
+	if ic := providerIcon(p); ic != "" {
+		for i := range opts {
+			opts[i].GroupIcon = ic
+		}
+	}
+	return opts
 }
 
 // ---- agents ----------------------------------------------------------------
@@ -713,7 +729,12 @@ func piModelJSON(m catalog.Model, gw string, native bool) map[string]any {
 	switch {
 	case !native:
 	case slices.Contains(m.APIs, string(provider.Responses)):
+		// strict left out of a tool of a turn asked there is taken as a
+		// strict-mode schema, every property required, optional ones
+		// filled (#3055): pi-ai says strict: false on an ordinary tool
+		// only when the model's compat says so
 		e["api"] = "openai-responses"
+		e["compat"] = map[string]any{"supportsStrictMode": true}
 	case slices.Contains(m.APIs, string(provider.Anthropic)):
 		e["api"], e["baseUrl"] = "anthropic-messages", gw
 		if gateway.AdaptiveThinking(m.ID) {
@@ -979,7 +1000,7 @@ func openCodeLike(at place, id, name, icon, bin, dir, auth string, ua []string, 
 	provider := openCodeKept(path, func() any { return magpieProviderJSONAt("opencode", id, at.gw()) })
 	opts := func(key string) func(map[string]string) []Option {
 		return func(cur map[string]string) []Option {
-			return append(ownOptions(auth, cur[key]), viaMagpie(id, magpieID+"/")...)
+			return append(ownOptions(auth, cur[key]), viaMagpieShared(id, magpieID+"/")...)
 		}
 	}
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
@@ -1395,7 +1416,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 					return piScopeWith(path, v)
 				},
 				Options: func(cur map[string]string) []Option {
-					return append(ownOptionsFrom(piRegistry(id), auth, cur["model"]), viaMagpie(id, magpieID+"/")...)
+					return append(ownOptionsFrom(piRegistry(id), auth, cur["model"]), viaMagpieShared(id, magpieID+"/")...)
 				},
 			},
 			{
@@ -1515,7 +1536,7 @@ func gooseIn(at place, cfg string) *Agent {
 				// only the native providers this goose is set up with (#987:
 				// every one of four was listed, OpenRouter's hundreds of
 				// models on a goose that had only magpie)
-				return append(ownOptions("", cur["model"], gooseConfigured(path, keyEnv)...), viaMagpie("goose", gooseProviderID+"/")...)
+				return append(ownOptions("", cur["model"], gooseConfigured(path, keyEnv)...), viaMagpieShared("goose", gooseProviderID+"/")...)
 			},
 		}, {
 			// GOOSE_THINKING_EFFORT, the effort goose asks of a model that
@@ -1733,7 +1754,7 @@ func crushAt(at place, path, data string) *Agent {
 					}
 				}
 			}
-			return append(ownOptions("", cur[key], extra...), viaMagpie("crush", magpieID+"/")...)
+			return append(ownOptions("", cur[key], extra...), viaMagpieShared("crush", magpieID+"/")...)
 		}
 	}
 	// replacePick puts v in place of the whole models.<type> object in the

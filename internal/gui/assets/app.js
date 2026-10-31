@@ -7628,10 +7628,11 @@ function proxyPicker() {
   const addr = input(draft.proxyURL || "", "http://127.0.0.1:7890");
   addr.className = "proxy-url";
   addr.classList.toggle("off", draft.proxyMode !== "custom");
-  addr.oninput = () => { draft.proxyURL = addr.value; };
+  const login = proxyLoginRow(addr, (v) => { draft.proxyURL = v; });
   const seg = segs([["", t("Global proxy")], ["direct", t("Direct")], ["custom", t("Custom")]], draft.proxyMode || "", (v) => {
     draft.proxyMode = v;
     addr.classList.toggle("off", v !== "custom");
+    login.classList.toggle("off", v !== "custom");
     hint.textContent = t(PROXY_HINT[v]);
   });
   seg.classList.add("proxy-mode");
@@ -7640,7 +7641,7 @@ function proxyPicker() {
   // centred dialog would move under the pointer)
   const row = el("div", "proxy-row");
   row.append(seg, addr);
-  box.append(row, hint);
+  box.append(row, login, hint);
   return box;
 }
 
@@ -8002,15 +8003,16 @@ function proxyLine(it) {
   const addr = input(cur.url || "", "http://127.0.0.1:7890");
   addr.className = "proxy-url";
   addr.classList.toggle("off", cur.mode !== "custom");
-  addr.oninput = () => { draft.accountProxies[k] = { ...(draft.accountProxies[k] || { mode: "custom" }), url: addr.value }; };
+  const login = proxyLoginRow(addr, (v) => { draft.accountProxies[k] = { ...(draft.accountProxies[k] || { mode: "custom" }), url: v }; });
   const seg = segs([["", t("Provider's proxy")], ["direct", t("Direct")], ["custom", t("Custom")]], cur.mode || "", (v) => {
     draft.accountProxies[k] = { ...(draft.accountProxies[k] || {}), mode: v };
     addr.classList.toggle("off", v !== "custom");
+    login.classList.toggle("off", v !== "custom");
   });
   seg.classList.add("proxy-mode");
   const row = el("div", "proxy-row");
   row.append(seg, addr);
-  line.append(who, row);
+  line.append(who, row, login);
   return line;
 }
 // accountProxiesOfDraft is each account's own proxy as it is saved — the
@@ -11948,7 +11950,9 @@ function renderRouting(p) {
       ? t("Routing picks the account for each request through magpie; {agent} on its own stays signed in to the first account, whatever it has left.", { agent: a.agentName })
       : routing === "order"
         ? t("Routing picks the account for each request through magpie; {agent} on its own uses the one it is signed in to, which magpie moves to the next ticked account with room once it is used up, and back to the first once that has room again.", { agent: a.agentName })
-        : t("Routing picks the account for each request through magpie; {agent} on its own uses the one it is signed in to, which magpie moves to the next ticked account with room once it is 98% used, and back to the first once that has room again.", { agent: a.agentName }));
+        : a.agent === "codex" && !p.switchOnly || p.keepLogin
+        ? t("Routing picks the account for each request through magpie; {agent} on its own uses the one it is signed in to, which magpie moves to the next ticked account with room once it is 98% used, and back to the first once that has room again.", { agent: a.agentName })
+        : t("Routing picks the account for each request through magpie; {agent} on its own uses the one it is signed in to, which magpie moves to the next ticked account with room once it is 98% used, and keeps it there till that one is 98% used too.", { agent: a.agentName }));
   // what the Save will make of it differs from what it is: said beside it
   const unsaved = () => {
     const u = el("span", "hint munsaved", t("unsaved"));
@@ -12650,15 +12654,18 @@ function signInProxyForm(sub) {
   const go = el("button", "text primary", t("Sign in through it"));
   go.type = "submit";
   go.disabled = !inp.value.trim();
-  inp.oninput = () => { flow.customProxy = inp.value; go.disabled = !inp.value.trim(); };
+  const login = proxyLoginRow(inp, (v) => { flow.customProxy = v; }, () => { go.disabled = !inp.value.trim(); });
+  // the fields' keys stay out of the sheet's, as the address's are
+  for (const f of login.querySelectorAll("input")) f.onkeydown = inp.onkeydown;
   const submit = (e) => {
     e.preventDefault();
-    if (signing !== flow || !inp.value.trim()) return;
-    signInThrough(sub, inp.value.trim());
+    const v = (flow.customProxy || "").trim();
+    if (signing !== flow || !v) return;
+    signInThrough(sub, v);
   };
   form.onsubmit = submit;
   go.onclick = submit;
-  form.append(inp, go);
+  form.append(inp, go, login);
   setTimeout(() => { if (inp.isConnected) inp.focus(NO_SCROLL); });
   return form;
 }
@@ -13280,8 +13287,8 @@ function renderAccounts(a, p) {
   const cx = a.agent === "codex", ag = { agent: a.agentName };
   if (p && (cx && several || a.agent === "claude")) {
     const [only, cb] = tick(t("Only switch {agent}'s sign-in", ag), p.switchOnly);
-    const [tip, on, off] = cx ? [t("magpie signs {agent} in to the next account with room when the one it is on is used up, and back once that has room again, by writing {agent}'s own sign-in; {agent}'s requests go straight to OpenAI, never through magpie. A {agent} app or session already open stays on its account until it is opened again. Connected to magpie, {agent}'s requests go through it as before.", ag), t("magpie only switches {agent}'s sign-in; its requests go straight to OpenAI", ag), t("{agent}'s requests go through magpie to fail over to your other accounts again", ag)]
-      : [t("magpie moves {agent}'s own sign-in to the next account with room when one is used up, and back once it has room. Nothing on these accounts is served through magpie.", ag), t("magpie serves no requests on these accounts"), t("magpie serves requests on these accounts again")];
+    const [tip, on, off] = cx ? [t("magpie signs {agent} in to the next account with room when the one it is on is used up, and keeps it there till that one is used up too, by writing {agent}'s own sign-in; {agent}'s requests go straight to OpenAI, never through magpie. A {agent} app or session already open stays on its account until it is opened again. Connected to magpie, {agent}'s requests go through it as before.", ag), t("magpie only switches {agent}'s sign-in; its requests go straight to OpenAI", ag), t("{agent}'s requests go through magpie to fail over to your other accounts again", ag)]
+      : [t("magpie moves {agent}'s own sign-in to the next account with room when one is used up, and keeps it there till that one is used up too. Nothing on these accounts is served through magpie.", ag), t("magpie serves no requests on these accounts"), t("magpie serves requests on these accounts again")];
     only.title = tip;
     cb.onchange = () => accountAction("provider/switchonly", { id: p.id, switchOnly: cb.checked }, cb.checked ? on : off);
     list.append(el("div", "switch-only", only));
@@ -18059,51 +18066,11 @@ function wbToday() {
   return new Date(Date.now() + 8 * 3600e3).toISOString().slice(0, 10);
 }
 
-// askReset: spending a Codex account's reset can't be taken
-// back, so it asks first; then it says what came of it and reads the
-// usage again.
+// askReset: a Codex reset's confirmation, in resetask.js, loaded when asked
 let confirmAsk = null;
-function askReset(q) {
-  const ed = el("div", "editor reset-ask");
-  const head = el("div", "ehead");
-  head.append(icon(q.icon || "codex"), el("b", "", t("Use a Codex reset?")));
-  ed.append(head);
-  const who = q.alias || q.user || q.name;
-  ed.append(el("p", "lib-confirm", t(q.resets.count === 1
-    ? "{who} has 1 reset. Using it starts its windows again at once, as if none of them had been used. It can't be undone."
-    : "{who} has {n} resets. Using one starts its windows again at once, as if none of them had been used. It can't be undone.", { who, n: q.resets.count })));
-  if (q.resets.until) ed.append(el("p", "lib-confirm", t("The one used is the one that runs out first, {when}.", { when: new Date(q.resets.until).toLocaleString(intlLang()) })));
-  // nothing used yet: a reset would start nothing again
-  if (!q.windows?.some((w) => w.used > 0)) ed.append(el("p", "lib-confirm reset-idle", t("None of its windows has been used yet, so there is nothing to start again.")));
-  const bar = el("div", "bar");
-  const go = el("button", "text primary", t("Use a reset"));
-  go.onclick = async (e) => {
-    e.stopPropagation();
-    go.disabled = true;
-    go.classList.add("busy");
-    try {
-      const out = await api("usage/codex-reset", { user: q.user || "" });
-      closeConfirmAsk();
-      status(who + ": " + resetOutcome(out), out.code === "reset" ? "ok" : "err");
-      // the providers' editor reads the account's windows and resets
-      // on its own, kept a minute: read again, as Usage is (#1491)
-      delete loginUsage.codex;
-      if (editing && view === "providers") renderProviders();
-      loadQuotas();
-    } catch (err) {
-      go.disabled = false;
-      go.classList.remove("busy");
-      statusErr(err);
-    }
-  };
-  const cancel = el("button", "text", t("Cancel"));
-  cancel.onclick = cancelAsk;
-  bar.append(el("span", "grow"), cancel, go);
-  ed.append(bar);
-  confirmAsk = ed;
-  openModal(ed);
-  $("#modal").classList.add("lib");
-  go.focus();
+async function askReset(q) {
+  try { await import("./resetask.js"); } catch (err) { return statusErr(err); }
+  askResetSheet(q);
 }
 // closes a confirmation, nothing more (its Cancel, or an OK that only dismisses)
 function cancelAsk(e) { e.stopPropagation(); closeConfirmAsk(); }
@@ -18141,7 +18108,8 @@ $("#modal").addEventListener("click", (e) => {
   if (confirmAsk && modalBackdrop(e)) { e.stopImmediatePropagation(); closeConfirmAsk(); }
 }, true);
 document.addEventListener("keydown", (e) => {
-  if (!confirmationPending && confirmAsk && e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closeConfirmAsk(); }
+  // an open menu in it (the reset to use) closes first, on its own
+  if (!confirmationPending && confirmAsk && !protoMenu && e.key === "Escape") { e.preventDefault(); e.stopImmediatePropagation(); closeConfirmAsk(); }
 }, true);
 function resetOutcome(out) {
   switch (out.code) {
@@ -20707,6 +20675,41 @@ function proxyAddress(a, f, user, pass) {
   const [, scheme = "", rest] = /^([a-z][\w+.-]*:\/\/)?(.*)$/is.exec(a);
   return scheme + enc(user, f.username, f.eu) + (pass ? ":" + enc(pass, f.password, f.ep) : "") + "@" + rest;
 }
+// proxyLoginRow: a proxy login's fields for the proxy rows outside
+// Settings (#3382), split and joined as Settings' row does (proxyFields,
+// proxyAddress), so setURL gets the address Settings would save.
+function proxyLoginRow(addr, setURL, changed) {
+  const fields = {};
+  const auth = el("div", "proxy-auth proxy-login");
+  const username = input("", t("Username (optional)"));
+  const password = input("", t("Password (optional)"), "password");
+  for (const f of [username, password]) {
+    f.className = "proxy-credential";
+    f.setAttribute("aria-label", f.placeholder);
+  }
+  auth.append(username, password);
+  const join = () => {
+    let v = addr.value;
+    try {
+      v = proxyAddress(addr.value.trim(), fields, username.value, password.value);
+    } catch {} // a half-typed address is kept as it was typed
+    setURL(v);
+  };
+  const split = (quiet) => {
+    const parsed = proxyFields(addr.value.trim());
+    if (parsed.username || parsed.password) {
+      Object.assign(fields, { username: parsed.username, password: parsed.password, eu: parsed.eu, ep: parsed.ep });
+      username.value = parsed.username;
+      password.value = parsed.password;
+      addr.value = parsed.address;
+    }
+    if (!quiet) { join(); if (changed) changed(); }
+  };
+  username.oninput = password.oninput = join;
+  addr.oninput = () => split();
+  split(true);
+  return auth;
+}
 function proxyDisplay(value) {
   // Also mask an older backend's proxyNow, and environment/system proxies.
   return (value || "").replace(/^(\w+:\/\/)?[^/?#]*@/, "$1");
@@ -21782,7 +21785,7 @@ function renderRedact(s, keep) {
   row(t("Mask personal data"), t("Emails, phone numbers, ID and bank card numbers too"),
     onOff(s.redactPersonal, (redactPersonal) => {
       // turned on, the accounts on screen are hidden too
-      if (redactPersonal) window.hideAccounts?.set(true);
+      if (redactPersonal) window.hideAccounts?.set(true, true);
       savePrefs({ ...keep, redactPersonal });
     }));
   // each other kind of personal data, on or off of its own while personal
@@ -23169,6 +23172,7 @@ async function show(v) {
     magpie.call(view, "leave");
   }
   view = v;
+  window.hideAccounts?.page();
   // the page the reader leaves is the one the window opens on next (keptView)
   if (mode === "window") { try { localStorage.setItem("magpie.lastView", v); } catch { /* not kept */ } }
   const title = magpie.page(v)?.title ?? ({ agents: "Agents", providers: "Providers", plugins: "Plugins", settings: "Settings" })[v];
@@ -24282,22 +24286,24 @@ window.noteAccounts = noteAccounts;
   // it is no account, so only an address is hidden there (#1973: the
   // project lingting-react-ui with the account lingting)
   const NAMELESS = "#sessionsPane, #contextPane";
-  // chosen is the Hide accounts choice made on this computer; until one is,
-  // the accounts are hidden while Privacy masks personal data, which is
-  // where one who wants them kept out of sight turns it on (inaction on
-  // Discord: another computer with it on still showed the addresses)
-  let masked = false, chosen = null;
-  try { chosen = localStorage.getItem("magpie.maskEmails"); masked = chosen === "1"; } catch {}
-  // where it hides: the whole window, every page, its model pickers, menus
-  // and dialogs, which sit outside a page (PaulT on Discord: a Codex
-  // account's address in the tray's picker stayed in sight; Zhenbao TONG:
-  // the window's Providers page showed every account while the tray hid
-  // them). Routing and Usage each have a button for it; the tray panel
-  // follows the window's setting.
-  const targets = [["body", mode === "panel" ? [] : ["#rtMask", "#usageMask"]]];
-  const pages = targets.map(([v, bs]) => {
-    const view = $(v);
-    if (!view) return () => {};
+  // A switch's chosen is the Hide accounts choice made on this computer;
+  // until one is, the accounts are hidden while Privacy masks personal
+  // data (inaction on Discord: another computer with it on still showed
+  // the addresses). It hides in the whole window, its menus and dialogs
+  // (PaulT, Zhenbao TONG on Discord), by the switch of the page in sight:
+  // Routing's and Usage's, or the Providers page's own (#feedback: the one
+  // on Routing hid Providers too). The tray panel follows the first.
+  const sw = [["magpie.maskEmails", ["#rtMask", "#usageMask"]], ["magpie.maskProviders", ["#pvMask"]]].map(([k, bs]) => {
+    let c = null;
+    try { c = localStorage.getItem(k); } catch {}
+    return { k, c, on: c === "1", btns: mode === "panel" ? [] : bs.map((b) => $(b)).filter(Boolean) };
+  });
+  // one who chose before Providers had its own keeps that choice there
+  if (sw[1].c === null && sw[0].c !== null) { Object.assign(sw[1], { c: sw[0].c, on: sw[0].on }); try { localStorage.setItem(sw[1].k, sw[1].c); } catch {} }
+  const cur = () => sw[+(mode !== "panel" && view === "providers")];
+  let masked = false;
+  const page = (() => {
+    const view = document.body;
     function mask(root = view) {
       const all = finder(), reOf = (e) => e?.closest(NAMELESS) ? EMAIL : all;
       const walk = document.createTreeWalker(root, NodeFilter.SHOW_TEXT), found = [];
@@ -24356,56 +24362,56 @@ window.noteAccounts = noteAccounts;
       for (const e of roots) if (![...roots].some((o) => o !== e && o.contains(e))) mask(e);
       watch.observe(view, OBS);
     });
-    const btns = bs.map((b) => $(b)).filter(Boolean);
-    for (const btn of btns) btn.onclick = () => {
-      setMasked(!masked);
-      // pixelated in when asked for, not again each time the page redraws
-      view.classList.add("masking");
-      clearTimeout(btn._t);
-      btn._t = setTimeout(() => view.classList.remove("masking"), 450);
-    };
     return (on) => {
-      for (const btn of btns) {
-        btn.setAttribute("aria-pressed", String(on));
-        // what it is now, in its icon and its words: an open eye while the
-        // accounts show, struck through once they're hidden
-        btn.querySelector("path").setAttribute("d", on ? EYE_OFF : EYE);
-        const label = btn.querySelector("[data-t]");
-        label.dataset.en = on ? "Accounts hidden" : "Hide accounts";
-        label.textContent = t(label.dataset.en);
-        // and how to have them back, for one who never turned it on (#653)
-        btn.dataset.enTitle = on ? "Accounts are masked for a screenshot — click to show them"
-          : "Mask the accounts on this page — email addresses and account names — for a screenshot to share";
-        btn.title = t(btn.dataset.enTitle);
-      }
+      masked = on;
       view.classList.toggle("masked", on);
       // a name learnt since it was masked: hidden afresh
       if (on) { watch.disconnect(); unmask(); mask(); watch.observe(view, OBS); }
       else { watch.disconnect(); unmask(); }
     };
-  });
-  function setMasked(on, keep) {
-    masked = on;
-    if (!keep) { chosen = on ? "1" : "0"; try { localStorage.setItem("magpie.maskEmails", chosen); } catch {} }
-    for (const set of pages) set(on);
+  })();
+  function setMasked(s, on, keep) {
+    s.on = on;
+    if (!keep) { s.c = on ? "1" : "0"; try { localStorage.setItem(s.k, s.c); } catch {} }
+    for (const btn of s.btns) {
+      btn.setAttribute("aria-pressed", String(on));
+      // what it is now, in its icon and its words: an open eye while the
+      // accounts show, struck through once they're hidden
+      btn.querySelector("path").setAttribute("d", on ? EYE_OFF : EYE);
+      const label = btn.querySelector("[data-t]");
+      label.dataset.en = on ? "Accounts hidden" : "Hide accounts";
+      label.textContent = t(label.dataset.en);
+      // and how to have them back, for one who never turned it on (#653)
+      btn.dataset.enTitle = on ? "Accounts are masked for a screenshot — click to show them"
+        : "Mask the accounts on this page — email addresses and account names — for a screenshot to share";
+      btn.title = t(btn.dataset.enTitle);
+    }
+    page(cur().on);
   }
+  for (const s of sw) for (const btn of s.btns) btn.onclick = () => {
+    setMasked(s, !s.on);
+    // pixelated in when asked for, not again each time the page redraws
+    document.body.classList.add("masking");
+    clearTimeout(btn._t);
+    btn._t = setTimeout(() => document.body.classList.remove("masking"), 450);
+  };
   const kin = (u, pid) => {
     const k = [u];
     for (const p of providers?.providers || []) if (p.id === pid) for (const m of [p.accountNames, p.accountUsers]) for (const [a, n] of Object.entries(m || {})) if (a === low(u) || n === u) k.push(a, n);
     for (const q of quotas || []) if (q.provider === pid && (q.user === u || q.alias === u)) k.push(q.user, q.alias);
     return k.filter(Boolean).map((x) => sk(pid, x));
   };
-  const paint = (b) => {
+  const paintEye = (b) => {
     const on = shown.has(sk(b._p, b._u));
     b.setAttribute("aria-pressed", on);
     b.title = t(on ? "Hide this account" : "Show this account");
     b.querySelector("path").setAttribute("d", on ? EYE : EYE_OFF);
   };
   const redraw = () => {
-    document.querySelectorAll(".acct-eye").forEach(paint);
-    if (masked) for (const set of pages) set(true);
+    document.querySelectorAll(".acct-eye").forEach(paintEye);
+    if (masked) page(true);
   };
-  // Settings' Privacy has the same switch, and the settings follow
+  // Settings' Privacy has the first switch, and the settings follow
   window.hideAccounts = {
     eye: (u, p) => {
       const b = el("button", "acct-eye");
@@ -24414,7 +24420,7 @@ window.noteAccounts = noteAccounts;
       b.setAttribute("aria-label", t("Show this account"));
       b.append(svg("", 13, 2));
       b.firstChild.setAttribute("viewBox", "0 0 24 24");
-      paint(b);
+      paintEye(b);
       b.onclick = (e) => {
         e.stopPropagation();
         const on = !shown.has(sk(p, u));
@@ -24426,17 +24432,21 @@ window.noteAccounts = noteAccounts;
     // the window closed (hideMain) or the panel put away: every account
     // hidden again
     closed: () => { if (shown.size) { shown.clear(); redraw(); } },
-    on: () => masked,
-    set: (on) => setMasked(on),
-    follow: (personal) => { if (chosen === null && personal !== masked) setMasked(personal, true); },
+    on: () => sw[0].on,
+    // all: personal data masked from now, so every page's switch too
+    set: (on, all) => { for (const s of all ? sw : [sw[0]]) setMasked(s, on); },
+    follow: (personal) => { for (const s of sw) if (s.c === null && personal !== s.on) setMasked(s, personal, true); },
+    // another page in sight: its own switch
+    page: () => { if (cur().on !== masked) page(cur().on); },
   };
   // turned in the window: the tray panel (or another window) follows
   window.addEventListener("storage", (e) => {
-    if (e.key !== "magpie.maskEmails") return;
-    chosen = e.newValue;
-    if ((e.newValue === "1") !== masked) setMasked(e.newValue === "1", true);
+    const s = sw.find((x) => x.k === e.key);
+    if (!s) return;
+    s.c = e.newValue;
+    if ((e.newValue === "1") !== s.on) setMasked(s, e.newValue === "1", true);
   });
-  setMasked(masked, true);
+  for (const s of sw) setMasked(s, s.on, true);
 })();
 
 // Opened on a magpie://import link: fetch what it describes (once — the

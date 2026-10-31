@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/filememo"
 )
 
@@ -26,7 +27,7 @@ import (
 
 // LivePath is where the fetched model list of one provider is kept.
 func LivePath(provider string) string {
-	return filepath.Join(filepath.Dir(CachePath()), "models", provider+".json")
+	return appdir.JoinFile(appdir.Join(filepath.Dir(CachePath()), "models"), provider, ".json")
 }
 
 type liveFile struct {

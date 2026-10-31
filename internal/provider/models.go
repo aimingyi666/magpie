@@ -1580,7 +1580,8 @@ func (p Provider) ExposedOf(avail []catalog.Model) []catalog.Model {
 		picks = slices.DeleteFunc(slices.Clone(picks), p.Account.unusable)
 	}
 	if len(picks) > 0 {
-		return slices.DeleteFunc(pick(p.withNewlyListed(picks, avail)), func(m catalog.Model) bool { return p.NoAPIFor(m.ID) })
+		noAPI := p.NoAPI()
+		return slices.DeleteFunc(pick(p.withNewlyListed(picks, avail)), func(m catalog.Model) bool { return noAPI(m.ID) })
 	}
 	// a model listed on none of the APIs the provider has a URL for is
 	// left out before the first 24 are taken (#2094)
@@ -1601,7 +1602,8 @@ func (p Provider) ExposedOf(avail []catalog.Model) []catalog.Model {
 
 // servable is avail less the models NoAPIFor leaves out.
 func (p Provider) servable(avail []catalog.Model) []catalog.Model {
-	return slices.DeleteFunc(slices.Clone(avail), func(m catalog.Model) bool { return p.NoAPIFor(m.ID) })
+	noAPI := p.NoAPI()
+	return slices.DeleteFunc(slices.Clone(avail), func(m catalog.Model) bool { return noAPI(m.ID) })
 }
 
 // NewestInFamily is the models Best in family would serve of avail, the
@@ -1612,6 +1614,33 @@ func (p Provider) NewestInFamily(avail []catalog.Model) []catalog.Model {
 	return catalog.BestInFamily(p.servable(avail))
 }
 
+// Listing is a provider's models as the Providers page draws them: the
+// vendor's list (Available), what of it is exposed (ExposedOf) and the
+// newest of each family (NewestInFamily).
+type Listing struct{ Available, Exposed, Newest []catalog.Model }
+
+// Listing is p's Listing, built afresh.
+func (p Provider) Listing() Listing {
+	avail := p.Available()
+	return Listing{avail, p.ExposedOf(avail), p.NewestInFamily(avail)}
+}
+
+// KeptListing is the Listing of a provider All gave, kept across requests
+// with the catalog (keptOf) while nothing it is built from changed: each
+// poll of the Providers page built every provider's list and its newest
+// of each family again, 9 MB a poll in a real setup. What it gives is
+// shared, so read only.
+func KeptListing(p Provider) Listing {
+	return keptOf("listing:"+p.ID, func() Listing {
+		listingsBuilt.Add(1)
+		l := p.Listing()
+		return Listing{slices.Clip(l.Available), slices.Clip(l.Exposed), slices.Clip(l.Newest)}
+	})
+}
+
+// listingsBuilt counts the Listings KeptListing built, for a test.
+var listingsBuilt atomic.Int64
+
 // NoAPIFor says the provider has a URL for none of the APIs the vendor's
 // list serves model on (or the one the user set for it): a relay's Claude
 // listed on /messages alone, at a provider given only a chat URL. Agents
@@ -1619,16 +1648,23 @@ func (p Provider) NewestInFamily(avail []catalog.Model) []catalog.Model {
 // a provider of keys, whose URLs the user typed: a sign-in's APIs are
 // magpie's own. A model whose list says no API, and a provider with no URL
 // at all, are never left out here.
-func (p Provider) NoAPIFor(model string) bool {
+func (p Provider) NoAPIFor(model string) bool { return p.NoAPI()(model) }
+
+// NoAPI is NoAPIFor for each model of a list: the APIs the provider has a
+// URL for are found once for the list, not once for each model (they were
+// most of what NoAPIFor allocated, 16 MB of twenty window polls).
+func (p Provider) NoAPI() func(model string) bool {
 	if p.Account != nil {
-		return false
-	}
-	apis := p.APIs(model)
-	if len(apis) == 0 {
-		return false
+		return func(string) bool { return false }
 	}
 	speaks := p.Speaks()
-	return len(speaks) > 0 && !slices.ContainsFunc(speaks, func(s Protocol) bool { return slices.Contains(apis, s) })
+	if len(speaks) == 0 {
+		return func(string) bool { return false }
+	}
+	return func(model string) bool {
+		apis := p.apisAmong(speaks, model)
+		return len(apis) > 0 && !slices.ContainsFunc(speaks, func(s Protocol) bool { return slices.Contains(apis, s) })
+	}
 }
 
 // Picks are the models the user picked, with those the vendor has listed
@@ -2743,7 +2779,11 @@ func SubscriptionKept(e Entry) bool {
 // catalogKeeping is Catalog with the unlisted models keep says, too.
 func catalogKeeping(keep func(Entry) bool) []Entry {
 	entries := providerEntries()
-	out := slices.Clone(groupEntries(entries)) // held: the caller's to change
+	groups := groupEntries(entries) // held: copied into the caller's own
+	// made once with room for every entry: cloned at the groups' size and
+	// grown by append for the providers' models, it was 29 MB of what forty
+	// polls of the Providers page allocated with real accounts
+	out := append(make([]Entry, 0, len(groups)+len(entries)), groups...)
 	kept := unlistedByGroups(entries)
 	for _, e := range entries {
 		if !e.Provider.Unlisted && len(kept[e.ID]) == 0 || keep != nil && keep(e) {
@@ -2784,8 +2824,12 @@ func unlistedByGroups(entries []Entry) map[string][]string {
 // names: a provider's editor names them, as a model its own switch put
 // back for agents is still left out by them. A signed-in subscription's
 // models, which agents keep (SubscriptionKept), aren't among them.
+// Held as MemberGroups is: shared, only for reading.
 func GroupKept() map[string][]string {
-	entries := providerEntries()
+	return heldFrom("group-kept", providerEntries(), groupKeptIn)
+}
+
+func groupKeptIn(entries []Entry) map[string][]string {
 	kept := unlistedByGroups(entries)
 	if len(kept) == 0 {
 		return nil
@@ -3266,7 +3310,7 @@ func SetModelOutput(id string, n int) error {
 // model id, "*" for all of them: what its editor's Max output shows.
 func OutputsOf(providerID string) map[string]int {
 	out := map[string]int{}
-	for k, n := range settings.Load().ModelOutputs {
+	for k, n := range settings.Shared().ModelOutputs {
 		if model, ok := strings.CutPrefix(k, providerID+"/"); ok && model != "" && n > 0 {
 			out[model] = n
 		}

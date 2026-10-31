@@ -30,7 +30,15 @@ const RoutingGroups = "Routing groups"
 // provider. Built again only when provider.StampNow moved, or
 // magpieModelsFor after it was; each caller is given its own copy.
 func viaMagpie(agent, prefix string) []Option {
-	return builtOptions.get(agent+"\x00"+prefix, func() []Option { return buildVia(agent, prefix) })
+	return slices.Clone(viaMagpieShared(agent, prefix))
+}
+
+// viaMagpieShared is viaMagpie without a copy of its own, for a caller
+// that only reads it or appends it onto a list of its own: a copy for each
+// of an agent's fields was 42 MB of what twenty window polls allocated.
+// An append onto it makes a copy, but its Options are never written into.
+func viaMagpieShared(agent, prefix string) []Option {
+	return builtOptions.shared(agent+"\x00"+prefix, func() []Option { return buildVia(agent, prefix) })
 }
 
 // builtOptions is what viaMagpie built last, per agent and prefix. Each
@@ -202,6 +210,15 @@ func magpieModels(agent string) []catalog.Model {
 	return builtModels.get(agent, func() []catalog.Model { return buildModels(agent) })
 }
 
+// sharedModels is magpieModels without the caller's own copy, for one
+// that only reads it: a range over it copies each model, so it can't
+// write into the list kept. A copy per call was 37 MB of what forty polls
+// of the window allocated with real accounts, most of it Pi's and Claude
+// Code's thinking levels, read per field.
+func sharedModels(agent string) []catalog.Model {
+	return builtModels.shared(agent, func() []catalog.Model { return buildModels(agent) })
+}
+
 // builtModels is what magpieModels built last, per agent. The window asks
 // /api/drift every 15s, and each agent's Drift asked for its list again
 // per field, each built whole with its prices and Vision's ranking of the
@@ -223,6 +240,11 @@ type stampedList[T any] struct {
 }
 
 func (s *stampedLists[T]) get(key string, build func() []T) []T {
+	return slices.Clone(s.shared(key, build))
+}
+
+// shared is get without the caller's own copy: the list kept, read only.
+func (s *stampedLists[T]) shared(key string, build func() []T) []T {
 	s.Lock()
 	b, ok := s.m[key]
 	s.Unlock()
@@ -238,7 +260,7 @@ func (s *stampedLists[T]) get(key string, build func() []T) []T {
 		s.m[key] = b
 		s.Unlock()
 	}
-	return slices.Clone(b.list)
+	return slices.Clip(b.list)
 }
 
 // magpieModelsFor is how long a list is kept while provider.StampNow says

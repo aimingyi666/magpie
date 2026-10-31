@@ -289,6 +289,8 @@ func pluginCatalog(pp plugin.Provider) []catalog.Model {
 			APIs: []string{string(pluginProtocol(pp.ID, m))}, Images: m.Image,
 			Context: catalog.Window(m.Input), Output: m.Output, Free: m.Free,
 			Rate: m.Rate, RateWas: m.RateWas,
+			// the model's own sampling, as its plugin said it (#2492)
+			Temperature: m.Temperature,
 			// a decision model the plugin marked counts only where it
 			// serves a decision API (pp.Decide)
 			Decides: pp.Decide && m.Decides,
@@ -473,7 +475,9 @@ func pluginProviderServing(pp plugin.Provider, l pluginLogin, keys []string) Pro
 		// them (#404): the plugin's own rewrite would leave them out; and
 		// a plain agent_message goes as the user's message, as the plugin
 		// itself sends it from 0.1.11. A lone tool_choice "none" stays,
-		// for the plugin to read (grokPluginBody, #3110)
+		// and so does a tool_choice object Grok's backend doesn't take (an
+		// allowed_tools names the client's tools), for the plugin to read
+		// (grokPluginBody, #3110, #3153)
 		a.body = grokPluginBody
 	}
 	if pp.ID == "zed" {

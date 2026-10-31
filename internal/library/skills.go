@@ -1909,6 +1909,9 @@ func removeSkill(l *Library, name, stamp string) error {
 	for _, p := range l.Projects {
 		delete(p.Skills, name)
 	}
+	// a group the user put it in is its, not its name's: another skill
+	// called so later is not in it
+	l.pruneSkillGroups()
 	return nil
 }
 
@@ -2206,8 +2209,14 @@ func importSkill(l *Library, found []FoundSkill, name string) error {
 		return err
 	}
 	// where it came from is told before it is moved: a copy leaves its
-	// .git behind, and the skills CLI's lock names it where it was
-	from := (&tracer{}).folder(f.real)
+	// .git behind, and the skills CLI's lock names it where it was, or
+	// names a copy it gave the agent when the CLI wrote that very folder
+	// (lockRepo), kept as From so an edit made later leaves it grouped
+	tr := &tracer{}
+	from := tr.folder(f.real)
+	if from == "" && f.Library == "" && f.Link == "" && !linked(f.at) {
+		from = tr.lockRepo(name, f.real)
+	}
 	src := &Source{Kind: "folder", Dir: f.real}
 	// one in the shared ~/.agents/skills (or a link into it) stays
 	// there, linked to: the shared folder is the user's, never emptied

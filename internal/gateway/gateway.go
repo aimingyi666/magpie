@@ -830,6 +830,9 @@ func (s *Server) routes() *routeMux {
 	mux.HandleFunc("POST "+KeysPath, s.issueKey)
 	mux.HandleFunc("GET "+KeysPath, s.issuedKeys)
 	mux.HandleFunc("DELETE "+KeysPath+"/{id}", s.revokeIssuedKey)
+	// and one traded for an OIDC token, by a rule the user wrote
+	// (oidc_keys.go)
+	mux.HandleFunc("POST "+OIDCKeysPath, s.oidcIssueKey)
 	mux.HandleFunc("GET "+KeyPagePath, s.keyPage)
 	mux.HandleFunc("GET "+keyPageData, s.keyInfo)
 	// the Claude Code processes the Claude subscription runs, for magpie
@@ -1460,6 +1463,17 @@ func askedAt(id string) (string, string) {
 // whatever its plan, as the plugin alone knows a Go key.
 var estimatedMoved = []string{"cursor", "grok", "devin", "kiro", "qoder", "zed", "factory", "zcode", provider.CommandCodePlanID}
 
+// decisionModelRefused is what a conversation or a token count asked of
+// a decision model is told: it answers System One's questions alone.
+func decisionModelRefused(model string) string {
+	return fmt.Sprintf("%s only decides a routing group's model and effort; it holds no conversation", model)
+}
+
+// decisionGroupRefused is decisionModelRefused for a group of them.
+func decisionGroupRefused(g provider.Group) string {
+	return fmt.Sprintf("the routing group %s holds decision models: it only decides a routing group's model and effort, asked at /v1/systemone; it holds no conversation", g.Name)
+}
+
 // countTokens answers Anthropic's count_tokens: through the provider when
 // it implements counting, else a rough estimate. A failed connection or
 // limited key yields to the next key; other failures reach the client.
@@ -1496,6 +1510,18 @@ func (s *Server) countTokens(w http.ResponseWriter, r *http.Request) {
 	}
 	// nor on one the user disabled (#1867)
 	if countOff(w, provider.Anthropic, id) {
+		return
+	}
+	// nor on a decision model or a group of them, which hold no
+	// conversation: refused as the request itself would be, not sent to
+	// the vendor's count_tokens (coeo91 on Discord: OpenRouter refuses a
+	// decisions model anywhere but its decisions endpoint)
+	if ok && p.DecidesModel(model) {
+		writeError(w, provider.Anthropic, 400, decisionModelRefused(named))
+		return
+	}
+	if g, _, isGroup := provider.FindGroup(id); !ok && isGroup && g.Decides() {
+		writeError(w, provider.Anthropic, 400, decisionGroupRefused(g))
 		return
 	}
 	// Count the same masked prompt that generation sends to the vendor,
@@ -1841,13 +1867,15 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	var maskedHits maskHits
 	maskDone, sentWhole := false, false
 	unmask := func() {}
-	// the reply's model the member that answered, when asked for (#822).
-	// Both writers hold a whole body until the handler is done, the namer
+	askedFor := modelOf(body) // as it reaches serve, which an error in its stream names (keptAlive)
+	// the reply's model the one asked for when it went out under another
+	// name, or the member that answered, when asked for (#822). Both
+	// writers hold a whole body until the handler is done, the namer
 	// outside: the values are put back first, into the namer, and then it
 	// writes what it holds. The other way round it wrote nothing, and the
 	// values came back after it, into a buffer no one wrote: a 200 with
 	// an empty body whenever a value was masked (#4129)
-	w, r, named := withMemberNames(w, r)
+	w, r, named := withMemberNames(w, r, from, askedFor)
 	defer func() {
 		unmask()
 		named()
@@ -1858,7 +1886,6 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	wholeBodies := usage.ObservedBodies() == usage.WholeBodies
 	// a model asked for at an effort of its own (a Claude Code tier, #536)
 	// is the model, every try of it asked for that effort
-	askedFor := modelOf(body) // as it reaches serve, which an error in its stream names (keptAlive)
 	asked, askedEffort := askedAt(askedFor)
 	if askedEffort != "" {
 		body = rewriteModel(body, asked)
@@ -2079,7 +2106,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 		} else if g, _, ok := provider.FindGroup(asked); ok && g.Decides() {
 			// a group of decision models answers System One, not this
 			call.Status, call.Error = 400, "a decision group"
-			writeError(w, from, 400, fmt.Sprintf("the routing group %s holds decision models: it only decides a routing group's model and effort, asked at /v1/systemone; it holds no conversation", g.Name))
+			writeError(w, from, 400, decisionGroupRefused(g))
 			turnedAway()
 			return
 		} else if g, ok := emptyGroup(asked); ok {
@@ -2094,7 +2121,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	if p.DecidesModel(model) {
 		// Jev answers questions about a message, not the message
 		call.Status, call.Error = 400, "a decision model"
-		writeError(w, from, 400, fmt.Sprintf("%s only decides a routing group's model and effort; it holds no conversation", call.Model))
+		writeError(w, from, 400, decisionModelRefused(call.Model))
 		turnedAway()
 		return
 	}
@@ -2738,6 +2765,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 	// asked again (loopReasks); reasked, the times a translated one was
 	// asked again in place, tries the route doesn't list (#2436)
 	reloops, reasked := 0, 0
+	// the try whose plugin ended the turn on its upstream's stream dying
+	// mid-call (plugins#38), asked again where it stood (cutReasks, #2873)
+	cuts := 0
 	// ended is when the last try's reply ended: the request's ms end there,
 	// not after what magpie writes down of it once it has (#1939: sticks
 	// and the provider's last answer, saved to disk, took seconds on a busy
@@ -2759,6 +2789,9 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			}
 		}()
 	}
+	// the plan as it stands for the tries: whether the one that answers
+	// stood in for a member listed ahead of its own (standsInFor)
+	plannedCs, plannedOrder := slices.Clone(cands), pl.order
 	for i := 0; i < len(cands); i++ {
 		c := cands[i]
 		if j := s.laneMate(cands, i, isGroup, gaveWay); j > i {
@@ -3862,6 +3895,28 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
+		if !last && hw.failed() && failure(hw.code(), hw.errBody()) == failCut {
+			// a plugin ended the turn on purpose, its upstream's stream
+			// having died mid-call (plugins#38: "the gateway can retry or
+			// fail over"). Nobody rests: the parser reads the same but the
+			// cut doesn't come again, so the same one is asked again once,
+			// then the next member as any failure's is (#2873)
+			try.Fail = failCut
+			if other == nil {
+				other = &Try{Status: call.Status, Error: call.Error}
+			}
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			skipped = append(skipped, c.label()+": "+call.Error)
+			if cuts < cutReasks {
+				cuts++
+				select {
+				case <-time.After(retryPause):
+				case <-r.Context().Done():
+				}
+				i--
+			}
+			continue
+		}
 		if !last && hw.failed() {
 			if f := failure(hw.code(), hw.errBody()); other == nil && f != failQuota && f != failCredit {
 				other = &Try{Status: call.Status, Error: call.Error}
@@ -4139,7 +4194,7 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			// a compaction a rule sent to a model of its own leaves the
 			// conversation, and the turn's size, where they were
 			if hit == nil || !hit.Compact {
-				answered(stuck, c, aff.Turn, call.Usage)
+				answeredStanding(stuck, c, aff.Turn, call.Usage, standsInFor(c, plannedCs, plannedOrder))
 			}
 			// the trigger was kept, so whoever answered sealed it: a
 			// fallback whose own native compaction is off too, whose seal
@@ -4945,6 +5000,11 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			// for other backends (#1758)
 			break
 		}
+		if p.RejectsTemperature(model) {
+			// a model whose list refuses them (a plugin's temperature:
+			// false, #2492), as the translation of one leaves them out
+			body = withoutFields(body, "temperature", "top_p")
+		}
 		// Responses Lite's shape, its tools as an input item (#350) and its
 		// reasoning context, goes only to OpenAI; anyone else is sent what
 		// Codex sends a model that isn't Lite
@@ -4955,7 +5015,7 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 		if p.Account == nil || p.Account.Agent != "codex" {
 			body, searchFn = searchAsFunction(body)
 		}
-		body = forVendor(p, body)
+		body = forVendor(p, body, asksCompaction(r.Context()))
 		// Ark takes web_search in the shape its docs give (search_ark.go)
 		body = forArkSearch(p, body)
 		if replay {
@@ -4996,6 +5056,12 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			body = withoutLoneToolChoice(body)
 		}
 	case provider.Chat:
+		if p.RejectsTemperature(model) {
+			// a model whose list refuses them (a plugin's temperature:
+			// false, #2492): a translation leaves them out (build), so
+			// does the relay of one the provider understands as it came
+			body = withoutFields(body, "temperature", "top_p")
+		}
 		body = developerAsSystem(body)
 		// a content of text parts, which a vendor's server that takes a
 		// string alone turns the whole request away for (Atria on Discord)
@@ -5116,6 +5182,9 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 	if proto != provider.Anthropic {
 		body = s.withoutRefused(p.ID, proto, body)
 	}
+	// a member of Codex's passthrough the upstream turned away before
+	// (passthrough_refused.go)
+	body = s.withoutRefusedPassthrough(p.ID, proto, body)
 	// a conversation the client ended with the assistant's message, to a
 	// model that took no prefill before, is asked with a user turn after
 	// it (prefill.go, #1447)
@@ -5297,6 +5366,21 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 					return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
 				}
 				continue
+			}
+		}
+		if len(fs) == 0 && len(ms) == 0 && proto == provider.Responses {
+			// a member of Codex's passthrough metadata the backend doesn't
+			// know yet (passthrough_refused.go): asked once more without
+			// it, and not sent it again
+			if f, ok := refusedPassthrough(b); ok && s.fits(p.ID, passthroughRefused(f), proto) {
+				if nb, had := withoutPassthrough(body, f); had {
+					refused = append(refused, passthroughRefused(f))
+					body = nb
+					if res, err = s.forward(r.Context(), p, proto, path, p.Prepare(body), r.Header); err != nil {
+						return writeError(w, proto, 502, p.Name+": "+err.Error()), err.Error(), true
+					}
+					continue
+				}
 			}
 		}
 		if len(fs) == 0 && len(ms) == 0 && proto == provider.Responses && !replay && refusesReasoningText(res.StatusCode, b, body) {
@@ -5852,6 +5936,15 @@ func (s *Server) passthrough(w http.ResponseWriter, r *http.Request, p provider.
 			// reading it dies on its JSON before the error is reached
 			dropHalf()
 			w.Write(append(apart(), streamFailure(proto, failed)...))
+			if proto == provider.Chat && rerr != nil && rerr != io.EOF {
+				// a Chat stream the upstream severed ends on [DONE] too: a
+				// client that reads to it stops there and says the error it
+				// read, instead of waiting on a connection that only
+				// closes (#3197). One that ended cleanly ends at the error,
+				// as a cut reply is not to end as if whole
+				// (TestGeminiCompatRelayEndedShort).
+				w.Write([]byte("data: [DONE]\n\n"))
+			}
 			if f != nil {
 				f.Flush()
 			}
