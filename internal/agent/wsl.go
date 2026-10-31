@@ -63,6 +63,9 @@ type place struct {
 	// is. unreached keeps the first path it couldn't tell the way to.
 	reach     func(string) (string, error)
 	unreached *error
+	// chmod takes the group's and others' bits off a file under home, where
+	// magpie's own mode doesn't hold (a distro's: see ownerOnly); nil: here
+	chmod func(string) error
 }
 
 func here(home string) place { return place{home: home} }
@@ -387,7 +390,22 @@ func (d distro) place(id string) place {
 		kind = k
 	}
 	return place{home: d.local(d.Home), id: id, spell: d.native, sys: d.local, base: d.base, cold: !d.Running, version: d.Versions[kind],
-		reach: d.open, unreached: new(error)}
+		reach: d.open, unreached: new(error), chmod: d.chmod}
+}
+
+// chmod takes the group's and others' bits off local, a file in the distro
+// magpie opens, from inside it: a file written through \\wsl.localhost is
+// 0644 there whatever mode magpie asks for, and a key store so is refused.
+func (d distro) chmod(local string) error {
+	if _, err := os.Stat(local); err != nil {
+		return nil
+	}
+	// a failure is said in the log, not as the pick's: the route and the key
+	// are written, and the next pick or sync tries again
+	if out, err := wslRun(30*time.Second, "-d", d.Name, "-e", "chmod", "go-rwx", d.native(local)); err != nil {
+		log.Printf("chmod go-rwx %s in %s: %v %s", d.native(local), d.Name, err, strings.TrimSpace(string(out)))
+	}
+	return nil
 }
 
 // wslKind is an agent magpie looks for in a distro: what the probe finds
