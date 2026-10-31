@@ -3601,6 +3601,18 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			skipped = append(skipped, c.label()+": "+call.Error)
 			continue
 		}
+		if !last && hw.failed() && offlineFailure(c, hw.code(), hw.errBody()) {
+			// this computer has no network (usrname1833 on Discord): the
+			// request never reached the vendor, so this one doesn't rest,
+			// and is asked first again once the network is back
+			if other == nil {
+				other = &Try{Status: call.Status, Error: call.Error}
+			}
+			try.Fail = failOffline
+			s.trace.update(tr, func(t *Route) { t.Tries[len(t.Tries)-1] = try })
+			skipped = append(skipped, c.label()+": "+call.Error)
+			continue
+		}
 		if !last && hw.failed() && failureOf(c, hw.code(), hw.errBody()) == failAuth {
 			// the account's sign-in is gone, refused by Anthropic: no rest
 			// brings it back, so none is told; it is passed over until it
@@ -4105,6 +4117,11 @@ func (s *Server) serve(w http.ResponseWriter, r *http.Request, from provider.Pro
 			try.Fail = failPrompt
 		} else {
 			try.Fail = failureOf(c, call.Status, []byte(call.Error))
+			if offlineFailure(c, call.Status, []byte(call.Error)) {
+				// the last one left failed for want of a network
+				// (offline.go): told so, and it doesn't rest
+				try.Fail = failOffline
+			}
 			if try.Fail == failVerify && !held || strictAlone {
 				// the last one left rests too, for the app to show and the
 				// next requests to be held
@@ -4474,6 +4491,7 @@ func (s *Server) forward(ctx context.Context, p provider.Provider, to provider.P
 	defer func() {
 		if err == nil {
 			heardReply(ctx, p, res)
+			heardNet() // the network is up (offline.go)
 		}
 	}()
 	res, err = s.forwardOnce(ctx, p, to, path, body, in)

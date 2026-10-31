@@ -12230,14 +12230,19 @@ const signingOpen = () => signing?.state === "waiting" || signing?.state === "in
 let justAdded = ""; // the account that just came in, to greet it
 const accountToolsOpen = new Set(); // rows whose ⋯ is open
 
+// hasLogins: the subscription has an account signed in already
+const hasLogins = (agent) => (providers?.providers || []).some((p) => p.account?.agent === agent && p.account.logins?.length);
+
 // o: { user } signing that account in again, { proxy } the one picked to
 // sign in through (#1663): none picked, the one the account's requests go
 // through
 async function startSignIn(agent, risky, site, o = {}) {
   if (signingOpen()) api("signin/" + signing.id + "/cancel", {}).catch(() => {});
   if (signing?.behind) api("signin/" + signing.behind + "/cancel", {}).catch(() => {});
-  // an account Google may suspend is added only once that is said
-  if (subOf(agent)?.risk && !risky) {
+  // an account Google may suspend is added only once that is said, and
+  // said once: not again beside accounts already signed in, nor to sign
+  // one of them in again (the owner: "这里就不要显示可能被封禁了")
+  if (subOf(agent)?.risk && !risky && !o.user && !hasLogins(agent)) {
     signing = { agent, state: "risk", forUser: o.user, picked: o.proxy };
     renderProviders();
     return;
