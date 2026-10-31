@@ -1,0 +1,33 @@
+name: 同步上游
+
+on:
+  schedule:
+    - cron: "0 * * * *" # 每小时自动同步一次
+  workflow_dispatch: # 也可以在 Actions 页面手动触发
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: 检出仓库
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: 合并上游 main 并推送
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/yetone/magpie.git
+          git fetch upstream main
+          git merge --no-edit upstream/main
+          git push origin HEAD:main
