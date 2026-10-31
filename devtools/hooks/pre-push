@@ -1,0 +1,14 @@
+#!/usr/bin/env bash
+# 二开规则：禁止直接推送 main（防止与上游自动同步打架）
+while read local_ref local_sha remote_ref remote_sha; do
+  if [ "$remote_ref" = "refs/heads/main" ] && [ "$MAGPIE_MAIN_OK" != "1" ]; then
+    echo ""
+    echo "==== 已拦截：此仓库不允许直接推送 main ===="
+    echo "  新功能请用:   devtools\\new-feature.cmd 名字"
+    echo "  合并完成请用: devtools\\finish-feature.cmd"
+    echo "  确需绕过:     重试前设置 MAGPIE_MAIN_OK=1（或 --no-verify），请了解风险"
+    echo ""
+    exit 1
+  fi
+done
+exit 0
