@@ -251,6 +251,36 @@ export function loadConfig(env = process.env) {
       maxFields: integer(env, "ADMIN_USAGE_MAX_FIELDS", 256, 16, 1024),
       maxRangeDays: integer(env, "ADMIN_USAGE_MAX_RANGE_DAYS", 366, 1, 3660),
     },
+    notifications: {
+      pollIntervalMs: integer(
+        env,
+        "ADMIN_NOTIFICATION_OUTBOX_POLL_SECONDS",
+        30,
+        1,
+        3600,
+      ) * 1000,
+      leaseMs: integer(
+        env,
+        "ADMIN_NOTIFICATION_OUTBOX_LEASE_SECONDS",
+        60,
+        10,
+        3600,
+      ) * 1000,
+      maxAttempts: integer(
+        env,
+        "ADMIN_NOTIFICATION_OUTBOX_MAX_ATTEMPTS",
+        6,
+        1,
+        20,
+      ),
+      batchSize: integer(
+        env,
+        "ADMIN_NOTIFICATION_OUTBOX_BATCH_SIZE",
+        20,
+        1,
+        200,
+      ),
+    },
   };
 
   if (config.oidc.tokenAuthMethod !== "client_secret_basic"

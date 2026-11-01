@@ -15,6 +15,18 @@ import {
   normalizedApprovalPayload,
   riskForAction,
 } from "../src/approval.js";
+import {
+  NotificationDispatcher,
+  NotificationOutbox,
+  claimNotificationDelivery,
+  enqueueNotification,
+  enqueueOperationNotification,
+  markNotificationDelivering,
+  notificationTransportEvent,
+  publicNotificationDelivery,
+  recoverExpiredNotificationLeases,
+  stableErrorCode,
+} from "../src/notification-outbox.js";
 
 const CALLBACK_SECRET = "approval-callback-test-secret-0000000001";
 const CALLBACK_ISSUER = "https://approval.corp.example";
@@ -851,6 +863,7 @@ async function fixture(options = {}) {
         callbackSecret,
       },
       async close() {
+        await admin.notificationDispatcher?.stop();
         await close(admin.server);
         await close(oidc.server);
         await close(auth.server);
@@ -858,6 +871,7 @@ async function fixture(options = {}) {
       },
     };
   } catch (error) {
+    await admin?.notificationDispatcher?.stop();
     if (admin?.server?.listening) await close(admin.server);
     if (oidc?.server?.listening) await close(oidc.server);
     if (auth?.server?.listening) await close(auth.server);
@@ -5012,4 +5026,496 @@ test("a malformed admin store is not treated as empty", async () => {
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }
+});
+
+function notificationEvent(overrides = {}) {
+  return {
+    eventId: `evt_test_${crypto.randomUUID()}`,
+    eventType: "approval.requested",
+    severity: "warning",
+    occurredAt: "2026-11-02T00:00:00.000Z",
+    organizationId: "env_test",
+    actorSubjectId: "adm_test",
+    actorEmail: "admin@corp.example",
+    targetType: "user",
+    targetId: "usr_alice",
+    targetOrgUnitId: "org-platform",
+    operationId: "op_test",
+    requestId: "req_test",
+    errorCode: "",
+    summary: "Approval request needs review",
+    token: "must-not-be-persisted",
+    prompt: "must-not-be-persisted",
+    transportResponse: "must-not-be-persisted",
+    ...overrides,
+  };
+}
+
+async function createNotificationStore(t) {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-notification-outbox-"));
+  const file = path.join(temp, "admin-store.json");
+  const store = new JsonStore(file);
+  await store.load();
+  t.after(() => fs.rm(temp, { recursive: true, force: true }));
+  return { temp, file, store };
+}
+
+test("NOTIFY-01a outbox deduplicates event IDs and persists only allowlisted data", async (t) => {
+  const { store } = await createNotificationStore(t);
+  const event = notificationEvent();
+
+  const first = await store.mutate((data) => enqueueNotification(data, event));
+  const duplicate = await store.mutate((data) => enqueueNotification(data, {
+    ...event,
+    summary: "A duplicate must not replace the original event",
+  }));
+  assert.equal(first.inserted, true);
+  assert.equal(duplicate.inserted, false);
+  assert.equal(duplicate.delivery.deliveryId, first.delivery.deliveryId);
+  assert.equal(duplicate.delivery.summary, "Approval request needs review");
+
+  const data = await store.read((current) => structuredClone(current));
+  assert.equal(Object.keys(data.notificationDeliveries).length, 1);
+  const delivery = Object.values(data.notificationDeliveries)[0];
+  assert.equal(delivery.dataClassification, "L0");
+  assert.equal(delivery.schemaVersion, 1);
+  assert.equal(delivery.status, "pending");
+  assert.equal(delivery.attemptCount, 0);
+  assert.equal(delivery.token, undefined);
+  assert.equal(delivery.prompt, undefined);
+  assert.equal(delivery.transportResponse, undefined);
+  assert.deepEqual(notificationTransportEvent(delivery), publicNotificationDelivery(delivery));
+  assert.ok(!JSON.stringify(publicNotificationDelivery(delivery)).includes("must-not-be-persisted"));
+});
+
+test("NOTIFY-01a operation events map failure and partial success safely", () => {
+  const data = { notificationDeliveries: {} };
+  const failed = enqueueOperationNotification(data, {
+    id: "op_failed",
+    status: "failed",
+    updatedAt: "2026-11-02T00:00:00.000Z",
+    targetType: "user",
+    targetId: "usr_alice",
+    targetOrgUnitId: "org-platform",
+    actorSubjectId: "adm_worker",
+    actorEmail: "worker@corp.example",
+    requestId: "req_failed",
+    errorCode: "dependency_unavailable",
+  });
+  assert.equal(failed.delivery.eventType, "operation.failed");
+  assert.equal(failed.delivery.severity, "critical");
+  assert.match(failed.delivery.summary, /dependency_unavailable/);
+
+  const partial = enqueueOperationNotification(data, {
+    id: "op_partial",
+    status: "succeeded",
+    updatedAt: "2026-11-02T00:01:00.000Z",
+    responseBody: { result: { state: "partial_success" } },
+    targetType: "credential",
+    targetId: "key_alice",
+    targetOrgUnitId: "org-platform",
+  });
+  assert.equal(partial.delivery.eventType, "operation.partial_success");
+  assert.equal(partial.delivery.severity, "warning");
+  assert.equal(Object.keys(data.notificationDeliveries).length, 2);
+});
+
+test("NOTIFY-01a dispatcher retries transient failures and dead-letters stable failures", async (t) => {
+  const { store } = await createNotificationStore(t);
+  const start = new Date("2026-11-02T00:00:00.000Z");
+  let clock = new Date(start);
+  const now = () => new Date(clock);
+  let calls = 0;
+  const dispatcher = new NotificationDispatcher(store, {
+    transport: async () => {
+      calls += 1;
+      if (calls === 1) {
+        const error = new Error("timed out");
+        error.code = "ETIMEDOUT";
+        throw error;
+      }
+      const error = new Error("upstream unavailable");
+      error.statusCode = 503;
+      throw error;
+    },
+    leaseMs: 60000,
+    pollIntervalMs: 60000,
+    batchSize: 2,
+    now,
+  });
+  const outbox = new NotificationOutbox(store, { maxAttempts: 2, now });
+  await store.mutate((data) => outbox.enqueue(data, notificationEvent()));
+
+  const first = await dispatcher.dispatchOnce();
+  assert.deepEqual(first, { claimed: 1, delivered: 0, failed: 1 });
+  let delivery = await store.read((data) => structuredClone(
+    Object.values(data.notificationDeliveries)[0],
+  ));
+  assert.equal(delivery.status, "retry_wait");
+  assert.equal(delivery.attemptCount, 1);
+  assert.equal(delivery.lastErrorCode, "transport_timeout");
+  assert.equal(delivery.nextAttemptAt, "2026-11-02T00:01:00.000Z");
+
+  clock = new Date("2026-11-02T00:01:00.001Z");
+  const second = await dispatcher.dispatchOnce();
+  assert.deepEqual(second, { claimed: 1, delivered: 0, failed: 1 });
+  delivery = await store.read((data) => structuredClone(
+    Object.values(data.notificationDeliveries)[0],
+  ));
+  assert.equal(delivery.status, "dead_letter");
+  assert.equal(delivery.attemptCount, 2);
+  assert.equal(delivery.lastErrorCode, "transport_server_error");
+  assert.equal(delivery.nextAttemptAt, "");
+  assert.deepEqual(
+    await dispatcher.dispatchOnce(),
+    { claimed: 0, delivered: 0, failed: 0 },
+  );
+  assert.equal(calls, 2);
+
+  const abort = new Error("aborted");
+  abort.name = "AbortError";
+  assert.equal(stableErrorCode(abort), "transport_timeout");
+  assert.equal(stableErrorCode({ statusCode: 429 }), "transport_rate_limited");
+  assert.equal(stableErrorCode({ statusCode: 400 }), "transport_rejected");
+  assert.equal(stableErrorCode({ code: "ECONNREFUSED" }), "transport_unavailable");
+});
+
+test("NOTIFY-01a dispatcher serializes work and recovers an expired lease after restart", async (t) => {
+  const { file, store } = await createNotificationStore(t);
+  const start = new Date("2026-11-02T00:00:00.000Z");
+  let clock = new Date(start);
+  let calls = 0;
+  let releaseTransport;
+  const gate = new Promise((resolve) => {
+    releaseTransport = resolve;
+  });
+  const dispatcher = new NotificationDispatcher(store, {
+    transport: async () => {
+      calls += 1;
+      await gate;
+    },
+    now: () => new Date(clock),
+  });
+  await store.mutate((data) => enqueueNotification(data, notificationEvent()));
+
+  const first = dispatcher.dispatchOnce();
+  for (let index = 0; index < 100 && calls === 0; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.equal(calls, 1);
+  const second = dispatcher.dispatchOnce();
+  releaseTransport();
+  await Promise.all([first, second]);
+  assert.equal(calls, 1);
+  let delivered = await store.read((data) => structuredClone(
+    Object.values(data.notificationDeliveries)[0],
+  ));
+  assert.equal(delivered.status, "delivered");
+  assert.equal(delivered.attemptCount, 1);
+
+  const leasedEvent = notificationEvent({ eventId: `evt_lease_${crypto.randomUUID()}` });
+  await store.mutate((data) => {
+    enqueueNotification(data, leasedEvent, { maxAttempts: 3 });
+    const delivery = Object.values(data.notificationDeliveries)
+      .find((candidate) => candidate.eventId === leasedEvent.eventId);
+    claimNotificationDelivery(data, {
+      now: clock,
+      ownerId: "worker-before-restart",
+      leaseMs: 1000,
+    });
+    assert.equal(delivery.status, "leased");
+  });
+
+  const reloaded = new JsonStore(file);
+  await reloaded.load();
+  const recoveredAt = new Date(clock.getTime() + 2000);
+  const recovered = await new NotificationOutbox(reloaded, {
+    maxAttempts: 3,
+    now: () => new Date(recoveredAt),
+  }).recoverExpired();
+  assert.equal(recovered, 1);
+  const recoveredDelivery = await reloaded.read((data) => structuredClone(
+    Object.values(data.notificationDeliveries)
+      .find((candidate) => candidate.eventId === leasedEvent.eventId),
+  ));
+  assert.equal(recoveredDelivery.status, "retry_wait");
+  assert.equal(recoveredDelivery.lastErrorCode, "lease_expired");
+  assert.equal(recoveredDelivery.leaseOwner, "");
+  const reclaimed = await reloaded.mutate((data) => claimNotificationDelivery(data, {
+    now: recoveredAt,
+    ownerId: "worker-after-restart",
+    leaseMs: 1000,
+  }));
+  assert.equal(reclaimed.eventId, leasedEvent.eventId);
+  assert.equal(reclaimed.attemptCount, 2);
+  assert.equal(reclaimed.leaseOwner, "worker-after-restart");
+  assert.equal(markNotificationDelivering(
+    await reloaded.read((data) => structuredClone(data)),
+    reclaimed.deliveryId,
+    "worker-after-restart",
+    { now: recoveredAt, leaseMs: 1000 },
+  ), true);
+  assert.equal(recoverExpiredNotificationLeases(
+    await reloaded.read((data) => structuredClone(data)),
+    { now: new Date(recoveredAt.getTime() + 500) },
+  ), 0);
+});
+
+test("NOTIFY-01a approval and operation events commit with their business audit state", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  assert.equal(f.admin.notificationDispatcher, null);
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "Notification outbox integration test",
+  });
+  let data = await readAdminData(f);
+  const requestedEvent = Object.values(data.notificationDeliveries)
+    .find((delivery) => delivery.eventId === `evt_approval_requested_${approval.approvalId}`);
+  assert.ok(requestedEvent);
+  assert.equal(requestedEvent.eventType, "approval.requested");
+  assert.equal(requestedEvent.targetOrgUnitId, "org-platform");
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "approval.requested" && audit.approvalId === approval.approvalId));
+
+  await decideApproval(f, approver, approval.approvalId);
+  data = await readAdminData(f);
+  const approvedEvent = Object.values(data.notificationDeliveries)
+    .find((delivery) => delivery.eventId === `evt_approval_approved_${approval.approvalId}`);
+  assert.ok(approvedEvent);
+  assert.equal(approvedEvent.eventType, "approval.approved");
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "approval.approved" && audit.approvalId === approval.approvalId));
+
+  const succeeded = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/disable",
+    {
+      reason: "Notification outbox integration test",
+      approvalId: approval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "notify-01a-success" },
+  );
+  assert.equal(succeeded.response.status, 200, JSON.stringify(succeeded.body));
+  data = await readAdminData(f);
+  const operation = data.adminOperations[succeeded.body.operationId];
+  assert.equal(operation.status, "succeeded");
+  const resultAudit = data.adminAuditLogs.find((audit) =>
+    audit.operationId === operation.id && audit.phase === "result");
+  assert.equal(resultAudit.id, operation.resultAuditId);
+  assert.ok(data.notificationDeliveries[`ntd_${crypto.createHash("sha256")
+    .update(`evt_approval_consumed_${approval.approvalId}`)
+    .digest("hex")
+    .slice(0, 32)}`]);
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "approval.consumed" && audit.operationId === operation.id));
+
+  const failingApproval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Notification failure integration test",
+  });
+  await decideApproval(f, approver, failingApproval.approvalId);
+  f.auth.setWriteFailing(true);
+  const failed = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/disable",
+    {
+      reason: "Notification failure integration test",
+      approvalId: failingApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "notify-01a-failure" },
+  );
+  assert.equal(failed.response.status, 502, JSON.stringify(failed.body));
+  data = await readAdminData(f);
+  const failedOperation = data.adminOperations[failed.body.error.operationId];
+  assert.equal(failedOperation.status, "failed");
+  const failedAudit = data.adminAuditLogs.find((audit) =>
+    audit.operationId === failedOperation.id && audit.phase === "result");
+  assert.equal(failedAudit.id, failedOperation.resultAuditId);
+  const failedEvent = Object.values(data.notificationDeliveries)
+    .find((delivery) => delivery.operationId === failedOperation.id
+      && delivery.eventType === "operation.failed");
+  assert.ok(failedEvent);
+  assert.equal(failedEvent.targetOrgUnitId, "org-platform");
+  assert.equal(failedEvent.errorCode, "dependency_unavailable");
+  assert.equal(failedEvent.status, "pending");
+});
+
+test("NOTIFY-01a notification APIs enforce scope, CSRF, idempotency and safe projections", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const superJar = await adminLogin(f);
+  const superCurrent = await me(f, superJar);
+  const department = await independentApprover(f, {
+    role: "department_admin",
+    scopeOrgUnitId: "org-root",
+  });
+
+  const eventRoot = notificationEvent({
+    eventId: "evt_notify_api_root",
+    targetOrgUnitId: "org-root",
+    summary: "Root notification",
+  });
+  const eventSales = notificationEvent({
+    eventId: "evt_notify_api_sales",
+    targetOrgUnitId: "org-sales",
+    summary: "Sales notification",
+  });
+  await f.admin.store.mutate((data) => {
+    for (const event of [eventRoot, eventSales]) {
+      const { delivery } = enqueueNotification(data, event);
+      delivery.status = "dead_letter";
+      delivery.attemptCount = delivery.maxAttempts;
+      delivery.nextAttemptAt = "";
+      delivery.lastErrorCode = "transport_server_error";
+      delivery.prompt = "must-not-leak";
+      delivery.transportResponse = "must-not-leak";
+      delivery.token = "must-not-leak";
+    }
+  });
+
+  const scoped = await adminGet(
+    f,
+    department.jar,
+    "/api/v1/admin/notifications/deliveries",
+  );
+  assert.equal(scoped.response.status, 200);
+  assert.equal(scoped.body.count, 1);
+  assert.equal(scoped.body.deliveries[0].summary, "Root notification");
+  assert.ok(!JSON.stringify(scoped.body).includes("must-not-leak"));
+
+  const all = await adminGet(
+    f,
+    superJar,
+    "/api/v1/admin/notifications/deliveries?status=dead_letter&limit=1",
+  );
+  assert.equal(all.response.status, 200);
+  assert.equal(all.body.count, 1);
+  assert.equal(all.body.limit, 1);
+  const invalidStatus = await adminGet(
+    f,
+    superJar,
+    "/api/v1/admin/notifications/deliveries?status=bogus",
+  );
+  assert.equal(invalidStatus.response.status, 400);
+  assert.equal(invalidStatus.body.error.code, "invalid_notification_status");
+  const invalidLimit = await adminGet(
+    f,
+    superJar,
+    "/api/v1/admin/notifications/deliveries?limit=0",
+  );
+  assert.equal(invalidLimit.response.status, 400);
+  assert.equal(invalidLimit.body.error.code, "invalid_limit");
+
+  const rootDelivery = scoped.body.deliveries[0];
+  const replayPath = `/api/v1/admin/notifications/deliveries/${rootDelivery.deliveryId}/retry`;
+  const forbidden = await adminPost(
+    f,
+    department.jar,
+    replayPath,
+    { reason: "Department administrators cannot replay" },
+    department.current.body.csrfToken,
+    { "idempotency-key": "notify-department-replay" },
+  );
+  assert.equal(forbidden.response.status, 403);
+
+  const noCsrf = await adminPost(
+    f,
+    superJar,
+    replayPath,
+    { reason: "CSRF is required" },
+    "",
+    { "idempotency-key": "notify-no-csrf" },
+  );
+  assert.equal(noCsrf.response.status, 403);
+  assert.equal(noCsrf.body.error.code, "csrf_invalid");
+
+  const noReason = await adminPost(
+    f,
+    superJar,
+    replayPath,
+    {},
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-no-reason" },
+  );
+  assert.equal(noReason.response.status, 400);
+  assert.equal(noReason.body.error.code, "invalid_reason");
+
+  const noIdempotency = await adminPost(
+    f,
+    superJar,
+    replayPath,
+    { reason: "Idempotency is required" },
+    superCurrent.body.csrfToken,
+  );
+  assert.equal(noIdempotency.response.status, 400);
+  assert.equal(noIdempotency.body.error.code, "idempotency_key_required");
+
+  const replayed = await adminPost(
+    f,
+    superJar,
+    replayPath,
+    { reason: "Retry after transport incident review" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-replay-super-1" },
+  );
+  assert.equal(replayed.response.status, 200, JSON.stringify(replayed.body));
+  assert.equal(replayed.body.replayed, true);
+  assert.equal(replayed.body.delivery.status, "retry_wait");
+  assert.equal(replayed.body.delivery.attemptCount, 0);
+  assert.ok(!JSON.stringify(replayed.body).includes("must-not-leak"));
+
+  const replayAgain = await adminPost(
+    f,
+    superJar,
+    replayPath,
+    { reason: "Retry after transport incident review" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-replay-super-1" },
+  );
+  assert.equal(replayAgain.response.status, 200);
+  assert.equal(replayAgain.body.replayed, false);
+  assert.equal(replayAgain.body.delivery.deliveryId, replayed.body.delivery.deliveryId);
+
+  const conflict = await adminPost(
+    f,
+    superJar,
+    replayPath,
+    { reason: "A different replay reason" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-replay-super-1" },
+  );
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.error.code, "notification_replay_conflict");
+
+  const notDead = await adminPost(
+    f,
+    superJar,
+    replayPath,
+    { reason: "A second replay needs a different key" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-replay-super-2" },
+  );
+  assert.equal(notDead.response.status, 409);
+  assert.equal(notDead.body.error.code, "notification_not_dead_letter");
+
+  const data = await readAdminData(f);
+  const stored = data.notificationDeliveries[rootDelivery.deliveryId];
+  assert.equal(stored.replayCount, 1);
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "notification.replay_requested"
+      && audit.deliveryId === rootDelivery.deliveryId
+      && audit.actorSubjectId === superCurrent.body.user.id));
 });

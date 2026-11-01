@@ -18,8 +18,8 @@
 `gateway-key describe --json` 与原子 `gateway-key policy apply --json` 机器协议已实现，
 并通过 Go 单测、gateway-key CLI 回归和隔离真实二进制冒烟。C4-02
 `enterprise/gateway-control/` 受控适配器也已实现，并通过 15 项 Mock/故障测试。C4-03a
-正式只读模型目录已实现，并通过 7 项目录专项测试和 54 项管理服务集成测试；管理服务当前
-总计 61 项测试通过，`GET /api/v1/admin/models` 已使用正式目录，`ADMIN_MODELS` 仅保留
+正式只读模型目录已实现，并通过 7 项目录专项测试和 60 项管理服务集成测试；管理服务当前
+总计 67 项测试通过，`GET /api/v1/admin/models` 已使用正式目录，`ADMIN_MODELS` 仅保留
 无正式目录时的兼容显示。C4-03b 用户级 `gatewayPolicy` 核心已在 auth-service 实现，
 覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 25 项测试通过；
 C4-03c 的管理 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿
@@ -31,7 +31,9 @@ E2E 已通过，覆盖管理 OIDC/CSRF、quota/models 分步设置、双设备�
 同步；M2-C5 的查询/对账后端已实现，但页面和生产验收未完成；M2-D 仍未实现。admin-service
 负责展开正式目录选择器，auth-service 接收
 稳定模型 ID；APR-01a 审批后端、APR-01b HMAC/Mock 外部审批回调适配器和 APR-01c 独立 OIDC
-step-up 已实现并通过测试，但真实 OA 连接器、真实 IdP/MFA/反向代理和浏览器流程未验证。
+step-up 已实现并通过测试；NOTIFY-01a 的 transactional outbox、租约、幂等、退避、死信、
+重启恢复、deliveries 查询和受审计人工重放也已通过 Mock/故障测试，但正常启动没有 transport
+时不创建 dispatcher。真实 OA 连接器、真实 IdP/MFA/反向代理、浏览器流程和真实通知渠道未验证。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
 反向代理和生产环境均未验收。
 第 10 节描述的是 C4-01/C4-02/C4-03a/C4-04 的已实现边界和待验收项；当前不能把受控适配器、
@@ -553,7 +555,7 @@ Mock/故障测试已覆盖这些映射；真实 Docker/共享卷故障恢复仍�
 - 任何“页面值已变但实际请求未被限制/未被拒绝”的结果都视为 C4 失败。
 - C4-01 机器协议和 C4-02 `gateway-control` 已实现；C4-02 通过 15 项 Mock/故障测试，
   但 Docker/Compose、真实共享卷、健康检查和故障恢复尚未实机验收。C4-03a 正式只读目录
-  已通过 7 项专项和 54 项管理服务集成测试，管理服务总计 61 项通过，但仍待真实部署验收。
+  已通过 7 项专项和 60 项管理服务集成测试，管理服务总计 67 项通过，但仍待真实部署验收。
   C4-03b/C4-03c 已接通本地 Mock/故障链路，C4-04 完整管理链路 E2E 已通过；C4-03d 仅部分
   实现，C5 后端已实现但 UI/生产验收未完成，D 未实现，不得把本节或隔离 E2E 当作完整生产
   部署闭环。

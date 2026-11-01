@@ -55,6 +55,12 @@ import {
 } from "./external-approval.js";
 import { JsonStore } from "./store.js";
 import { readUsageFile } from "./usage-reader.js";
+import {
+  NotificationDispatcher,
+  NotificationOutbox,
+  NOTIFICATION_STATUSES,
+  publicNotificationDelivery,
+} from "./notification-outbox.js";
 
 const MAX_BODY = 16 * 1024;
 const DEFAULT_USAGE_WINDOW_DAYS = 7;
@@ -1086,8 +1092,24 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     ? (options.stepUpOidc || new OidcClient(config.stepUpOidc))
     : null;
   const authService = options.authService || new AuthServiceClient(config.authService);
+  const notificationOutbox = options.notificationOutbox || new NotificationOutbox(store, {
+    maxAttempts: config.notifications?.maxAttempts || 6,
+    now: options.notificationNow,
+  });
+  const notificationDispatcher = options.notificationDispatcher || (
+    options.notificationTransport
+      ? new NotificationDispatcher(store, {
+        transport: options.notificationTransport,
+        leaseMs: config.notifications?.leaseMs || 60 * 1000,
+        pollIntervalMs: config.notifications?.pollIntervalMs || 30 * 1000,
+        batchSize: config.notifications?.batchSize || 20,
+        now: options.notificationNow,
+      })
+      : null
+  );
   const rate = new Map();
   const approvalEnvironmentId = `env_${sha256(new URL(config.publicUrl).origin).slice(0, 24)}`;
+  await notificationOutbox.recoverExpired();
 
   function currentApprovalPolicyVersion() {
     const catalogVersion = Number.isSafeInteger(modelCatalog.status.catalogVersion)
@@ -1099,7 +1121,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   }
 
   function appendApprovalSystemAudit(data, action, approval, options = {}) {
-    data.adminSystemAuditLogs.push({
+    const record = {
       id: `audit_${crypto.randomUUID()}`,
       action,
       timestamp: new Date().toISOString(),
@@ -1120,6 +1142,13 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       payloadDigest: String(approval?.payloadDigest || options.payloadDigest || ""),
       operationId: String(options.operationId || approval?.operationId || ""),
       reason: String(options.reason || ""),
+    };
+    data.adminSystemAuditLogs.push(record);
+    notificationOutbox.enqueueApproval(data, action, approval, {
+      ...options,
+      occurredAt: record.timestamp,
+      organizationId: approvalEnvironmentId,
+      requestId: options.requestId || "",
     });
   }
 
@@ -2671,6 +2700,156 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     return action === "rollback_previous" ? "compensated" : "not_required";
   }
 
+  function notificationDeliveryVisible(access, delivery) {
+    const targetOrgUnitId = String(delivery?.targetOrgUnitId || "");
+    if (!targetOrgUnitId) return access.scopeOrgUnitIds.includes("*");
+    return access.scopeOrgUnitIds.includes("*")
+      || access.scopeOrgUnitIds.includes(targetOrgUnitId);
+  }
+
+  function notificationQuery(searchParams) {
+    const status = String(searchParams.get("status") || "").trim();
+    if (status && !NOTIFICATION_STATUSES.includes(status)) {
+      throw new HttpError(400, "invalid_notification_status", "status is not supported");
+    }
+    const rawLimit = String(searchParams.get("limit") || "50").trim();
+    const limit = Number(rawLimit);
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new HttpError(400, "invalid_limit", "limit must be an integer from 1 to 200");
+    }
+    return { status, limit };
+  }
+
+  async function listNotificationDeliveries(session, searchParams) {
+    const query = notificationQuery(searchParams);
+    const result = await requirePermission(session, "notifications.read");
+    const deliveries = await store.read((data) => Object.values(data.notificationDeliveries)
+      .filter((delivery) => !query.status || delivery.status === query.status)
+      .filter((delivery) => notificationDeliveryVisible(result.access, delivery))
+      .sort((left, right) => {
+        const byCreated = String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
+        if (byCreated !== 0) return byCreated;
+        return String(right.deliveryId || "").localeCompare(String(left.deliveryId || ""));
+      })
+      .slice(0, query.limit)
+      .map(publicNotificationDelivery));
+    return {
+      deliveries,
+      count: deliveries.length,
+      limit: query.limit,
+    };
+  }
+
+  async function replayNotificationDelivery(req, res, deliveryId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    const stored = await store.read((data) => {
+      const delivery = data.notificationDeliveries[deliveryId];
+      return delivery ? structuredClone(delivery) : null;
+    });
+    if (!stored) throw new HttpError(404, "notification_delivery_not_found", "Delivery not found");
+    await requirePermission(
+      current.session,
+      "notifications.replay",
+      stored.targetOrgUnitId,
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const requestFingerprint = sha256(JSON.stringify(canonicalValue({
+      deliveryId,
+      reason,
+    })));
+    const outcome = await store.mutate((data) => {
+      const existing = data.notificationReplayRequests[idempotencyKeyHash];
+      if (existing) {
+        const delivery = data.notificationDeliveries[existing.deliveryId];
+        if (!delivery) {
+          throw new HttpError(
+            503,
+            "storage_unavailable",
+            "The notification replay record points to a missing delivery",
+          );
+        }
+        if (existing.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "notification_replay_conflict",
+            "Idempotency-Key was already used for a different notification replay",
+          );
+        }
+        return {
+          replayed: false,
+          delivery: structuredClone(delivery),
+        };
+      }
+      const delivery = data.notificationDeliveries[deliveryId];
+      if (!delivery) {
+        throw new HttpError(404, "notification_delivery_not_found", "Delivery not found");
+      }
+      if (delivery.status !== "dead_letter") {
+        throw new HttpError(
+          409,
+          "notification_not_dead_letter",
+          "Only a dead-letter delivery can be replayed",
+        );
+      }
+      const now = new Date().toISOString();
+      delivery.status = "retry_wait";
+      delivery.attemptCount = 0;
+      delivery.nextAttemptAt = now;
+      delivery.leaseOwner = "";
+      delivery.leaseExpiresAt = "";
+      delivery.lastErrorCode = "";
+      delivery.deliveredAt = "";
+      delivery.replayCount += 1;
+      delivery.lastReplayAt = now;
+      delivery.updatedAt = now;
+      const replayRequestId = `ntr_${sha256(
+        `${idempotencyKeyHash}\u0000${deliveryId}`,
+      ).slice(0, 32)}`;
+      data.notificationReplayRequests[idempotencyKeyHash] = {
+        replayRequestId,
+        idempotencyKeyHash,
+        deliveryId,
+        eventId: delivery.eventId,
+        requestFingerprint,
+        reason,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        createdAt: now,
+      };
+      data.adminSystemAuditLogs.push({
+        id: `audit_${crypto.randomUUID()}`,
+        action: "notification.replay_requested",
+        timestamp: now,
+        deliveryId,
+        eventId: delivery.eventId,
+        eventType: delivery.eventType,
+        targetType: delivery.targetType,
+        targetId: delivery.targetId,
+        targetOrgUnitId: delivery.targetOrgUnitId,
+        operationId: delivery.operationId,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        result: "requeued",
+        replayRequestId,
+      });
+      return {
+        replayed: true,
+        delivery: structuredClone(delivery),
+      };
+    });
+    json(res, 200, {
+      ok: true,
+      replayed: outcome.replayed,
+      delivery: publicNotificationDelivery(outcome.delivery),
+    });
+  }
+
   async function auditLogPage(session, searchParams) {
     const query = auditQuery(searchParams);
     const result = await requirePermission(session, "audit.read");
@@ -3014,6 +3193,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         parentStored.reconciledAt = completedAt;
         parentStored.reconciledByOperationId = childOperation.id;
         parentStored.updatedAt = completedAt;
+        notificationOutbox.enqueueOperation(data, stored, {
+          occurredAt: completedAt,
+          state: responseBody?.result?.state || "",
+        });
       });
     } catch {
       const auditFailure = new HttpError(503, "audit_unavailable", "The reconciliation result could not be audited");
@@ -3250,6 +3433,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         );
         data.adminAuditLogs.push(resultAudit);
         stored.resultAuditId = resultAudit.id;
+        notificationOutbox.enqueueOperation(data, stored, {
+          occurredAt: completedAt,
+          state: responseBody?.result?.state || "",
+        });
       });
     } catch {
       const auditFailure = new HttpError(
@@ -3775,6 +3962,22 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/notifications/deliveries") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, await listNotificationDeliveries(current.session, url.searchParams));
+      return;
+    }
+
+    const notificationRetryMatch =
+      /^\/api\/v1\/admin\/notifications\/deliveries\/(ntd_[a-f0-9]{32})\/retry$/.exec(
+        url.pathname,
+      );
+    if (req.method === "POST" && notificationRetryMatch) {
+      await replayNotificationDelivery(req, res, notificationRetryMatch[1]);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/v1/admin/org-units") {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
@@ -4040,5 +4243,14 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   });
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;
-  return { server, store, oidc, authService, modelCatalog };
+  notificationDispatcher?.start();
+  return {
+    server,
+    store,
+    oidc,
+    authService,
+    modelCatalog,
+    notificationOutbox,
+    notificationDispatcher,
+  };
 }

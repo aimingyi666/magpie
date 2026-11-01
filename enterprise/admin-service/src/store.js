@@ -1,6 +1,11 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { APPROVAL_STATUSES } from "./approval.js";
+import {
+  NOTIFICATION_EVENT_TYPES,
+  NOTIFICATION_SEVERITIES,
+  NOTIFICATION_STATUSES,
+} from "./notification-outbox.js";
 
 function emptyStore() {
   return {
@@ -19,6 +24,8 @@ function emptyStore() {
     approvalCallbackEvents: {},
     approvalCallbackNonces: {},
     stepUpAssertions: {},
+    notificationDeliveries: {},
+    notificationReplayRequests: {},
   };
 }
 
@@ -56,6 +63,8 @@ function validateLoaded(value) {
     "approvalCallbackEvents",
     "approvalCallbackNonces",
     "stepUpAssertions",
+    "notificationDeliveries",
+    "notificationReplayRequests",
   ]) {
     if (!value[key] || typeof value[key] !== "object" || Array.isArray(value[key])) {
       throw new Error(`admin store ${key} must be an object`);
@@ -201,6 +210,96 @@ function validateLoaded(value) {
         || !Number.isFinite(Date.parse(assertion.expiresAt))
         || !Number.isFinite(Date.parse(assertion.criticalExpiresAt))) {
       throw new Error("admin store step-up assertion has invalid fields");
+    }
+  }
+  const notificationStatuses = new Set(NOTIFICATION_STATUSES);
+  const notificationEventTypes = new Set(NOTIFICATION_EVENT_TYPES);
+  const notificationSeverities = new Set(NOTIFICATION_SEVERITIES);
+  for (const [deliveryId, delivery] of Object.entries(value.notificationDeliveries)) {
+    if (!delivery
+        || typeof delivery !== "object"
+        || Array.isArray(delivery)
+        || delivery.deliveryId !== deliveryId
+        || !/^ntd_[a-f0-9]{32}$/.test(deliveryId)
+        || typeof delivery.eventId !== "string"
+        || !/^evt_[A-Za-z0-9_.:-]{4,195}$/.test(delivery.eventId)
+        || delivery.schemaVersion !== 1
+        || !notificationEventTypes.has(delivery.eventType)
+        || !notificationSeverities.has(delivery.severity)
+        || !notificationStatuses.has(delivery.status)
+        || delivery.dataClassification !== "L0") {
+      throw new Error("admin store notificationDeliveries contains an invalid delivery");
+    }
+    if (!Number.isSafeInteger(delivery.attemptCount) || delivery.attemptCount < 0
+        || !Number.isSafeInteger(delivery.maxAttempts) || delivery.maxAttempts < 1
+        || delivery.attemptCount > delivery.maxAttempts + 1
+        || !Number.isSafeInteger(delivery.replayCount) || delivery.replayCount < 0) {
+      throw new Error("admin store notification delivery counters are invalid");
+    }
+    for (const key of [
+      "occurredAt",
+      "organizationId",
+      "actorSubjectId",
+      "actorEmail",
+      "targetType",
+      "targetId",
+      "targetOrgUnitId",
+      "operationId",
+      "requestId",
+      "errorCode",
+      "summary",
+      "createdAt",
+      "updatedAt",
+      "deliveredAt",
+      "nextAttemptAt",
+      "leaseOwner",
+      "leaseExpiresAt",
+      "lastErrorCode",
+      "lastReplayAt",
+    ]) {
+      if (typeof delivery[key] !== "string") {
+        throw new Error(`admin store notification delivery ${key} is invalid`);
+      }
+    }
+    if (!delivery.summary
+        || delivery.summary.length > 240
+        || !Number.isFinite(Date.parse(delivery.occurredAt))
+        || !Number.isFinite(Date.parse(delivery.createdAt))
+        || !Number.isFinite(Date.parse(delivery.updatedAt))) {
+      throw new Error("admin store notification delivery metadata is invalid");
+    }
+    if (delivery.nextAttemptAt && !Number.isFinite(Date.parse(delivery.nextAttemptAt))) {
+      throw new Error("admin store notification delivery nextAttemptAt is invalid");
+    }
+    if (delivery.leaseExpiresAt && !Number.isFinite(Date.parse(delivery.leaseExpiresAt))) {
+      throw new Error("admin store notification delivery leaseExpiresAt is invalid");
+    }
+    if (delivery.deliveredAt && !Number.isFinite(Date.parse(delivery.deliveredAt))) {
+      throw new Error("admin store notification delivery deliveredAt is invalid");
+    }
+    if (delivery.status === "delivered" && !delivery.deliveredAt) {
+      throw new Error("admin store delivered notification is missing deliveredAt");
+    }
+  }
+  for (const [idempotencyKeyHash, replay] of Object.entries(value.notificationReplayRequests)) {
+    if (!/^[a-f0-9]{64}$/.test(idempotencyKeyHash)
+        || !replay
+        || typeof replay !== "object"
+        || Array.isArray(replay)
+        || replay.idempotencyKeyHash !== idempotencyKeyHash
+        || typeof replay.replayRequestId !== "string"
+        || !/^ntr_[a-f0-9]{32}$/.test(replay.replayRequestId)
+        || !value.notificationDeliveries[replay.deliveryId]
+        || !/^[a-f0-9]{64}$/.test(String(replay.requestFingerprint || ""))) {
+      throw new Error("admin store notificationReplayRequests contains an invalid request");
+    }
+    for (const key of ["deliveryId", "reason", "actorSubjectId", "actorEmail", "createdAt"]) {
+      if (typeof replay[key] !== "string" || !replay[key]) {
+        throw new Error(`admin store notification replay request ${key} is invalid`);
+      }
+    }
+    if (!Number.isFinite(Date.parse(replay.createdAt))) {
+      throw new Error("admin store notification replay request createdAt is invalid");
     }
   }
   return value;
