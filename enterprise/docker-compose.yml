@@ -1,0 +1,185 @@
+# Enterprise gateway: one magpie instance holding the real provider keys.
+# Clients reach it over the internal network with per-user gateway keys.
+#
+#   cp .env.example .env
+#   docker compose up -d
+#   docker compose exec gateway magpie gateway-key add alice --key <value>
+#
+# To run your fork's code instead of the upstream image, set MAGPIE_IMAGE to
+# your registry image, or uncomment the build block below.
+services:
+  gateway:
+    image: ${MAGPIE_IMAGE:-ghcr.io/yetone/magpie:stable}
+    # build:
+    #   context: ..
+    #   dockerfile: Dockerfile
+    container_name: magpie-gateway
+    restart: unless-stopped
+    ports:
+      - "${MAGPIE_BIND:-0.0.0.0}:${MAGPIE_PORT:-3425}:3425"
+    environment:
+      MAGPIE_ADDR: 0.0.0.0:3425
+      MAGPIE_ALLOW_IPS: ${MAGPIE_ALLOW_IPS:-127.0.0.1/32}
+      MAGPIE_UPDATE_FEED: ${MAGPIE_UPDATE_FEED:-}
+    volumes:
+      - magpie-data:/config
+    healthcheck:
+      test: ["CMD-SHELL", "MAGPIE_ADDR=127.0.0.1:3425 /magpie healthcheck"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+  # Optional least-privilege adapter for gateway-key policy read/write. It is
+  # intentionally not published on a host port and does not receive OIDC,
+  # admin-session or issuer secrets.
+  gateway-control:
+    profiles: ["gateway-control"]
+    build:
+      context: ..
+      dockerfile: enterprise/gateway-control/Dockerfile
+    container_name: magpie-enterprise-gateway-control
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    expose:
+      - "3446"
+    environment:
+      GATEWAY_CONTROL_TOKEN: ${GATEWAY_CONTROL_TOKEN:-}
+      GATEWAY_CONTROL_MAGPIE: /usr/local/bin/magpie
+      GATEWAY_CONTROL_CONFIG_HOME: /config
+      GATEWAY_CONTROL_BIND: 0.0.0.0
+      GATEWAY_CONTROL_PORT: 3446
+      GATEWAY_CONTROL_TIMEOUT_MS: ${GATEWAY_CONTROL_TIMEOUT_MS:-10000}
+    volumes:
+      - magpie-data:/config
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3446/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  auth:
+    profiles: ["auth", "admin"]
+    build:
+      context: ./auth-service
+    container_name: magpie-enterprise-auth
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_healthy
+    ports:
+      - "${AUTH_BIND:-0.0.0.0}:${AUTH_HOST_PORT:-3444}:3444"
+    environment:
+      AUTH_PUBLIC_URL: ${AUTH_PUBLIC_URL:-http://127.0.0.1:3444}
+      AUTH_PORT: 3444
+      AUTH_BIND: 0.0.0.0
+      AUTH_STORE_PATH: /data/auth-store.json
+      AUTH_COOKIE_SECRET: ${AUTH_COOKIE_SECRET:-}
+      AUTH_ADMIN_TOKEN: ${AUTH_ADMIN_TOKEN:-}
+      AUTH_INTERNAL_ADMIN_TOKEN: ${AUTH_INTERNAL_ADMIN_TOKEN:-}
+      AUTH_SECURE_COOKIE: ${AUTH_SECURE_COOKIE:-true}
+      AUTH_SESSION_TTL_HOURS: ${AUTH_SESSION_TTL_HOURS:-12}
+      AUTH_DEVICE_TOKEN_TTL_DAYS: ${AUTH_DEVICE_TOKEN_TTL_DAYS:-30}
+      AUTH_RATE_LIMIT_PER_MINUTE: ${AUTH_RATE_LIMIT_PER_MINUTE:-120}
+      AUTH_ALLOWED_RETURN_ORIGINS: ${AUTH_ALLOWED_RETURN_ORIGINS:-}
+      OIDC_ISSUER: ${OIDC_ISSUER:-}
+      OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
+      OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}
+      OIDC_REDIRECT_URI: ${OIDC_REDIRECT_URI:-}
+      OIDC_SCOPES: ${OIDC_SCOPES:-openid profile email}
+      OIDC_TOKEN_AUTH_METHOD: ${OIDC_TOKEN_AUTH_METHOD:-client_secret_basic}
+      OIDC_ALLOWED_EMAIL_DOMAINS: ${OIDC_ALLOWED_EMAIL_DOMAINS:-}
+      OIDC_EMAIL_CLAIM: ${OIDC_EMAIL_CLAIM:-email}
+      OIDC_NAME_CLAIM: ${OIDC_NAME_CLAIM:-name}
+      MAGPIE_GATEWAY_URL: http://gateway:3425
+      MAGPIE_GATEWAY_PUBLIC_URL: ${MAGPIE_GATEWAY_PUBLIC_URL:-https://ai.corp.example}
+      MAGPIE_ISSUER_KEY: ${MAGPIE_ISSUER_KEY:-}
+      MAGPIE_KEY_TTL: ${MAGPIE_KEY_TTL:-8h}
+      MAGPIE_KEY_MODELS: ${MAGPIE_KEY_MODELS:-}
+      MAGPIE_KEY_TOKENS: ${MAGPIE_KEY_TOKENS:-0}
+      MAGPIE_KEY_COST: ${MAGPIE_KEY_COST:-0}
+    volumes:
+      - auth-data:/data
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3444/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  admin:
+    profiles: ["admin"]
+    build:
+      context: ./admin-service
+    container_name: magpie-enterprise-admin
+    restart: unless-stopped
+    depends_on:
+      auth:
+        condition: service_healthy
+    ports:
+      - "${ADMIN_BIND:-0.0.0.0}:${ADMIN_HOST_PORT:-3445}:3445"
+    environment:
+      ADMIN_PUBLIC_URL: ${ADMIN_PUBLIC_URL:-http://127.0.0.1:3445}
+      ADMIN_PORT: 3445
+      ADMIN_BIND: 0.0.0.0
+      ADMIN_STORE_PATH: /data/admin-store.json
+      ADMIN_SESSION_SECRET: ${ADMIN_SESSION_SECRET:-}
+      ADMIN_SECURE_COOKIE: ${ADMIN_SECURE_COOKIE:-true}
+      ADMIN_SESSION_TTL_HOURS: ${ADMIN_SESSION_TTL_HOURS:-8}
+      ADMIN_IDLE_TIMEOUT_MINUTES: ${ADMIN_IDLE_TIMEOUT_MINUTES:-30}
+      ADMIN_RATE_LIMIT_PER_MINUTE: ${ADMIN_RATE_LIMIT_PER_MINUTE:-120}
+      ADMIN_ALLOWED_IPS: ${ADMIN_ALLOWED_IPS:-127.0.0.1/32,::1/128}
+      ADMIN_BOOTSTRAP_SUBJECTS: ${ADMIN_BOOTSTRAP_SUBJECTS:-}
+      ADMIN_BOOTSTRAP_EMAILS: ${ADMIN_BOOTSTRAP_EMAILS:-}
+      ADMIN_BOOTSTRAP_VALID_HOURS: ${ADMIN_BOOTSTRAP_VALID_HOURS:-24}
+      ADMIN_OIDC_ISSUER: ${ADMIN_OIDC_ISSUER:-}
+      ADMIN_OIDC_CLIENT_ID: ${ADMIN_OIDC_CLIENT_ID:-}
+      ADMIN_OIDC_CLIENT_SECRET: ${ADMIN_OIDC_CLIENT_SECRET:-}
+      ADMIN_OIDC_REDIRECT_URI: ${ADMIN_OIDC_REDIRECT_URI:-}
+      ADMIN_OIDC_SCOPES: ${ADMIN_OIDC_SCOPES:-openid profile email}
+      ADMIN_OIDC_TOKEN_AUTH_METHOD: ${ADMIN_OIDC_TOKEN_AUTH_METHOD:-client_secret_basic}
+      ADMIN_ALLOWED_EMAIL_DOMAINS: ${ADMIN_ALLOWED_EMAIL_DOMAINS:-}
+      ADMIN_EMAIL_CLAIM: ${ADMIN_EMAIL_CLAIM:-email}
+      ADMIN_NAME_CLAIM: ${ADMIN_NAME_CLAIM:-name}
+      ADMIN_REQUIRE_MFA: ${ADMIN_REQUIRE_MFA:-true}
+      ADMIN_REQUIRE_VERIFIED_EMAIL: ${ADMIN_REQUIRE_VERIFIED_EMAIL:-true}
+      ADMIN_ALLOWED_ACR_VALUES: ${ADMIN_ALLOWED_ACR_VALUES:-}
+      ADMIN_AUTH_SERVICE_URL: http://auth:3444
+      ADMIN_AUTH_SERVICE_TOKEN: ${AUTH_INTERNAL_ADMIN_TOKEN:-}
+      ADMIN_AUTH_SERVICE_TIMEOUT_MS: ${ADMIN_AUTH_SERVICE_TIMEOUT_MS:-5000}
+      ADMIN_MODELS: ${ADMIN_MODELS:-}
+      ADMIN_MODEL_CATALOG_PATH: /etc/magpie-enterprise/model-catalog.json
+      ADMIN_MODEL_CATALOG_DIGEST: ${ADMIN_MODEL_CATALOG_DIGEST:-}
+      ADMIN_USAGE_PATH: ${ADMIN_USAGE_PATH:-/magpie-readonly/magpie/usage.jsonl}
+      ADMIN_USAGE_MAX_BYTES: ${ADMIN_USAGE_MAX_BYTES:-268435456}
+      ADMIN_USAGE_MAX_LINE_BYTES: ${ADMIN_USAGE_MAX_LINE_BYTES:-1048576}
+      ADMIN_USAGE_MAX_RECORDS: ${ADMIN_USAGE_MAX_RECORDS:-1000000}
+      ADMIN_USAGE_MAX_FIELDS: ${ADMIN_USAGE_MAX_FIELDS:-256}
+      ADMIN_USAGE_MAX_RANGE_DAYS: ${ADMIN_USAGE_MAX_RANGE_DAYS:-366}
+    volumes:
+      - admin-data:/data
+      - magpie-data:/magpie-readonly:ro
+      - ./model-catalog.json:/etc/magpie-enterprise/model-catalog.json:ro
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3445/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+volumes:
+  magpie-data:
+  auth-data:
+  admin-data:

@@ -1,0 +1,14 @@
+{
+  "name": "@magpie-enterprise/gateway-control",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Minimal privileged adapter for the Magpie gateway-key machine protocol",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

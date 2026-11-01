@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "models": [
+    {
+      "id": "deepseek/deepseek-chat",
+      "provider": "deepseek",
+      "displayName": "DeepSeek Chat"
+    },
+    {
+      "id": "openai/gpt-5.2",
+      "provider": "openai",
+      "displayName": "GPT-5.2"
+    },
+    {
+      "id": "anthropic/claude-sonnet-5",
+      "provider": "anthropic",
+      "displayName": "Claude Sonnet 5"
+    }
+  ],
+  "providerWildcards": [
+    "company-model"
+  ],
+  "groups": {
+    "engineering-approved": [
+      "openai/gpt-5.2",
+      "anthropic/claude-sonnet-5"
+    ],
+    "economy": [
+      "deepseek/deepseek-chat"
+    ]
+  }
+}

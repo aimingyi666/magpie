@@ -1,0 +1,14 @@
+{
+  "name": "@magpie-enterprise/auth-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "OIDC, device registration and short-lived Magpie gateway credentials",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
