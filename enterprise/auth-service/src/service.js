@@ -1208,6 +1208,32 @@ export async function createEnterpriseAuthServer(config, options = {}) {
     return updatePolicy(userId, expected, "models", models, operationId);
   }
 
+  async function reconcilePolicy(userId, expected, models, limits, operationId) {
+    return serializePolicyWrite(userId, async () => {
+      const updated = await store.mutate((data) => {
+        const user = policyUser(data, userId);
+        assertPolicyVersion(user.gatewayPolicy, expected);
+        const now = new Date().toISOString();
+        const policy = user.gatewayPolicy;
+        policy.models = models;
+        policy.limits = limits;
+        policy.version += 1;
+        policy.quotaStatus = "pending";
+        policy.modelStatus = "pending";
+        policy.updatedAt = now;
+        policy.operationId = operationId;
+        delete policy.confirmedAt;
+        markActiveCredentialsPending(user.id, data, operationId, now);
+        refreshPolicyKnownState(user, data, now);
+        return {
+          policyVersion: policy.version,
+          policy: structuredClone(policy),
+        };
+      });
+      return syncPolicyToCredentials(userId, updated.policyVersion, operationId);
+    });
+  }
+
   async function confirmCredentialPolicy(userId, credentialId, expected, operationId, readback) {
     return store.mutate((data) => {
       const user = policyUser(data, userId);
@@ -1436,6 +1462,32 @@ export async function createEnterpriseAuthServer(config, options = {}) {
           Object.values(data.credentials).map((credential) => publicCredential(credential, data.devices)),
         );
         json(res, 200, { ok: true, credentials });
+        return;
+      }
+
+      const reconcileRoute = /^\/api\/v1\/internal\/admin\/users\/(usr_[A-Za-z0-9_-]+)\/policy\/reconcile$/.exec(
+        url.pathname,
+      );
+      if (req.method === "POST" && reconcileRoute) {
+        const body = requireJsonObject(await readJson(req));
+        const expected = expectedVersion(req, body);
+        const operationId = policyOperationId(body);
+        let models;
+        let limits;
+        try {
+          models = validateModels(body.models);
+          limits = validateLimits(body.limits);
+        } catch (error) {
+          throw policyValidationHttpError(error);
+        }
+        const result = await reconcilePolicy(
+          reconcileRoute[1],
+          expected,
+          models,
+          limits,
+          operationId,
+        );
+        json(res, 200, { ok: true, data: result });
         return;
       }
 

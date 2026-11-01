@@ -138,6 +138,7 @@ curl http://127.0.0.1:${AUTH_HOST_PORT:-3444}/healthz
 | POST | `/api/v1/internal/admin/credentials/{id}/rotate` | 管理服务专用；按设备串行轮换当前凭证 |
 | PUT | `/api/v1/internal/admin/users/{id}/policy/quota` | 管理服务专用；设置 0-5 个额度窗口，要求 `expectedVersion`/`If-Match` |
 | PATCH | `/api/v1/internal/admin/users/{id}/policy/models` | 管理服务专用；设置稳定模型白名单，要求 `expectedVersion`/`If-Match` |
+| POST | `/api/v1/internal/admin/users/{id}/policy/reconcile` | 管理服务专用；原子同时更新 models+limits，version 只增加一次并同步全部活跃凭证 |
 | POST | `/api/v1/internal/admin/users/{id}/policy/confirm-credential` | 管理服务专用；提交 gateway-control 的独立回读并确认单张凭证已同步 |
 | GET | `/login` | 发起 OIDC 登录 |
 | GET | `/oauth/callback` | IdP 回调 |
@@ -160,17 +161,19 @@ curl http://127.0.0.1:${AUTH_HOST_PORT:-3444}/healthz
 这些能力统一由 `admin-service` 的 C2/C3 入口提供。C4-01 的网关机器协议已在 Magpie
 工作分支实现并通过本地测试；C4-02 `gateway-control` 已实现并通过 15 项 Mock/故障测试，
 但 Docker/真实共享卷和 mTLS 尚未验收。C4-03a 正式只读模型目录已在 `admin-service`
-实现，并通过管理服务 35 项测试；admin-service 负责展开选择器，auth-service 只接收稳定
+实现，并通过管理服务 44 项测试；admin-service 负责展开选择器，auth-service 只接收稳定
 模型 ID。C4-03b
 已实现 auth-service 内的用户级策略状态机、M1 `unknown` 迁移、首次分步设置、版本冲突、
 失败关闭和回读确认接口；C4-03c 的额度/模型管理 API、自动 apply、issuance journal、
 同步后交付、失败补偿和启动恢复已实现并通过 Mock/故障测试。C4-03d 部分实现：管理页已有
 额度/模型写表单和完整证据链状态，auth-service 员工页和 `/api/v1/me` 已返回当前员工的
-额度、模型、凭证、设备、策略同步和恢复提示；页面 E2E、operation/audit 查询和人工对账
-仍未完成。C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实
+额度、模型、凭证、设备、策略同步和恢复提示。M2-C5 已在 admin-service 实现 operation
+查询、脱敏审计分页和人工对账；auth-service 提供原子的 models+limits 对账接口，版本只
+增加一次并为每个活跃凭证调用一次 gateway-control。页面 E2E 和完整运营页面仍未完成。
+C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实
 限额/模型拒绝、多凭证部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key
-撤销和恢复同步；Docker/共享卷、真实企业 IdP 和反向代理仍未验收。M2-C5 和 M2-D 仍未
-实现。完整契约见
+撤销和恢复同步；Docker/共享卷、真实企业 IdP 和反向代理仍未验收。M2-D 仍未实现，M2-C5
+后端已完成并通过 Mock/故障测试，但查询/对账页面、真实审计存储和生产验收仍未完成。完整契约见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第 12.8.1 节。
 
 ## M2-C4 策略状态（C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 完整策略流 E2E 已通过）
@@ -251,8 +254,8 @@ C4-03 的具体门禁：
   管理链路 E2E；真实共享卷、真实企业 IdP、反向代理和生产部署仍待验收。
 - **C4-03d（部分实现）**：管理页已展示策略版本、凭证同步状态、最后同步时间和错误码；
   `unknown` 不显示为 0/无限，`pending` 和 `partial_success` 不能显示为已生效。仍缺员工
-  页面 E2E、失败恢复入口、operation/audit 查询和人工对账；调额/模型写表单和员工只读
-  门户已存在。员工网页不能直接修改设备上的 Agent 文件。
+  页面 E2E 和失败恢复入口；调额/模型写表单、员工只读门户、operation/audit 查询和人工
+  对账后端已存在。员工网页不能直接修改设备上的 Agent 文件。
 
 C4-03c 使用以下配置：
 
@@ -266,7 +269,7 @@ GATEWAY_CONTROL_TIMEOUT_MS
 自动调用 `gateway-control`、issuance journal、同步后交付、失败补偿和启动恢复。启动时
 同时 drain 撤销队列并扫描非 `committed` journal。真实 Magpie 限额/模型拒绝、多凭证、
 refresh/rotate 继承和故障恢复已有 C4-04 证据；Docker/Compose 实机、真实共享卷、真实企业
-IdP、反向代理、mTLS 和人工对账仍未完成。详细 schema、状态机和错误码见
+IdP、反向代理、mTLS 和真实人工对账演练仍未完成。详细 schema、状态机和错误码见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第
 12.8.1.1 至 12.8.1.6 节。
 
@@ -299,7 +302,7 @@ IdP、反向代理、mTLS 和人工对账仍未完成。详细 schema、状态�
 
 测试使用临时目录和 Mock IdP/Mock Magpie，不会触碰真实网关数据。
 
-当前结果：`23 passed, 0 failed`。覆盖 OIDC/JWT、PKCE、加入、心跳、刷新撤销、停用、
+当前结果：`25 passed, 0 failed`。覆盖 OIDC/JWT、PKCE、加入、心跳、刷新撤销、停用、
 过期令牌、持久化回滚、同设备并发刷新、“刷新签发过程中停用员工”的交错场景、内部读写
 接口的缺失令牌/错误令牌/正确服务令牌、停用后设备和凭证失效、启用不恢复旧凭据、设备吊销
 隔离目标、凭证轮换旧 Key 撤销和持久化失败清理孤儿 Key、同设备并发轮换与刷新，以及旧
@@ -309,7 +312,9 @@ M1 store 的兼容加载。策略测试还覆盖 quota/models 两种首次设置
 `enterpriseIssuanceId`、journal 状态转换、自动 apply/独立回读、失败补偿、撤销不确定时
 保留 `unknown`、部分凭证同步状态和启动恢复。员工门户测试覆盖只返回当前用户、历史
 quota/models 显示 `unknown`、无活跃凭证时不伪报同步成功，以及页面/API 不泄漏 Gateway Key、
-设备令牌或 token hash。
+设备令牌或 token hash。C5 策略对账测试还覆盖 models+limits 原子更新、version 恰好加一、
+多张活跃凭证各 apply 一次、stale version 冲突、并发对账只成功一次，以及响应和持久化状态
+不泄漏秘密。
 
 真实 Magpie issuer 端到端测试（需要 Magpie 可执行文件）：
 

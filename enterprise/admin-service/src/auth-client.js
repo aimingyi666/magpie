@@ -67,8 +67,8 @@ export class AuthServiceClient {
     return this.request(pathname, "GET", collection);
   }
 
-  async post(pathname) {
-    return this.request(pathname, "POST");
+  async post(pathname, body) {
+    return this.request(pathname, "POST", "", body);
   }
 
   async put(pathname, body) {
@@ -121,6 +121,13 @@ export class AuthServiceClient {
   updateModels(userId, body) {
     return this.patch(
       `/api/v1/internal/admin/users/${encodeURIComponent(userId)}/policy/models`,
+      body,
+    );
+  }
+
+  reconcilePolicy(userId, body) {
+    return this.post(
+      `/api/v1/internal/admin/users/${encodeURIComponent(userId)}/policy/reconcile`,
       body,
     );
   }

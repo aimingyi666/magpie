@@ -1,7 +1,8 @@
 # Magpie Enterprise Admin Service
 
 独立的企业管理控制面。当前版本完成 **M2-A 管理身份底座**、**M2-B 只读治理**、
-**M2-C2 管理写接口与权限映射**和 **M2-C3 幂等与 intent/result 管理审计**：管理 OIDC、
+**M2-C2 管理写接口与权限映射**、**M2-C3 幂等与 intent/result 管理审计**和
+**M2-C5 操作/审计查询与对账**：管理 OIDC、
 会话、CSRF、RBAC、组织范围、用户/部门/设备/凭证/模型/用量只读视图、只读 `usage.jsonl`
 汇总，以及停用/启用用户、吊销设备和轮换当前凭证四个受控写接口。Auth 服务的
 **M2-C1 内部写接口**继续只供服务间调用。
@@ -12,12 +13,13 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 35 项管理测试通过（28 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
+当前总计 44 项管理测试通过（37 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
-交付已实现并通过 23 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
+交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
 CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据链成立时显示“已生效”；
-员工页已提供本人额度、模型、凭证、设备和同步状态只读门户。页面 E2E、失败恢复入口、
-operation/audit 查询和人工对账仍未完成；后者属于 C5/D。C4-04 完整管理到真实 Magpie
+员工页已提供本人额度、模型、凭证、设备和同步状态只读门户。C5 已提供 operation 查询、
+脱敏审计分页和四种人工对账动作，对账生成子 operation 且不改写原 intent/result。
+页面 E2E、失败恢复入口和完整运营页面仍属于 D。C4-04 完整管理到真实 Magpie
 策略流 E2E 已通过，覆盖双设备独立 Key、真实限额/模型拒绝、多凭证部分失败、refresh/rotate
 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复同步；Docker/共享卷、真实企业 IdP、
 反向代理和浏览器 E2E 仍未验收。当前是“可演示 + 受控技术试点”，不是完整管理台或企业
@@ -58,6 +60,15 @@ operation/audit 查询和人工对账仍未完成；后者属于 C5/D。C4-04 �
   `409 operation_in_progress`。
 - intent 审计失败时返回 `503 audit_unavailable`，不调用 auth-service；result 审计失败时
   不返回成功，操作停留在 `dependency_invoked`，需要后续运维核对，不能自动重试依赖。
+- `GET /api/v1/admin/operations/{operationId}` 按原动作权限和组织范围返回真实状态、依赖
+  调用时间、失败凭证、策略版本和对账状态。
+- `GET /api/v1/admin/audit-logs` 支持 operationId、操作者、动作、目标、结果和时间过滤；
+  默认 50 条、最大 200 条，使用绑定管理员会话和查询条件的签名 cursor，响应只含脱敏元数据。
+- `POST /api/v1/admin/operations/{operationId}/reconcile` 要求 `operations.reconcile`、
+  CSRF、`reason`、`approvalId`、`Idempotency-Key` 和人工确认所需的 `evidenceRef`；
+  动作固定为 `retry_desired`、`rollback_previous`、`confirm_applied`、
+  `confirm_not_applied`。每次对账创建子 operation 并追加 intent/result 审计，父 operation
+  的状态、响应和原审计保持不变。
 
 ## M2-C4 目标边界（C4-01/C4-02/C4-03a/C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 完整策略流 E2E 已通过）
 
@@ -105,8 +116,9 @@ admin-service 不能直接读写网关的 `caller-keys.json`，也不能获得�
 C4-03a 由 admin-service 加载正式目录并把 group/provider 选择器展开为稳定模型 ID；
 auth-service 和 gateway-control 只接收稳定模型 ID，不加载目录。C4-03b/C4-03c 的策略核心、
 自动 apply/readback、issuance journal、失败补偿和同步后交付已在 auth-service 接通；
-C4-03d 已补管理页额度/模型写表单、完整证据链状态和员工只读状态门户；页面 E2E、恢复入口、
-operation/audit 查询和人工对账仍未完成。C4-04 的完整管理到真实 Magpie 策略流 E2E 已通过，
+C4-03d 已补管理页额度/模型写表单、完整证据链状态和员工只读状态门户；C5 已实现 operation
+查询、脱敏审计分页和人工对账。页面 E2E、运营页面和失败恢复入口仍属于 D。C4-04 的完整
+管理到真实 Magpie 策略流 E2E 已通过，
 但 Docker/共享卷、真实企业 IdP、反向代理、浏览器和生产部署仍未验收。
 完整契约见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第
@@ -307,7 +319,7 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\admin-service.test.mjs test\model-catalog.test.mjs
 ```
 
-2026-11-02 的实际结果：`35 passed, 0 failed`（28 项管理服务集成测试 + 7 项目录专项测试）。
+2026-11-02 的实际结果：`44 passed, 0 failed`（37 项管理服务集成测试 + 7 项目录专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
 拒绝、用户详情跨范围拒绝、会话过期、IP fail-closed、依赖不可用、凭证元数据、用量归属、
@@ -320,8 +332,10 @@ Get-ChildItem src\*.js | ForEach-Object {
 digest 不匹配和失败关闭。C4-03c 集成测试覆盖额度/模型 API、模型选择器展开、
 `expectedVersion` 冲突、payload 绑定幂等、同步状态透传、`partial_success` 和依赖故障。
 C4-03d 页面测试覆盖 CSRF meta、静态脚本、只读角色无写表单、完整证据链才显示 verified，
-以及页面不泄漏 Gateway Key 或 token hash。Auth 服务当前为 `23 passed, 0 failed`，
-gateway-control 为 `15 passed, 0 failed`。
+以及页面不泄漏 Gateway Key 或 token hash。M2-C5 覆盖 operation 详情权限/组织范围、审计
+过滤和 cursor 绑定、脱敏、四种对账动作、父/子 operation 关系、原审计不可改写、旧快照
+失败关闭、依赖/审计失败和幂等重放。管理服务当前为 `44 passed, 0 failed`，auth-service
+为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`。
 
 尚未验证：
 
@@ -330,23 +344,25 @@ gateway-control 为 `15 passed, 0 failed`。
 - 浏览器、反向代理、真实 Cookie 域和公司 CA 的端到端演练。
 - C4-03a 的真实部署验收，以及真实共享卷上的用户级模型授权链路。
 - C4-03c 的 Docker/真实共享卷和生产部署验收；C4-04 已完成隔离真实 Magpie 的完整管理链路、
-  回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d 仍缺页面
-  E2E、停用/吊销/轮换页面、失败恢复入口、operation/audit 查询和人工对账，M2-C5/D 尚未验收。
+  回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d 仍有
+  页面 E2E、停用/吊销/轮换页面和失败恢复入口待 D 完成；C5 的查询与对账目前只有
+  Mock/故障测试证据，尚未接入完整管理页面。
 - 四个 M2-C2 写接口在真实 IdP、反向代理、真实 auth-service 和真实网关上的端到端演练。
 
 ## 当前限制
 
 - 单实例 JSON 存储，不适合多副本；超过 50-100 人或需要 HA 时迁移 PostgreSQL。
 - 每个管理请求会更新 `lastSeenAt`，小规模试点可接受，规模化需要共享存储和写合并。
-- result 审计失败时 operation 会停在 `dependency_invoked`；当前没有自动补偿或人工核对
-  队列，C5 需要提供查询、告警和受控恢复流程。
+- result 审计失败时 operation 会停在 `dependency_invoked`；C5 已提供查询、审计分页和受控
+  对账，但自动补偿、告警队列和真实运维演练仍未实现/验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。
 - 用量读取当前基于单个 `usage.jsonl` 文件；轮转、归档、超大文件和事件存储查询尚未验收。
-- 列表筛选、分页、CSV 导出、费用趋势图、管理员操作历史和写按钮属于 M2-C5/M2-D。
+- CSV 导出、费用趋势图、完整管理写按钮和运营看板属于 M2-D；C5 已提供审计过滤/分页和
+  管理员操作查询 API，尚未接入完整页面。
 - IPv6 允许列表当前只支持精确 `/128`。
 - 没有任何对话正文；完整内容审计属于 M4，必须单独授权和审计。
 - M2-C2/C3 的管理 API 已接入会话、CSRF、RBAC、组织范围、理由、幂等和 intent/result
   管理审计；C4-03c 已完成额度/模型 API 到 auth-service、gateway-control、apply/readback
   和同步后交付的 Mock/故障链路，C4-04 已通过完整管理到真实 Magpie 策略流 E2E。
-  Docker/真实共享卷、真实企业 IdP、反向代理、C4-03d 剩余页面、C5/D 和生产环境验收仍未
+  Docker/真实共享卷、真实企业 IdP、反向代理、C4-03d 剩余页面、C5 生产验收和 D 仍未
   完成，不能把 Mock 测试或隔离 E2E 通过描述成生产管理闭环。

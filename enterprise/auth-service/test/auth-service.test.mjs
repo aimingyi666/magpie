@@ -1199,6 +1199,121 @@ test("new users need quota and models before joining, in either write order", { 
   assert.deepEqual(thenModels.body.data.policy.missing, []);
 });
 
+test("policy reconciliation atomically updates models and limits for every active credential", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  const first = await joinDevice(f, "Reconcile PC One");
+  const second = await joinDevice(f, "Reconcile PC Two");
+  const user = await userByEmail(f);
+  const beforeVersion = user.gatewayPolicy.version;
+  const beforeApplyCalls = f.gatewayControl.applyCalls.length;
+  const limits = [{ period: "month", tokens: 250000, cost: 12.5, cacheReads: true }];
+  const models = ["deepseek/deepseek-chat", "deepseek/deepseek-reasoner"];
+
+  const reconciled = await internalJson(
+    f,
+    `/api/v1/internal/admin/users/${user.id}/policy/reconcile`,
+    "POST",
+    {
+      expectedVersion: beforeVersion,
+      operationId: operationId("reconcile"),
+      models,
+      limits,
+    },
+  );
+  assert.equal(reconciled.response.status, 200, JSON.stringify(reconciled.body));
+  assert.equal(reconciled.body.data.state, "succeeded");
+  assert.equal(reconciled.body.data.requiresReconciliation, false);
+  assert.equal(reconciled.body.data.policy.version, beforeVersion + 1);
+  assert.deepEqual(reconciled.body.data.policy.models, models);
+  assert.deepEqual(reconciled.body.data.policy.limits, limits);
+  assert.equal(reconciled.body.data.policy.quotaStatus, "known");
+  assert.equal(reconciled.body.data.policy.modelStatus, "known");
+  assert.equal(reconciled.body.data.credentials.total, 2);
+  assert.equal(reconciled.body.data.credentials.succeeded, 2);
+  assertNoPrivateValues(reconciled.body, f);
+
+  const stored = await f.auth.store.read((data) => structuredClone({
+    policy: data.users[user.id].gatewayPolicy,
+    credentials: Object.values(data.credentials).filter(
+      (credential) => credential.userId === user.id && credential.status === "active",
+    ),
+  }));
+  assert.equal(stored.policy.version, beforeVersion + 1);
+  assert.deepEqual(stored.policy.models, models);
+  assert.deepEqual(stored.policy.limits, limits);
+  assert.equal(stored.credentials.length, 2);
+  assert.ok(stored.credentials.every((credential) => credential.policyVersion === beforeVersion + 1));
+  assert.ok(stored.credentials.every((credential) => credential.policySyncState === "synced"));
+
+  const newApplyCalls = f.gatewayControl.applyCalls.slice(beforeApplyCalls);
+  assert.equal(newApplyCalls.length, 2);
+  assert.equal(new Set(newApplyCalls.map((call) => call.id)).size, 2);
+  assert.ok(newApplyCalls.every((call) => JSON.stringify(call.body.models) === JSON.stringify(models)));
+  assert.ok(newApplyCalls.every((call) => JSON.stringify(call.body.limits) === JSON.stringify([
+    { period: "month", days: 0, hours: 0, tokens: 250000, cost: 12.5, cacheReads: true },
+  ])));
+  assert.ok([first, second].every((joined) => joined.policyVersion === 2));
+
+  const stale = await internalJson(
+    f,
+    `/api/v1/internal/admin/users/${user.id}/policy/reconcile`,
+    "POST",
+    {
+      expectedVersion: beforeVersion,
+      operationId: operationId("reconcile_stale"),
+      models: ["deepseek/deepseek-chat"],
+      limits: [],
+    },
+  );
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.error.code, "policy_version_conflict");
+  assert.equal(stale.body.error.currentVersion, beforeVersion + 1);
+  assert.equal(f.gatewayControl.applyCalls.length, beforeApplyCalls + 2);
+  assertNoPrivateValues(stale.body, f);
+});
+
+test("concurrent policy reconciliation serializes and applies only once", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  await joinDevice(f, "Concurrent Reconcile PC");
+  const user = await userByEmail(f);
+  const expectedVersion = user.gatewayPolicy.version;
+  const beforeApplyCalls = f.gatewayControl.applyCalls.length;
+  const base = {
+    expectedVersion,
+    models: ["deepseek/deepseek-chat"],
+    limits: [{ period: "day", tokens: 10000 }],
+  };
+  const results = await Promise.all([
+    internalJson(
+      f,
+      `/api/v1/internal/admin/users/${user.id}/policy/reconcile`,
+      "POST",
+      { ...base, operationId: operationId("reconcile_concurrent_a") },
+    ),
+    internalJson(
+      f,
+      `/api/v1/internal/admin/users/${user.id}/policy/reconcile`,
+      "POST",
+      { ...base, operationId: operationId("reconcile_concurrent_b") },
+    ),
+  ]);
+  results.sort((left, right) => left.response.status - right.response.status);
+  assert.deepEqual(results.map((result) => result.response.status), [200, 409]);
+  assert.equal(results[0].body.data.policy.version, expectedVersion + 1);
+  assert.equal(results[1].body.error.code, "policy_version_conflict");
+  assert.equal(f.gatewayControl.applyCalls.length, beforeApplyCalls + 1);
+
+  const stored = await f.auth.store.read((data) => structuredClone(data.users[user.id].gatewayPolicy));
+  assert.equal(stored.version, expectedVersion + 1);
+  assert.deepEqual(stored.limits, [
+    { period: "day", tokens: 10000, cost: 0, cacheReads: false },
+  ]);
+});
+
 test("issuance journal commits only after gateway apply and readback", { timeout: 30000 }, async (t) => {
   const f = await fixture();
   t.after(() => f.close());

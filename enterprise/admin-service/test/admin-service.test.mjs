@@ -158,6 +158,7 @@ function createMockAuthService(expectedToken) {
   let writeFailing = false;
   let writeDelayMs = 0;
   const writeCalls = [];
+  const reconcileCalls = [];
   const users = [
     {
       id: "usr_alice",
@@ -392,6 +393,77 @@ function createMockAuthService(expectedToken) {
       parsedBody = text ? JSON.parse(text) : {};
       return parsedBody;
     }
+    const reconcileWrite = /^\/api\/v1\/internal\/admin\/users\/([A-Za-z0-9_-]+)\/policy\/reconcile$/.exec(
+      url.pathname,
+    );
+    if (req.method === "POST" && reconcileWrite) {
+      const body = await requestBody();
+      reconcileCalls.push({ method: req.method, pathname: url.pathname, body });
+      if (writeFailing) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "write_unavailable" } }));
+        return;
+      }
+      await delayWrite();
+      const user = users.find((candidate) => candidate.id === reconcileWrite[1]);
+      if (!user) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "user_not_found" } }));
+        return;
+      }
+      if (body.expectedVersion !== user.policy.version) {
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          error: {
+            code: "policy_version_conflict",
+            message: "The user policy changed; reload it and retry",
+            currentVersion: user.policy.version,
+            expectedVersion: body.expectedVersion,
+          },
+        }));
+        return;
+      }
+      user.policy.models = body.models;
+      user.policy.limits = body.limits;
+      user.policy.version += 1;
+      user.policy.quotaStatus = "known";
+      user.policy.modelStatus = "known";
+      user.policy.including = ["quota", "models"];
+      user.policy.missing = [];
+      user.policy.updatedAt = "2026-10-31T12:00:00.000Z";
+      user.policy.confirmedAt = "2026-10-31T12:00:01.000Z";
+      user.policy.operationId = body.operationId;
+      for (const credential of credentials) {
+        if (credential.userId !== user.id || credential.status !== "active") continue;
+        credential.policyVersion = user.policy.version;
+        credential.policySyncState = "synced";
+        credential.models = [...user.policy.models];
+        credential.lastPolicyOperationId = body.operationId;
+      }
+      ok({
+        ok: true,
+        data: {
+          operationId: body.operationId,
+          state: "succeeded",
+          policy: { ...user.policy },
+          credentials: {
+            total: 1,
+            succeeded: 1,
+            failed: 0,
+            pending: 0,
+            unknown: 0,
+            failedOnly: 0,
+            failedItems: [],
+          },
+          requiresReconciliation: false,
+          gatewayKey: "should-not-leak-gateway-key",
+          tokenHash: "should-not-leak-token-hash",
+          requestBody: "must-not-leak",
+          prompt: "must-not-leak",
+        },
+      });
+      return;
+    }
     const policyWrite = /^\/api\/v1\/internal\/admin\/users\/([A-Za-z0-9_-]+)\/policy\/(quota|models)$/.exec(
       url.pathname,
     );
@@ -613,6 +685,7 @@ function createMockAuthService(expectedToken) {
     setWriteFailing(value) { writeFailing = value; },
     setWriteDelay(value) { writeDelayMs = value; },
     get writeCalls() { return writeCalls; },
+    get reconcileCalls() { return reconcileCalls; },
   };
 }
 
@@ -924,6 +997,120 @@ function assertNoWriteSecrets(value, f, jar) {
 
 function readAdminData(f) {
   return f.admin.store.read((data) => structuredClone(data));
+}
+
+async function seedAdminOperation(f, input = {}) {
+  const {
+    audit = true,
+    ...overrides
+  } = input;
+  const id = overrides.id || `op_seed_${crypto.randomUUID()}`;
+  const createdAt = overrides.createdAt || "2026-10-20T00:00:00.000Z";
+  const beforeSummary = overrides.beforeSummary === undefined
+    ? {
+      id: "usr_alice",
+      email: "alice@corp.example",
+      status: "active",
+      version: 2,
+      models: ["deepseek/deepseek-chat"],
+      limits: [],
+      quotaStatus: "known",
+      modelStatus: "known",
+      updatedAt: "2026-10-19T00:00:00.000Z",
+      confirmedAt: "2026-10-19T00:01:00.000Z",
+      operationId: "op_seed_previous_policy",
+      including: ["quota", "models"],
+      missing: [],
+    }
+    : overrides.beforeSummary;
+  const responseBody = overrides.responseBody === undefined
+    ? {
+      result: {
+        state: "pending_sync",
+        requiresReconciliation: true,
+        credentials: {
+          total: 1,
+          succeeded: 0,
+          failed: 1,
+          pending: 1,
+          unknown: 0,
+          failedOnly: 0,
+          failedItems: [{
+            credentialId: "key-alice-new",
+            deviceId: "dev_alice",
+            errorCode: "policy_sync_in_progress",
+          }],
+        },
+      },
+    }
+    : overrides.responseBody;
+  const operation = {
+    id,
+    requestId: `req_${id}`,
+    idempotencyKeyHash: "",
+    requestFingerprint: "",
+    actorSubjectId: "adm_seed",
+    actorEmail: "seed-admin@corp.example",
+    roles: ["super_admin"],
+    scopeOrgUnitIds: ["*"],
+    action: "user.policy.models",
+    targetType: "user",
+    targetId: "usr_alice",
+    reason: "Seeded operation for reconciliation tests",
+    approvalId: "CHG-SEED-1",
+    beforeSummary,
+    status: "failed",
+    createdAt,
+    updatedAt: createdAt,
+    dependencyInvokedAt: createdAt,
+    completedAt: createdAt,
+    intentAuditId: "",
+    resultAuditId: "",
+    responseStatus: 502,
+    responseBody,
+    errorCode: "dependency_unavailable",
+    sourceIp: "127.0.0.1",
+    userAgentHash: "seed-agent-hash",
+    ...overrides,
+    id,
+    beforeSummary,
+    responseBody,
+  };
+  await f.admin.store.mutate((data) => {
+    data.adminOperations[id] = structuredClone(operation);
+    if (!audit) return;
+    for (const [index, phase] of ["intent", "result"].entries()) {
+      data.adminAuditLogs.push({
+        id: `audit_${id}_${phase}`,
+        operationId: id,
+        requestId: operation.requestId,
+        timestamp: new Date(Date.parse(createdAt) + index * 1000).toISOString(),
+        phase,
+        actorSubject: operation.actorSubjectId,
+        actorSubjectId: operation.actorSubjectId,
+        actorEmail: operation.actorEmail,
+        roles: [...operation.roles],
+        scopeOrgUnitIds: [...operation.scopeOrgUnitIds],
+        action: operation.action,
+        targetType: operation.targetType,
+        targetId: operation.targetId,
+        beforeSummary: structuredClone(operation.beforeSummary),
+        afterSummary: phase === "result"
+          ? structuredClone(operation.responseBody?.result || {})
+          : {},
+        result: phase === "result" ? "failed" : "pending",
+        errorCode: phase === "result" ? operation.errorCode : "",
+        sourceIp: operation.sourceIp,
+        userAgentHash: operation.userAgentHash,
+        reason: operation.reason,
+        approvalId: operation.approvalId,
+        parentOperationId: "",
+        reconciliationAction: "",
+        evidenceRef: "",
+      });
+    }
+  });
+  return structuredClone(operation);
 }
 
 test("management OIDC login, CSRF, role removal and credential-safe storage", { timeout: 30000 }, async (t) => {
@@ -2196,6 +2383,659 @@ test("M2-C3 result audit failure never returns success and leaves the operation 
   assert.deepEqual(audits.map((audit) => audit.phase), ["intent"]);
   assert.equal(audits[0].result, "pending");
   assertNoWriteSecrets(data, f, jar);
+});
+
+test("M2-C5 operation details enforce permissions and organization scope", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const aliceOperation = await seedAdminOperation(f, { id: "op_detail_alice" });
+
+  const detail = await adminGet(f, jar, `/api/v1/admin/operations/${aliceOperation.id}`);
+  assert.equal(detail.response.status, 200);
+  assert.equal(detail.body.operation.operationId, aliceOperation.id);
+  assert.equal(detail.body.operation.targetId, "usr_alice");
+  assert.equal(detail.body.operation.reconciliationState, "pending");
+  assert.equal(detail.body.operation.requiresReconciliation, true);
+  assert.equal(detail.body.operation.credentialSummary.total, 1);
+  assertNoWriteSecrets(detail.body, f, jar);
+
+  await seedAdminOperation(f, {
+    id: "op_detail_missing_target",
+    targetId: "usr_missing",
+    beforeSummary: { id: "usr_missing", version: 0, models: [], limits: [] },
+  });
+  const missingTarget = await adminGet(
+    f,
+    jar,
+    "/api/v1/admin/operations/op_detail_missing_target",
+  );
+  assert.equal(missingTarget.response.status, 404);
+  assert.equal(missingTarget.body.error.code, "operation_target_unavailable");
+
+  await bindRole(f, current.body.user.id, "department_admin", "org-root");
+  const ownScope = await adminGet(f, jar, `/api/v1/admin/operations/${aliceOperation.id}`);
+  assert.equal(ownScope.response.status, 200);
+
+  await seedAdminOperation(f, {
+    id: "op_detail_sales",
+    targetId: "usr_carol",
+    beforeSummary: {
+      id: "usr_carol",
+      version: 0,
+      models: ["openai/gpt-test"],
+      limits: [],
+    },
+  });
+  const crossScope = await adminGet(f, jar, "/api/v1/admin/operations/op_detail_sales");
+  assert.equal(crossScope.response.status, 403);
+  assert.equal(crossScope.body.error.code, "forbidden_scope");
+
+  await bindRole(f, current.body.user.id, "auditor", "org-root");
+  const auditorDetail = await adminGet(f, jar, `/api/v1/admin/operations/${aliceOperation.id}`);
+  assert.equal(auditorDetail.response.status, 403);
+  assert.equal(auditorDetail.body.error.code, "forbidden_role");
+});
+
+test("M2-C5 audit logs paginate stably and bind cursors to the session and query", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const baseTime = Date.parse("2026-10-20T00:00:00.000Z");
+  for (let index = 0; index < 55; index += 1) {
+    await seedAdminOperation(f, {
+      id: `op_page_${String(index).padStart(3, "0")}`,
+      targetId: index % 2 === 0 ? "usr_alice" : "usr_bob",
+      createdAt: new Date(baseTime + index * 1000).toISOString(),
+    });
+  }
+  await f.admin.store.mutate((data) => {
+    const legacy = data.adminAuditLogs.find(
+      (record) => record.id === "audit_op_page_000_result",
+    );
+    legacy.actorSubject = "adm_legacy";
+    delete legacy.actorSubjectId;
+  });
+
+  const defaultPage = await adminGet(f, jar, "/api/v1/admin/audit-logs");
+  assert.equal(defaultPage.response.status, 200);
+  assert.equal(defaultPage.body.auditLogs.length, 50);
+  assert.ok(defaultPage.body.nextCursor);
+
+  const maximumPage = await adminGet(f, jar, "/api/v1/admin/audit-logs?limit=200");
+  assert.equal(maximumPage.response.status, 200);
+  assert.equal(maximumPage.body.auditLogs.length, 110);
+  assert.equal(maximumPage.body.nextCursor, "");
+
+  for (const limit of ["0", "201", "1.5", "-1"]) {
+    const invalid = await adminGet(f, jar, `/api/v1/admin/audit-logs?limit=${limit}`);
+    assert.equal(invalid.response.status, 400);
+    assert.equal(invalid.body.error.code, "invalid_limit");
+  }
+
+  const firstPage = await adminGet(f, jar, "/api/v1/admin/audit-logs?limit=37");
+  assert.equal(firstPage.response.status, 200);
+  assert.equal(firstPage.body.auditLogs.length, 37);
+  assert.ok(firstPage.body.nextCursor);
+  const cursor = firstPage.body.nextCursor;
+
+  const tampered = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit-logs?limit=37&cursor=${encodeURIComponent(`${cursor.slice(0, -1)}A`)}`,
+  );
+  assert.equal(tampered.response.status, 400);
+  assert.equal(tampered.body.error.code, "invalid_cursor");
+
+  const changedQuery = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit-logs?limit=38&cursor=${encodeURIComponent(cursor)}`,
+  );
+  assert.equal(changedQuery.response.status, 400);
+  assert.equal(changedQuery.body.error.code, "invalid_cursor");
+
+  const seen = new Set();
+  let nextCursor = "";
+  let pages = 0;
+  do {
+    const pathname = `/api/v1/admin/audit-logs?limit=37${nextCursor
+      ? `&cursor=${encodeURIComponent(nextCursor)}`
+      : ""}`;
+    const page = await adminGet(f, jar, pathname);
+    assert.equal(page.response.status, 200);
+    for (const record of page.body.auditLogs) {
+      assert.ok(!seen.has(record.id), `duplicate audit record ${record.id}`);
+      seen.add(record.id);
+    }
+    nextCursor = page.body.nextCursor;
+    pages += 1;
+    assert.ok(pages < 10);
+  } while (nextCursor);
+  assert.equal(seen.size, 110);
+
+  const legacy = await adminGet(
+    f,
+    jar,
+    "/api/v1/admin/audit-logs?actorSubjectId=adm_legacy&limit=10",
+  );
+  assert.equal(legacy.response.status, 200);
+  assert.deepEqual(legacy.body.auditLogs.map((record) => record.id), [
+    "audit_op_page_000_result",
+  ]);
+  assert.equal(legacy.body.auditLogs[0].actorSubjectId, "adm_legacy");
+
+  await bindRole(f, "adm_cursor_other", "super_admin", "*");
+  await f.admin.store.mutate((data) => {
+    const session = Object.values(data.adminSessions)[0];
+    session.subjectId = "adm_cursor_other";
+  });
+  const changedSubject = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit-logs?limit=37&cursor=${encodeURIComponent(cursor)}`,
+  );
+  assert.equal(changedSubject.response.status, 400);
+  assert.equal(changedSubject.body.error.code, "invalid_cursor");
+  assert.notEqual(current.body.user.id, "adm_cursor_other");
+});
+
+test("M2-C5 audit and operation reads redact content and credential material", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const marker = "M2C5-TOP-SECRET-VALUE";
+  const operation = await seedAdminOperation(f, {
+    id: "op_redaction",
+    beforeSummary: {
+      id: "usr_alice",
+      version: 2,
+      models: ["deepseek/deepseek-chat"],
+      limits: [],
+      secret: marker,
+      prompt: marker,
+      conversation: marker,
+      requestBody: marker,
+      responseBody: marker,
+      content: marker,
+      message: marker,
+      messages: [marker],
+      transcript: marker,
+      completion: marker,
+      dialogue: marker,
+      apiKey: marker,
+      nested: { cookie: marker, safe: "visible-metadata" },
+    },
+    responseBody: {
+      result: {
+        state: "pending_sync",
+        requiresReconciliation: true,
+        secret: marker,
+        prompt: marker,
+        conversation: marker,
+        requestBody: marker,
+        responseBody: marker,
+        content: marker,
+        message: marker,
+        messages: [marker],
+        transcript: marker,
+        completion: marker,
+        dialogue: marker,
+        apiKey: marker,
+        nested: { authorization: marker, safe: "visible-metadata" },
+      },
+    },
+  });
+
+  const audits = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit-logs?operationId=${operation.id}&limit=10`,
+  );
+  assert.equal(audits.response.status, 200);
+  assert.equal(audits.body.auditLogs.length, 2);
+  assert.ok(JSON.stringify(audits.body).includes("visible-metadata"));
+  assert.ok(!JSON.stringify(audits.body).includes(marker));
+
+  const detail = await adminGet(f, jar, `/api/v1/admin/operations/${operation.id}`);
+  assert.equal(detail.response.status, 200);
+  assert.ok(JSON.stringify(detail.body).includes("visible-metadata"));
+  assert.ok(!JSON.stringify(detail.body).includes(marker));
+  assertNoWriteSecrets(audits.body, f, jar);
+  assertNoWriteSecrets(detail.body, f, jar);
+});
+
+test("M2-C5 reconciliation fails closed on missing approval, CSRF, evidence, and idempotency", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const operation = await seedAdminOperation(f, { id: "op_reconcile_validation" });
+  const pathname = `/api/v1/admin/operations/${operation.id}/reconcile`;
+  const complete = {
+    reason: "Reconcile after the gateway incident",
+    approvalId: "CHG-2001",
+    action: "retry_desired",
+  };
+
+  const noCsrf = await adminPost(
+    f,
+    jar,
+    pathname,
+    complete,
+    "",
+    { "idempotency-key": "m2c5-validation-csrf" },
+  );
+  assert.equal(noCsrf.response.status, 403);
+  assert.equal(noCsrf.body.error.code, "csrf_invalid");
+
+  const noReason = await adminPost(
+    f,
+    jar,
+    pathname,
+    { approvalId: "CHG-2001", action: "retry_desired" },
+    current.body.csrfToken,
+    { "idempotency-key": "m2c5-validation-reason" },
+  );
+  assert.equal(noReason.response.status, 400);
+  assert.equal(noReason.body.error.code, "invalid_reason");
+
+  const noApproval = await adminPost(
+    f,
+    jar,
+    pathname,
+    { reason: "Reconcile after the gateway incident", action: "retry_desired" },
+    current.body.csrfToken,
+    { "idempotency-key": "m2c5-validation-approval" },
+  );
+  assert.equal(noApproval.response.status, 400);
+  assert.equal(noApproval.body.error.code, "approval_required");
+
+  const noIdempotency = await adminPost(
+    f,
+    jar,
+    pathname,
+    complete,
+    current.body.csrfToken,
+  );
+  assert.equal(noIdempotency.response.status, 400);
+  assert.equal(noIdempotency.body.error.code, "idempotency_key_required");
+
+  const noEvidence = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...complete, action: "confirm_applied" },
+    current.body.csrfToken,
+    { "idempotency-key": "m2c5-validation-evidence" },
+  );
+  assert.equal(noEvidence.response.status, 400);
+  assert.equal(noEvidence.body.error.code, "evidence_required");
+
+  const invalidAction = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...complete, action: "assume_success" },
+    current.body.csrfToken,
+    { "idempotency-key": "m2c5-validation-action" },
+  );
+  assert.equal(invalidAction.response.status, 400);
+  assert.equal(invalidAction.body.error.code, "invalid_reconciliation_action");
+
+  const data = await readAdminData(f);
+  assert.deepEqual(Object.keys(data.adminOperations), [operation.id]);
+  assert.equal(f.auth.reconcileCalls.length, 0);
+});
+
+test("M2-C5 supports all four reconciliation actions without rewriting the parent result", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const operationIds = [
+    "op_reconcile_applied",
+    "op_reconcile_not_applied",
+    "op_reconcile_retry",
+    "op_reconcile_rollback",
+  ];
+  for (const id of operationIds) {
+    await seedAdminOperation(f, {
+      id,
+      beforeSummary: id === "op_reconcile_rollback"
+        ? {
+          id: "usr_alice",
+          version: 2,
+          models: ["openai/gpt-test"],
+          limits: [{ period: "month", tokens: 1000, cost: 1, cacheReads: false }],
+          quotaStatus: "known",
+          modelStatus: "known",
+        }
+        : undefined,
+    });
+  }
+  const before = await readAdminData(f);
+  const parentAudits = Object.fromEntries(operationIds.map((id) => [
+    id,
+    before.adminAuditLogs.filter((audit) => audit.operationId === id),
+  ]));
+
+  async function reconcile(operationId, action, key, evidenceRef = "") {
+    return adminPost(
+      f,
+      jar,
+      `/api/v1/admin/operations/${operationId}/reconcile`,
+      {
+        reason: `Controlled ${action} reconciliation`,
+        approvalId: `CHG-${key}`,
+        action,
+        ...(evidenceRef ? { evidenceRef } : {}),
+      },
+      current.body.csrfToken,
+      { "idempotency-key": key },
+    );
+  }
+
+  const applied = await reconcile(
+    "op_reconcile_applied",
+    "confirm_applied",
+    "m2c5-applied",
+    "ticket:CHG-APPLIED",
+  );
+  assert.equal(applied.response.status, 200, JSON.stringify(applied.body));
+  assert.equal(applied.body.result.manualEvidenceOnly, true);
+  assert.equal(applied.body.result.parentOperationId, "op_reconcile_applied");
+
+  const replay = await reconcile(
+    "op_reconcile_applied",
+    "confirm_applied",
+    "m2c5-applied",
+    "ticket:CHG-APPLIED",
+  );
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.operationId, applied.body.operationId);
+
+  const notApplied = await reconcile(
+    "op_reconcile_not_applied",
+    "confirm_not_applied",
+    "m2c5-not-applied",
+    "ticket:CHG-NOT-APPLIED",
+  );
+  assert.equal(notApplied.response.status, 200, JSON.stringify(notApplied.body));
+
+  const retried = await reconcile(
+    "op_reconcile_retry",
+    "retry_desired",
+    "m2c5-retry",
+  );
+  assert.equal(retried.response.status, 200, JSON.stringify(retried.body));
+  assert.equal(retried.body.result.state, "succeeded");
+
+  const rolledBack = await reconcile(
+    "op_reconcile_rollback",
+    "rollback_previous",
+    "m2c5-rollback",
+  );
+  assert.equal(rolledBack.response.status, 200, JSON.stringify(rolledBack.body));
+  assert.equal(f.auth.reconcileCalls.length, 2);
+  assert.deepEqual(f.auth.reconcileCalls[0].body.models, ["deepseek/deepseek-chat"]);
+  assert.deepEqual(f.auth.reconcileCalls[1].body.models, ["openai/gpt-test"]);
+  assert.deepEqual(f.auth.reconcileCalls[1].body.limits, [
+    { period: "month", tokens: 1000, cost: 1, cacheReads: false },
+  ]);
+
+  const after = await readAdminData(f);
+  const expectedStates = {
+    op_reconcile_applied: "confirmed_applied",
+    op_reconcile_not_applied: "confirmed_not_applied",
+    op_reconcile_retry: "not_required",
+    op_reconcile_rollback: "compensated",
+  };
+  for (const id of operationIds) {
+    const original = before.adminOperations[id];
+    const parent = after.adminOperations[id];
+    assert.equal(parent.reconciliationState, expectedStates[id]);
+    assert.equal(parent.status, original.status);
+    assert.deepEqual(parent.responseBody, original.responseBody);
+    assert.deepEqual(
+      after.adminAuditLogs.filter((audit) => audit.operationId === id),
+      parentAudits[id],
+    );
+  }
+
+  const childIds = Object.values(after.adminOperations)
+    .filter((operation) => operation.action === "operation.reconcile")
+    .map((operation) => operation.id);
+  assert.equal(childIds.length, 4);
+  for (const childId of childIds) {
+    const child = after.adminOperations[childId];
+    assert.ok(operationIds.includes(child.parentOperationId));
+    const childAudits = after.adminAuditLogs.filter((audit) => audit.operationId === childId);
+    assert.deepEqual(childAudits.map((audit) => audit.phase), ["intent", "result"]);
+    assert.ok(childAudits.every((audit) => audit.parentOperationId === child.parentOperationId));
+    assert.ok(childAudits.every((audit) => audit.reconciliationAction === child.reconciliationAction));
+  }
+  assertNoWriteSecrets(after, f, jar);
+});
+
+test("M2-C5 rollback refuses an incomplete trusted policy snapshot", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const operation = await seedAdminOperation(f, {
+    id: "op_reconcile_bad_snapshot",
+    beforeSummary: {
+      id: "usr_alice",
+      version: 2,
+      models: ["openai/gpt-test"],
+      limits: [{ period: "month", days: 1, tokens: 1000, cost: 1, cacheReads: false }],
+    },
+  });
+  const response = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/operations/${operation.id}/reconcile`,
+    {
+      reason: "Rollback requires a complete snapshot",
+      approvalId: "CHG-SNAPSHOT",
+      action: "rollback_previous",
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "m2c5-bad-snapshot" },
+  );
+  assert.equal(response.response.status, 409);
+  assert.equal(response.body.error.code, "trusted_snapshot_unavailable");
+  assert.equal(f.auth.reconcileCalls.length, 0);
+
+  const data = await readAdminData(f);
+  assert.deepEqual(Object.keys(data.adminOperations), [operation.id]);
+  assert.equal(data.adminOperations[operation.id].reconciliationState, undefined);
+  assert.equal(
+    data.adminAuditLogs.filter((audit) => audit.operationId === operation.id).length,
+    2,
+  );
+});
+
+test("M2-C5 reconciliation dependency failures are result-audited and idempotent", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const parent = await seedAdminOperation(f, { id: "op_reconcile_dependency_failure" });
+  const pathname = `/api/v1/admin/operations/${parent.id}/reconcile`;
+  const body = {
+    reason: "Dependency failure must remain auditable",
+    approvalId: "CHG-DEPENDENCY",
+    action: "retry_desired",
+  };
+  const headers = { "idempotency-key": "m2c5-dependency-failure" };
+  f.auth.setWriteFailing(true);
+
+  const failed = await adminPost(
+    f,
+    jar,
+    pathname,
+    body,
+    current.body.csrfToken,
+    headers,
+  );
+  assert.equal(failed.response.status, 502);
+  assert.equal(failed.body.error.code, "dependency_unavailable");
+  assert.match(failed.body.error.operationId, /^op_/);
+
+  const replay = await adminPost(
+    f,
+    jar,
+    pathname,
+    body,
+    current.body.csrfToken,
+    headers,
+  );
+  assert.equal(replay.response.status, 502);
+  assert.equal(replay.body.error.operationId, failed.body.error.operationId);
+
+  const conflict = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...body, reason: "A different request must not reuse the key" },
+    current.body.csrfToken,
+    headers,
+  );
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.error.code, "idempotency_conflict");
+  assert.equal(conflict.body.error.operationId, failed.body.error.operationId);
+  assert.equal(f.auth.reconcileCalls.length, 1);
+
+  const data = await readAdminData(f);
+  const child = data.adminOperations[failed.body.error.operationId];
+  assert.equal(child.status, "failed");
+  assert.equal(child.errorCode, "dependency_unavailable");
+  assert.equal(child.parentOperationId, parent.id);
+  assert.deepEqual(
+    data.adminAuditLogs
+      .filter((audit) => audit.operationId === child.id)
+      .map((audit) => audit.phase),
+    ["intent", "result"],
+  );
+  const parentAfter = data.adminOperations[parent.id];
+  assert.equal(parentAfter.status, parent.status);
+  assert.deepEqual(parentAfter.responseBody, parent.responseBody);
+  assert.equal(parentAfter.reconciliationState, "pending");
+  assertNoWriteSecrets(data, f, jar);
+});
+
+test("M2-C5 intent audit failure blocks reconciliation before the dependency call", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const parent = await seedAdminOperation(f, { id: "op_reconcile_intent_failure" });
+  const originalMutate = f.admin.store.mutate.bind(f.admin.store);
+  f.admin.store.mutate = (fn) => originalMutate((draft) => {
+    const before = Object.keys(draft.adminOperations).length;
+    const result = fn(draft);
+    if (Object.keys(draft.adminOperations).length > before) {
+      throw new Error("simulated reconciliation intent audit failure");
+    }
+    return result;
+  });
+
+  const response = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/operations/${parent.id}/reconcile`,
+    {
+      reason: "Intent audit must fail closed",
+      approvalId: "CHG-INTENT-FAILURE",
+      action: "retry_desired",
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "m2c5-intent-failure" },
+  );
+  assert.equal(response.response.status, 503);
+  assert.equal(response.body.error.code, "audit_unavailable");
+  assert.equal(f.auth.reconcileCalls.length, 0);
+
+  const data = await readAdminData(f);
+  assert.deepEqual(Object.keys(data.adminOperations), [parent.id]);
+  assert.equal(data.adminOperations[parent.id].reconciliationState, undefined);
+});
+
+test("M2-C5 result audit failure leaves reconciliation incomplete and does not acknowledge success", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const parent = await seedAdminOperation(f, { id: "op_reconcile_result_failure" });
+  const originalMutate = f.admin.store.mutate.bind(f.admin.store);
+  let failResultCommit = true;
+  f.admin.store.mutate = (fn) => originalMutate((draft) => {
+    const statuses = new Map(Object.entries(draft.adminOperations).map(
+      ([id, operation]) => [id, operation.status],
+    ));
+    const result = fn(draft);
+    const completedChild = Object.values(draft.adminOperations).some((operation) => (
+      operation.parentOperationId
+      && statuses.get(operation.id) === "dependency_invoked"
+      && (operation.status === "succeeded" || operation.status === "failed")
+    ));
+    if (failResultCommit && completedChild) {
+      failResultCommit = false;
+      throw new Error("simulated reconciliation result audit failure");
+    }
+    return result;
+  });
+
+  const response = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/operations/${parent.id}/reconcile`,
+    {
+      reason: "Result audit must fail closed",
+      approvalId: "CHG-RESULT-FAILURE",
+      action: "retry_desired",
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "m2c5-result-failure" },
+  );
+  assert.equal(response.response.status, 503);
+  assert.equal(response.body.error.code, "audit_unavailable");
+  assert.match(response.body.error.operationId, /^op_/);
+  assert.equal(f.auth.reconcileCalls.length, 1);
+
+  const data = await readAdminData(f);
+  const child = data.adminOperations[response.body.error.operationId];
+  assert.equal(child.status, "dependency_invoked");
+  assert.equal(child.resultAuditId, "");
+  assert.deepEqual(
+    data.adminAuditLogs
+      .filter((audit) => audit.operationId === child.id)
+      .map((audit) => audit.phase),
+    ["intent"],
+  );
+  assert.equal(data.adminOperations[parent.id].reconciliationState, undefined);
 });
 
 test("usage storage failures are not rendered as partial reports", { timeout: 30000 }, async (t) => {

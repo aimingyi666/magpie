@@ -38,7 +38,53 @@ import { readUsageFile } from "./usage-reader.js";
 const MAX_BODY = 16 * 1024;
 const DEFAULT_USAGE_WINDOW_DAYS = 7;
 const MAX_TIMESERIES_POINTS = 10000;
+const DEFAULT_AUDIT_LIMIT = 50;
+const MAX_AUDIT_LIMIT = 200;
+const MAX_AUDIT_CURSOR = 4096;
 const ADMIN_APP_JS = await fs.readFile(new URL("./admin-app.js", import.meta.url), "utf8");
+
+const OPERATION_PERMISSIONS = Object.freeze({
+  "user.disable": "users.disable",
+  "user.enable": "users.disable",
+  "device.revoke": "devices.revoke",
+  "credential.rotate": "credentials.rotate",
+  "user.policy.quota": "quota.write",
+  "user.policy.models": "models.write",
+  "operation.reconcile": "operations.reconcile",
+});
+
+const POLICY_ACTIONS = new Set([
+  "user.policy.quota",
+  "user.policy.models",
+]);
+
+const RECONCILIATION_ACTIONS = new Set([
+  "retry_desired",
+  "rollback_previous",
+  "confirm_applied",
+  "confirm_not_applied",
+]);
+
+const RECONCILIATION_STATES = new Set([
+  "not_required",
+  "pending",
+  "confirmed_applied",
+  "confirmed_not_applied",
+  "compensated",
+]);
+
+const NON_RETRYABLE_OPERATION_ERRORS = new Set([
+  "approval_required",
+  "csrf_invalid",
+  "forbidden_role",
+  "forbidden_scope",
+  "idempotency_conflict",
+  "invalid_approval_id",
+  "invalid_json",
+  "invalid_reason",
+  "invalid_request",
+  "target_not_found",
+]);
 
 class HttpError extends Error {
   constructor(statusCode, code, message) {
@@ -159,6 +205,14 @@ function validateOptionalIdempotencyKey(req) {
   return value;
 }
 
+function validateRequiredIdempotencyKey(req) {
+  const value = validateOptionalIdempotencyKey(req);
+  if (!value) {
+    throw new HttpError(400, "idempotency_key_required", "Idempotency-Key is required");
+  }
+  return value;
+}
+
 function cleanOptionalApprovalId(value) {
   const approvalId = String(value ?? "").trim();
   if (!approvalId) return "";
@@ -166,6 +220,18 @@ function cleanOptionalApprovalId(value) {
     throw new HttpError(400, "invalid_approval_id", "approvalId is invalid");
   }
   return approvalId;
+}
+
+function cleanEvidenceRef(value, required = false) {
+  const evidenceRef = String(value ?? "").replace(/[\u0000-\u001f\u007f]/g, "").trim();
+  if (!evidenceRef) {
+    if (required) throw new HttpError(400, "evidence_required", "evidenceRef is required");
+    return "";
+  }
+  if ([...evidenceRef].length > 500) {
+    throw new HttpError(400, "invalid_evidence_ref", "evidenceRef must be at most 500 characters");
+  }
+  return evidenceRef;
 }
 
 function canonicalValue(value) {
@@ -181,6 +247,134 @@ function canonicalValue(value) {
   return value;
 }
 
+function safeStringList(value) {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function safePolicyLimits(limits) {
+  if (!Array.isArray(limits)) return null;
+  return limits.map((limit) => {
+    if (!limit || typeof limit !== "object" || Array.isArray(limit)) return {};
+    const output = {
+      period: String(limit.period || ""),
+    };
+    for (const key of ["days", "hours", "tokens", "cost"]) {
+      if (Number.isFinite(Number(limit[key]))) output[key] = Number(limit[key]);
+    }
+    if (typeof limit.cacheReads === "boolean") output.cacheReads = limit.cacheReads;
+    return output;
+  });
+}
+
+function policyLimitsAreValid(limits) {
+  if (!Array.isArray(limits) || limits.length > 5) return false;
+  const seen = new Set();
+  for (const limit of limits) {
+    if (!limit || typeof limit !== "object" || Array.isArray(limit)) return false;
+    if (!["day", "week", "month", "days", "hours"].includes(limit.period)) return false;
+    const tokens = limit.tokens == null ? 0 : limit.tokens;
+    const cost = limit.cost == null ? 0 : limit.cost;
+    if (!Number.isSafeInteger(tokens) || tokens < 0) return false;
+    if (!Number.isFinite(cost) || cost < 0) return false;
+    if (Math.abs(cost * 10000 - Math.round(cost * 10000)) > 1e-7) return false;
+    if (tokens <= 0 && cost <= 0) return false;
+    if (limit.cacheReads != null && typeof limit.cacheReads !== "boolean") return false;
+    if (limit.period === "days") {
+      if (!Number.isInteger(limit.days) || limit.days < 1 || limit.days > 3650) return false;
+      if (limit.hours != null) return false;
+    } else if (limit.period === "hours") {
+      if (!Number.isInteger(limit.hours) || limit.hours < 1 || limit.hours > 8760) return false;
+      if (limit.days != null) return false;
+    } else if (limit.days != null || limit.hours != null) {
+      return false;
+    }
+    const windowKey = `${limit.period}|${limit.days || ""}|${limit.hours || ""}`;
+    if (seen.has(windowKey)) return false;
+    seen.add(windowKey);
+  }
+  return true;
+}
+
+function safeAuditValue(value, depth = 0) {
+  if (value == null || typeof value === "boolean") return value;
+  if (typeof value === "number") return Number.isFinite(value) ? value : 0;
+  if (typeof value === "string") return value.slice(0, 1000);
+  if (depth >= 5) return null;
+  if (Array.isArray(value)) {
+    return value.slice(0, 100).map((entry) => safeAuditValue(entry, depth + 1));
+  }
+  if (typeof value !== "object") return String(value).slice(0, 1000);
+  const output = {};
+  for (const [key, entry] of Object.entries(value).slice(0, 50)) {
+    const normalizedKey = key.replace(/[^A-Za-z0-9]/g, "").toLowerCase();
+    if (key.length > 80
+        || [
+          "gatewaykey",
+          "devicetoken",
+          "credential",
+          "servicetoken",
+          "accesstoken",
+          "refreshtoken",
+          "requestbody",
+          "responsebody",
+          "body",
+          "rawbody",
+          "content",
+          "message",
+          "messages",
+          "transcript",
+          "completion",
+          "dialogue",
+          "apikey",
+        ].includes(normalizedKey)
+        || /token|secret|password|cookie|authorization|privatekey|publickey|prompt|conversation/.test(normalizedKey)) {
+      continue;
+    }
+    output[key] = safeAuditValue(entry, depth + 1);
+  }
+  return output;
+}
+
+function operationState(operation) {
+  const resultState = String(operation?.responseBody?.result?.state || "");
+  return resultState || String(operation?.status || "unknown");
+}
+
+function operationRetryable(operation) {
+  const state = operationState(operation);
+  if (["partial_success", "pending_sync", "unknown"].includes(state)) return true;
+  if (operation?.status !== "failed") return false;
+  return !NON_RETRYABLE_OPERATION_ERRORS.has(String(operation.errorCode || ""));
+}
+
+function explicitReconciliationState(operation) {
+  const state = String(operation?.reconciliationState || "");
+  return RECONCILIATION_STATES.has(state) ? state : "";
+}
+
+function operationRequiresReconciliation(operation) {
+  const reconciliationState = explicitReconciliationState(operation);
+  if (["confirmed_applied", "confirmed_not_applied", "compensated"].includes(reconciliationState)) {
+    return false;
+  }
+  if (reconciliationState === "pending") return true;
+  const state = operationState(operation);
+  if (state === "dependency_invoked"
+      || state === "partial_success"
+      || state === "pending_sync"
+      || state === "unknown") {
+    return true;
+  }
+  if (operation?.responseBody?.result?.requiresReconciliation === true) return true;
+  return operation?.status === "failed" && operationRetryable(operation);
+}
+
+function compareAuditRecords(left, right) {
+  const timestampOrder = String(right.timestamp || "").localeCompare(String(left.timestamp || ""));
+  if (timestampOrder !== 0) return timestampOrder;
+  return String(right.id || "").localeCompare(String(left.id || ""));
+}
+
 function writeRequestFingerprint(action, targetType, targetId, reason, approvalId, payload = {}) {
   return sha256(JSON.stringify(canonicalValue({
     action,
@@ -194,10 +388,23 @@ function writeRequestFingerprint(action, targetType, targetId, reason, approvalI
 
 function writeTargetSnapshot(targetType, target) {
   if (targetType === "user") {
+    const policy = target.policy && typeof target.policy === "object" && !Array.isArray(target.policy)
+      ? target.policy
+      : {};
     return {
       id: String(target.id || ""),
       email: String(target.email || ""),
       status: String(target.status || ""),
+      version: Number.isSafeInteger(policy.version) ? policy.version : 0,
+      models: Array.isArray(policy.models) ? safeStringList(policy.models) : null,
+      limits: safePolicyLimits(policy.limits),
+      quotaStatus: String(policy.quotaStatus || "unknown"),
+      modelStatus: String(policy.modelStatus || "unknown"),
+      updatedAt: String(policy.updatedAt || ""),
+      confirmedAt: String(policy.confirmedAt || ""),
+      operationId: String(policy.operationId || ""),
+      including: safeStringList(policy.including),
+      missing: safeStringList(policy.missing),
     };
   }
   if (targetType === "device") {
@@ -890,6 +1097,193 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     };
   }
 
+  function safeOperationDetail(operation, dependencyInvokedAt = "") {
+    const result = operation.responseBody?.result;
+    const credentials = safePolicyCredentialSummary(result?.credentials);
+    const reconciliationState = explicitReconciliationState(operation)
+      || (operationRequiresReconciliation(operation) ? "pending" : "not_required");
+    return {
+      operationId: String(operation.id || ""),
+      requestId: String(operation.requestId || ""),
+      action: String(operation.action || ""),
+      targetType: String(operation.targetType || ""),
+      targetId: String(operation.targetId || ""),
+      state: operationState(operation),
+      errorCode: String(operation.errorCode || ""),
+      retryable: operationRetryable(operation),
+      requiresReconciliation: reconciliationState === "pending",
+      actorSubjectId: String(operation.actorSubjectId || ""),
+      role: String(operation.roles?.[0] || ""),
+      roles: safeStringList(operation.roles),
+      scopeOrgUnitIds: safeStringList(operation.scopeOrgUnitIds),
+      createdAt: String(operation.createdAt || ""),
+      updatedAt: String(operation.updatedAt || ""),
+      dependencyInvokedAt: String(operation.dependencyInvokedAt || dependencyInvokedAt || ""),
+      completedAt: String(operation.completedAt || ""),
+      policyVersion: Number.isSafeInteger(result?.policy?.version)
+        ? result.policy.version
+        : safeNumber(operation.beforeSummary?.version),
+      credentialSummary: credentials,
+      failedItems: credentials?.failedItems || [],
+      reconciliationState,
+      reconciliationAction: String(operation.reconciliationAction || ""),
+      evidenceRef: String(operation.reconciliationEvidenceRef || ""),
+      reconciledAt: String(operation.reconciledAt || ""),
+      reconciledByOperationId: String(operation.reconciledByOperationId || ""),
+      parentOperationId: String(operation.parentOperationId || ""),
+      beforeSummary: safeAuditValue(operation.beforeSummary),
+      afterSummary: safeAuditValue(result || {}),
+    };
+  }
+
+  function auditQuery(searchParams) {
+    const one = (name, maxLength = 256) => {
+      const value = String(searchParams.get(name) || "").trim();
+      if ([...value].length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new HttpError(400, "invalid_audit_filter", `${name} is invalid`);
+      }
+      return value;
+    };
+    const timestamp = (name) => {
+      const value = one(name, 80);
+      if (!value) return "";
+      const parsed = Date.parse(value);
+      if (!Number.isFinite(parsed)) {
+        throw new HttpError(400, "invalid_time_range", `${name} must be a valid timestamp`);
+      }
+      return new Date(parsed).toISOString();
+    };
+    const rawLimit = one("limit", 20);
+    if (rawLimit && !/^[1-9]\d*$/.test(rawLimit)) {
+      throw new HttpError(400, "invalid_limit", "limit must be a positive integer");
+    }
+    const limit = rawLimit ? Number(rawLimit) : DEFAULT_AUDIT_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit > MAX_AUDIT_LIMIT) {
+      throw new HttpError(400, "invalid_limit", `limit must not exceed ${MAX_AUDIT_LIMIT}`);
+    }
+    const from = timestamp("from");
+    const to = timestamp("to");
+    if (from && to && Date.parse(from) > Date.parse(to)) {
+      throw new HttpError(400, "invalid_time_range", "from must not be after to");
+    }
+    const normalized = {
+      operationId: one("operationId", 128),
+      actorSubjectId: one("actorSubjectId", 128),
+      action: one("action", 128),
+      targetType: one("targetType", 32),
+      targetId: one("targetId", 128),
+      result: one("result", 64),
+      from,
+      to,
+      limit,
+    };
+    if (normalized.targetType && !["user", "device", "credential"].includes(normalized.targetType)) {
+      throw new HttpError(400, "invalid_audit_filter", "targetType is not supported");
+    }
+    return {
+      ...normalized,
+      cursor: one("cursor", MAX_AUDIT_CURSOR),
+      queryHash: sha256(JSON.stringify(canonicalValue(normalized))),
+    };
+  }
+
+  function auditCursorSignature(payload) {
+    return crypto.createHmac("sha256", config.sessionSecret)
+      .update(payload)
+      .digest("base64url");
+  }
+
+  function encodeAuditCursor(query, session, record) {
+    const payload = Buffer.from(JSON.stringify({
+      v: 1,
+      sub: session.subjectId,
+      qh: query.queryHash,
+      t: String(record.timestamp || ""),
+      id: String(record.id || ""),
+    })).toString("base64url");
+    return `${payload}.${auditCursorSignature(payload)}`;
+  }
+
+  function decodeAuditCursor(cursor, query, session) {
+    if (!cursor) return null;
+    const parts = cursor.split(".");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    }
+    const expected = auditCursorSignature(parts[0]);
+    if (!safeEqual(parts[1], expected)) {
+      throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    } catch {
+      throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    }
+    if (parsed?.v !== 1
+        || parsed.sub !== session.subjectId
+        || parsed.qh !== query.queryHash
+        || typeof parsed.t !== "string"
+        || typeof parsed.id !== "string"
+        || !parsed.id) {
+      throw new HttpError(400, "invalid_cursor", "cursor does not match this query");
+    }
+    const time = Date.parse(parsed.t);
+    if (!Number.isFinite(time)) throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    return { time, timestamp: new Date(time).toISOString(), id: parsed.id };
+  }
+
+  async function auditTargetMaps() {
+    const [{ users }, { devices }, { credentials }] = await Promise.all([
+      authService.users(),
+      authService.devices(),
+      authService.credentials(),
+    ]);
+    return {
+      users: new Map(users.map((user) => [user.id, user])),
+      devices: new Map(devices.map((device) => [device.id, device])),
+      credentials: new Map(credentials.map((credential) => [credential.id, credential])),
+    };
+  }
+
+  function targetUserId(maps, targetType, targetId) {
+    if (targetType === "user") return maps.users.has(targetId) ? targetId : "";
+    if (targetType === "device") return String(maps.devices.get(targetId)?.userId || "");
+    if (targetType === "credential") {
+      return String(maps.credentials.get(targetId)?.userId || "");
+    }
+    return "";
+  }
+
+  function safeAuditRecord(record) {
+    return {
+      id: String(record.id || ""),
+      operationId: String(record.operationId || ""),
+      requestId: String(record.requestId || ""),
+      timestamp: String(record.timestamp || ""),
+      phase: String(record.phase || ""),
+      actorSubjectId: String(record.actorSubjectId || record.actorSubject || ""),
+      actorEmail: String(record.actorEmail || ""),
+      role: String(record.roles?.[0] || ""),
+      roles: safeStringList(record.roles),
+      scopeOrgUnitIds: safeStringList(record.scopeOrgUnitIds),
+      action: String(record.action || ""),
+      targetType: String(record.targetType || ""),
+      targetId: String(record.targetId || ""),
+      beforeSummary: safeAuditValue(record.beforeSummary),
+      afterSummary: safeAuditValue(record.afterSummary),
+      result: String(record.result || ""),
+      errorCode: String(record.errorCode || ""),
+      sourceIp: String(record.sourceIp || ""),
+      userAgentHash: String(record.userAgentHash || ""),
+      reason: String(record.reason || ""),
+      approvalId: String(record.approvalId || ""),
+      parentOperationId: String(record.parentOperationId || ""),
+      reconciliationAction: String(record.reconciliationAction || ""),
+      evidenceRef: String(record.evidenceRef || ""),
+    };
+  }
+
   function publicAuthUser(data, user) {
     const orgUnitId = activeUserOrgUnit(data, user.id);
     const org = orgUnitId ? data.orgUnits[orgUnitId] : null;
@@ -1103,6 +1497,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       timestamp: new Date().toISOString(),
       phase,
       actorSubject: operation.actorSubjectId,
+      actorSubjectId: operation.actorSubjectId,
       actorEmail: operation.actorEmail,
       roles: [...operation.roles],
       scopeOrgUnitIds: [...operation.scopeOrgUnitIds],
@@ -1117,7 +1512,440 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       userAgentHash: operation.userAgentHash,
       reason: operation.reason,
       approvalId: operation.approvalId,
+      parentOperationId: String(options.parentOperationId || operation.parentOperationId || ""),
+      reconciliationAction: String(
+        options.reconciliationAction || operation.reconciliationAction || "",
+      ),
+      evidenceRef: String(
+        options.evidenceRef || operation.reconciliationEvidenceRef || "",
+      ),
     };
+  }
+
+  function safeReconcileResult(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    return {
+      operationId: String(value.operationId || ""),
+      state: String(value.state || ""),
+      policy: safePolicySummary(value.policy),
+      credentials: safePolicyCredentialSummary(value.credentials),
+      requiresReconciliation: Boolean(value.requiresReconciliation),
+      superseded: Boolean(value.superseded),
+      parentOperationId: String(value.parentOperationId || ""),
+      reconciliationAction: String(value.reconciliationAction || ""),
+      evidenceRef: String(value.evidenceRef || ""),
+      manualEvidenceOnly: Boolean(value.manualEvidenceOnly),
+    };
+  }
+
+  function replayReconciliation(res, existing) {
+    if (existing.status === "succeeded" && existing.responseBody
+        && Number(existing.responseStatus) >= 200 && Number(existing.responseStatus) < 300) {
+      json(res, Number(existing.responseStatus), existing.responseBody);
+      return;
+    }
+    if (existing.status === "failed") {
+      const failure = new HttpError(
+        Number(existing.responseStatus) || 500,
+        existing.errorCode || "operation_failed",
+        "The original reconciliation failed",
+      );
+      failure.operationId = existing.id;
+      throw failure;
+    }
+    const inProgress = new HttpError(
+      409,
+      "operation_in_progress",
+      "A reconciliation with this Idempotency-Key is still in progress",
+    );
+    inProgress.operationId = existing.id;
+    throw inProgress;
+  }
+
+  async function operationTarget(session, operation, permission = "") {
+    const requiredPermission = permission || OPERATION_PERMISSIONS[operation.action];
+    if (!requiredPermission) {
+      throw new HttpError(409, "operation_action_unsupported", "The operation action is not supported");
+    }
+    const result = await requirePermission(session, requiredPermission);
+    let target;
+    if (operation.targetType === "user") {
+      const { users } = await authService.users();
+      target = users.find((candidate) => candidate.id === operation.targetId);
+    } else if (operation.targetType === "device") {
+      const [{ users }, { devices }] = await Promise.all([
+        authService.users(),
+        authService.devices(),
+      ]);
+      target = devices.find((candidate) => candidate.id === operation.targetId);
+      if (target && !users.some((candidate) => candidate.id === target.userId)) target = null;
+    } else if (operation.targetType === "credential") {
+      const [{ users }, { credentials }] = await Promise.all([
+        authService.users(),
+        authService.credentials(),
+      ]);
+      target = credentials.find((candidate) => candidate.id === operation.targetId);
+      if (target && !users.some((candidate) => candidate.id === target.userId)) target = null;
+    } else {
+      throw new HttpError(409, "operation_action_unsupported", "The operation target is not supported");
+    }
+    if (!target) {
+      throw new HttpError(404, "operation_target_unavailable", "The operation target can no longer be resolved");
+    }
+    const userId = operation.targetType === "user" ? target.id : target.userId;
+    if (!userInScope(result.data, result.access, userId)) {
+      throw new HttpError(403, "forbidden_scope", "This operation target is outside your organization scope");
+    }
+    return { ...result, target, userId };
+  }
+
+  function trustedPolicySnapshot(operation) {
+    if (!POLICY_ACTIONS.has(operation.action) || operation.targetType !== "user") return null;
+    const snapshot = operation.beforeSummary;
+    if (!snapshot || typeof snapshot !== "object" || Array.isArray(snapshot)) return null;
+    if (snapshot.id !== operation.targetId) return null;
+    if (!Number.isSafeInteger(snapshot.version) || snapshot.version < 0) return null;
+    if (!Array.isArray(snapshot.models) || !policyLimitsAreValid(snapshot.limits)) return null;
+    return {
+      version: snapshot.version,
+      models: safeStringList(snapshot.models),
+      limits: safePolicyLimits(snapshot.limits),
+    };
+  }
+
+  function reconciliationOutcome(action, responseBody, operationError) {
+    if (action === "confirm_applied") return "confirmed_applied";
+    if (action === "confirm_not_applied") return "confirmed_not_applied";
+    if (operationError) return "pending";
+    const state = String(responseBody?.result?.state || "");
+    if (state !== "succeeded") return "pending";
+    return action === "rollback_previous" ? "compensated" : "not_required";
+  }
+
+  async function auditLogPage(session, searchParams) {
+    const query = auditQuery(searchParams);
+    const result = await requirePermission(session, "audit.read");
+    const maps = await auditTargetMaps();
+    const cursor = decodeAuditCursor(query.cursor, query, session);
+    const visible = await store.read((data) => {
+      const records = [];
+      for (const record of data.adminAuditLogs) {
+        if (query.operationId && record.operationId !== query.operationId) continue;
+        if (query.actorSubjectId
+            && (record.actorSubjectId || record.actorSubject) !== query.actorSubjectId) continue;
+        if (query.action && record.action !== query.action) continue;
+        if (query.targetType && record.targetType !== query.targetType) continue;
+        if (query.targetId && record.targetId !== query.targetId) continue;
+        if (query.result && record.result !== query.result) continue;
+        if (query.from && String(record.timestamp || "") < query.from) continue;
+        if (query.to && String(record.timestamp || "") > query.to) continue;
+        const userId = targetUserId(maps, record.targetType, record.targetId);
+        if (!userId) continue;
+        if (!userInScope(result.data, result.access, userId)) continue;
+        if (cursor && (
+          String(record.timestamp || "") > cursor.timestamp
+          || (String(record.timestamp || "") === cursor.timestamp && String(record.id || "") >= cursor.id)
+        )) {
+          continue;
+        }
+        records.push(record);
+      }
+      return records.sort(compareAuditRecords);
+    });
+    const page = visible.slice(0, query.limit);
+    const nextCursor = visible.length > query.limit && page.length > 0
+      ? encodeAuditCursor(query, session, page[page.length - 1])
+      : "";
+    return {
+      auditLogs: page.map(safeAuditRecord),
+      nextCursor,
+    };
+  }
+
+  async function performReconciliation(req, res, requestId, operationId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    if (!approvalId) throw new HttpError(400, "approval_required", "approvalId is required");
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    const reconciliationAction = String(body.action || "").trim();
+    if (!RECONCILIATION_ACTIONS.has(reconciliationAction)) {
+      throw new HttpError(400, "invalid_reconciliation_action", "action is not supported");
+    }
+    const evidenceRef = cleanEvidenceRef(
+      body.evidenceRef,
+      reconciliationAction === "confirm_applied" || reconciliationAction === "confirm_not_applied",
+    );
+
+    const parent = await store.read((data) => {
+      const operation = data.adminOperations[operationId];
+      return operation ? structuredClone(operation) : null;
+    });
+    if (!parent) throw new HttpError(404, "operation_not_found", "Operation not found");
+    if (parent.action === "operation.reconcile") {
+      throw new HttpError(409, "operation_action_unsupported", "A reconciliation operation cannot be reconciled");
+    }
+
+    await requirePermission(current.session, "operations.reconcile");
+    const targetResult = await operationTarget(current.session, parent);
+
+    const requestFingerprint = writeRequestFingerprint(
+      "operation.reconcile",
+      parent.targetType,
+      parent.targetId,
+      reason,
+      approvalId,
+      { parentOperationId: parent.id, reconciliationAction, evidenceRef },
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const existingOperation = await store.read((data) => {
+      const entry = data.adminIdempotency[idempotencyKeyHash];
+      if (!entry) return null;
+      const existing = data.adminOperations[entry.operationId];
+      if (!existing) {
+        throw new HttpError(
+          503,
+          "storage_unavailable",
+          "The idempotency record points to a missing operation",
+        );
+      }
+      if (entry.requestFingerprint !== requestFingerprint) {
+        const conflict = new HttpError(
+          409,
+          "idempotency_conflict",
+          "Idempotency-Key was already used for a different request",
+        );
+        conflict.operationId = existing.id;
+        throw conflict;
+      }
+      return structuredClone(existing);
+    });
+    if (existingOperation) {
+      replayReconciliation(res, existingOperation);
+      return;
+    }
+    if (!operationRequiresReconciliation(parent)) {
+      throw new HttpError(409, "reconciliation_not_required", "This operation does not require reconciliation");
+    }
+
+    let desiredModels;
+    let desiredLimits;
+    if (reconciliationAction === "retry_desired") {
+      if (!POLICY_ACTIONS.has(parent.action)) {
+        throw new HttpError(409, "reconciliation_action_unsupported", "retry_desired is only supported for policy operations");
+      }
+      if (targetResult.target.status !== "active") {
+        throw new HttpError(409, "target_not_active", "A disabled user cannot receive a policy retry");
+      }
+      if (!Array.isArray(targetResult.target.policy?.models)
+          || !policyLimitsAreValid(targetResult.target.policy?.limits)) {
+        throw new HttpError(409, "desired_policy_incomplete", "The current desired policy is incomplete");
+      }
+      desiredModels = safeStringList(targetResult.target.policy.models);
+      desiredLimits = safePolicyLimits(targetResult.target.policy.limits);
+    } else if (reconciliationAction === "rollback_previous") {
+      if (!POLICY_ACTIONS.has(parent.action)) {
+        throw new HttpError(409, "reconciliation_action_unsupported", "rollback_previous is only supported for policy operations");
+      }
+      if (targetResult.target.status !== "active") {
+        throw new HttpError(409, "target_not_active", "A disabled user cannot have a policy restored");
+      }
+      const snapshot = trustedPolicySnapshot(parent);
+      if (!snapshot) {
+        throw new HttpError(409, "trusted_snapshot_unavailable", "A complete trusted prior policy snapshot is not available");
+      }
+      desiredModels = snapshot.models;
+      desiredLimits = snapshot.limits;
+    }
+
+    const now = new Date().toISOString();
+    const childOperation = {
+      id: `op_${crypto.randomUUID()}`,
+      requestId,
+      idempotencyKeyHash,
+      requestFingerprint,
+      actorSubjectId: current.session.subjectId,
+      actorEmail: current.session.email,
+      roles: [...targetResult.access.roles],
+      scopeOrgUnitIds: [...targetResult.access.scopeOrgUnitIds],
+      action: "operation.reconcile",
+      targetType: parent.targetType,
+      targetId: parent.targetId,
+      reason,
+      approvalId,
+      parentOperationId: parent.id,
+      reconciliationAction,
+      reconciliationEvidenceRef: evidenceRef,
+      beforeSummary: writeTargetSnapshot(parent.targetType, targetResult.target),
+      status: "received",
+      createdAt: now,
+      updatedAt: now,
+      dependencyInvokedAt: "",
+      completedAt: "",
+      intentAuditId: "",
+      resultAuditId: "",
+      responseStatus: 0,
+      responseBody: null,
+      errorCode: "",
+      sourceIp: String(req.socket.remoteAddress || ""),
+      userAgentHash: sha256(String(req.headers["user-agent"] || "")),
+    };
+
+    let reservation;
+    try {
+      reservation = await store.mutate((data) => {
+        const existingEntry = data.adminIdempotency[idempotencyKeyHash];
+        if (existingEntry) {
+          const existing = data.adminOperations[existingEntry.operationId];
+          if (!existing) {
+            throw new HttpError(503, "storage_unavailable", "The idempotency record points to a missing operation");
+          }
+          if (existingEntry.requestFingerprint !== requestFingerprint) {
+            const conflict = new HttpError(
+              409,
+              "idempotency_conflict",
+              "Idempotency-Key was already used for a different request",
+            );
+            conflict.operationId = existing.id;
+            throw conflict;
+          }
+          return { kind: "existing", operation: structuredClone(existing) };
+        }
+        const currentParent = data.adminOperations[parent.id];
+        if (!currentParent) {
+          throw new HttpError(404, "operation_not_found", "Operation not found");
+        }
+        const finalState = explicitReconciliationState(currentParent);
+        if (["confirmed_applied", "confirmed_not_applied", "compensated", "not_required"].includes(finalState)) {
+          throw new HttpError(409, "operation_already_reconciled", "This operation was already reconciled");
+        }
+        const inProgress = Object.values(data.adminOperations).some((candidate) => (
+          candidate.parentOperationId === parent.id
+          && candidate.status !== "failed"
+          && candidate.status !== "succeeded"
+        ));
+        if (inProgress) {
+          throw new HttpError(409, "reconciliation_in_progress", "Another reconciliation is still in progress");
+        }
+        data.adminOperations[childOperation.id] = structuredClone(childOperation);
+        data.adminIdempotency[idempotencyKeyHash] = {
+          operationId: childOperation.id,
+          requestFingerprint,
+          createdAt: now,
+        };
+        const intent = auditRecord(childOperation, "intent", "pending");
+        data.adminAuditLogs.push(intent);
+        const stored = data.adminOperations[childOperation.id];
+        stored.status = "dependency_invoked";
+        stored.updatedAt = intent.timestamp;
+        stored.dependencyInvokedAt = intent.timestamp;
+        stored.intentAuditId = intent.id;
+        return { kind: "created", operation: structuredClone(stored) };
+      });
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(503, "audit_unavailable", "Management audit is unavailable");
+    }
+
+    if (reservation.kind === "existing") {
+      replayReconciliation(res, reservation.operation);
+      return;
+    }
+
+    let responseBody;
+    let responseStatus = 200;
+    let errorCode = "";
+    let operationError = null;
+    try {
+      if (reconciliationAction === "confirm_applied" || reconciliationAction === "confirm_not_applied") {
+        responseBody = {
+          ok: true,
+          requestId,
+          operationId: childOperation.id,
+          action: "operation.reconcile",
+          targetId: parent.targetId,
+          result: {
+            operationId: childOperation.id,
+            state: "succeeded",
+            policy: safePolicySummary(targetResult.target.policy),
+            credentials: null,
+            requiresReconciliation: false,
+            superseded: false,
+            parentOperationId: parent.id,
+            reconciliationAction,
+            evidenceRef,
+            manualEvidenceOnly: true,
+          },
+        };
+      } else {
+        const dependencyResponse = await authService.reconcilePolicy(targetResult.userId, {
+          expectedVersion: Number(targetResult.target.policy?.version),
+          models: desiredModels,
+          limits: desiredLimits,
+          operationId: childOperation.id,
+        });
+        responseBody = {
+          ok: true,
+          requestId,
+          operationId: childOperation.id,
+          action: "operation.reconcile",
+          targetId: parent.targetId,
+          result: safeReconcileResult(dependencyResponse.data),
+        };
+      }
+    } catch (error) {
+      operationError = error instanceof Error ? error : new Error("The reconciliation dependency call failed");
+      responseStatus = Number.isInteger(operationError.statusCode) ? operationError.statusCode : 500;
+      errorCode = typeof operationError.code === "string" && operationError.code
+        ? operationError.code
+        : (responseStatus >= 500 ? "internal_error" : "operation_failed");
+    }
+
+    try {
+      await store.mutate((data) => {
+        const stored = data.adminOperations[childOperation.id];
+        if (!stored) throw new Error("reconciliation operation disappeared before its result");
+        const completedAt = new Date().toISOString();
+        stored.status = operationError ? "failed" : "succeeded";
+        stored.updatedAt = completedAt;
+        stored.completedAt = completedAt;
+        stored.responseStatus = responseStatus;
+        stored.responseBody = responseBody || null;
+        stored.errorCode = errorCode;
+        const resultAudit = auditRecord(childOperation, "result", stored.status, {
+          afterSummary: responseBody?.result || {},
+          errorCode,
+        });
+        data.adminAuditLogs.push(resultAudit);
+        stored.resultAuditId = resultAudit.id;
+
+        const parentStored = data.adminOperations[parent.id];
+        if (!parentStored) throw new Error("parent operation disappeared during reconciliation");
+        parentStored.reconciliationState = reconciliationOutcome(
+          reconciliationAction,
+          responseBody,
+          operationError,
+        );
+        parentStored.reconciliationAction = reconciliationAction;
+        parentStored.reconciliationEvidenceRef = evidenceRef;
+        parentStored.reconciledAt = completedAt;
+        parentStored.reconciledByOperationId = childOperation.id;
+        parentStored.updatedAt = completedAt;
+      });
+    } catch {
+      const auditFailure = new HttpError(503, "audit_unavailable", "The reconciliation result could not be audited");
+      auditFailure.operationId = childOperation.id;
+      throw auditFailure;
+    }
+
+    if (operationError) {
+      operationError.operationId = childOperation.id;
+      throw operationError;
+    }
+    json(res, 200, responseBody);
   }
 
   async function performWrite(req, res, requestId, options) {
@@ -1169,6 +1997,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       status: "received",
       createdAt: now,
       updatedAt: now,
+      dependencyInvokedAt: "",
       completedAt: "",
       intentAuditId: "",
       resultAuditId: "",
@@ -1219,6 +2048,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         const stored = data.adminOperations[operation.id];
         stored.status = "dependency_invoked";
         stored.updatedAt = intent.timestamp;
+        stored.dependencyInvokedAt = intent.timestamp;
         stored.intentAuditId = intent.id;
         return { kind: "created", operation: structuredClone(stored) };
       });
@@ -1844,6 +2674,37 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         auth,
         modelCatalog: { ...modelCatalog.status },
       });
+      return;
+    }
+
+    const reconcileMatch = /^\/api\/v1\/admin\/operations\/([A-Za-z0-9_-]+)\/reconcile$/.exec(
+      url.pathname,
+    );
+    if (req.method === "POST" && reconcileMatch) {
+      await performReconciliation(req, res, requestId, reconcileMatch[1]);
+      return;
+    }
+
+    const operationMatch = /^\/api\/v1\/admin\/operations\/([A-Za-z0-9_-]+)$/.exec(
+      url.pathname,
+    );
+    if (req.method === "GET" && operationMatch) {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const operation = await store.read((data) => {
+        const stored = data.adminOperations[operationMatch[1]];
+        return stored ? structuredClone(stored) : null;
+      });
+      if (!operation) throw new HttpError(404, "operation_not_found", "Operation not found");
+      await operationTarget(current.session, operation);
+      json(res, 200, { operation: safeOperationDetail(operation) });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/audit-logs") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, await auditLogPage(current.session, url.searchParams));
       return;
     }
 
