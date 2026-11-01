@@ -882,6 +882,10 @@ func PriceOf(providerID, modelID string) (Price, bool) {
 // (DeepSeek's deepseek-flash is deepseek-v4.1-flash).
 func PricedBy(providers []string, id string) (Price, bool) {
 	all, at := loadGen()
+	return pricedOnce(at, 'p', providers, id, func() (Price, bool) { return pricedBy(all, at, providers, id) })
+}
+
+func pricedBy(all map[string]mdProvider, at int, providers []string, id string) (Price, bool) {
 	for _, pid := range providers {
 		if m, ok := all[pid].Models[id]; ok && m.Cost != nil {
 			return *m.Cost, true
@@ -1100,6 +1104,10 @@ func madeByOf(all map[string]mdProvider, at int, b string) *madeBy {
 // those prices it.
 func MakerPriced(prefer []string, id string) (Price, bool) {
 	all, at := loadGen()
+	return pricedOnce(at, 'm', prefer, id, func() (Price, bool) { return makerPriced(all, at, prefer, id) })
+}
+
+func makerPriced(all map[string]mdProvider, at int, prefer []string, id string) (Price, bool) {
 	b := bareID(id)
 	if r, ok := unprofiled(b); ok {
 		b = r

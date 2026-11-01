@@ -478,7 +478,7 @@ func openClawAt(at place) *Agent {
 				return patch([]edit.KV{{Path: openClawModel, Value: v}}, nil)
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(openClawOwn(keyWas, cur["model"]), viaMagpieShared("openclaw", magpieID+"/")...)
+				return withVia(openClawOwn(keyWas, cur["model"]), "openclaw", magpieID+"/")
 			},
 		}},
 	}, path)

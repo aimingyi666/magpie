@@ -420,7 +420,7 @@ func plugged(home string, p *agentplug.Agent) *Agent {
 				return f.set([]edit.KV{{Path: d.Model, Value: v}})
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(ownOptions("", cur["model"]), viaMagpieShared(id, magpieID+"/")...)
+				return withVia(ownOptions("", cur["model"]), id, magpieID+"/")
 			},
 		}},
 		// the catalog changed: what connect writes for the model may too

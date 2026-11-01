@@ -757,7 +757,7 @@ func alma() *Agent {
 			Get: almaGet,
 			Set: almaSet,
 			Options: func(map[string]string) []Option {
-				return append(almaOwn(), viaMagpieShared("alma", magpieID+"/")...)
+				return withVia(almaOwn(), "alma", magpieID+"/")
 			},
 		}},
 	}

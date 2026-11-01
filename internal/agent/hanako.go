@@ -169,7 +169,7 @@ func hanako(home string) *Agent {
 				return hanakoChat(dir, agent, v)
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(hanakoOwn(dir, cur["model"]), viaMagpieShared("hanako", magpieID+"/")...)
+				return withVia(hanakoOwn(dir, cur["model"]), "hanako", magpieID+"/")
 			},
 		}},
 	}

@@ -27,29 +27,26 @@ func TestClaudeTUIChosen(t *testing.T) {
 	text := func(s string) []Message {
 		return []Message{{Role: "user", Parts: []Part{{Kind: Text, Text: s}}}}
 	}
-	prompt := []map[string]any{{"type": "text", "text": "hi"}}
 	on := runtime.GOOS == "darwin" || runtime.GOOS == "linux" || runtime.GOOS == "windows"
 	cases := []struct {
 		name   string
 		req    *Request
 		binary claudeCLI
-		prompt []map[string]any
 		print  bool
 		want   bool
 		why    string // what is logged, on macOS, Linux and Windows
 	}{
-		{"a plain turn", &Request{Messages: text("hi")}, here, prompt, false, on, ""},
-		{"turned off", &Request{Messages: text("hi")}, here, prompt, true, false, "the interactive mode is turned off"},
-		{"in WSL", &Request{Messages: text("hi")}, claudeCLI{path: "claude", wsl: &wslrun.Tool{Distro: "Ubuntu", Home: "/home/me"}}, prompt, false, on, ""},
-		{"in WSL, its home unknown", &Request{Messages: text("hi")}, claudeCLI{path: "claude", wsl: &wslrun.Tool{Distro: "Ubuntu"}}, prompt, false, false, "Claude Code in WSL, its home unknown"},
-		{"safeguards", &Request{Messages: text("hi"), Safeguards: json.RawMessage(`{"a":1}`)}, here, prompt, false, false, "safeguards"},
-		{"client cache marks", &Request{Messages: text("hi"), clientCache: &clientCache{}}, here, prompt, false, false, "the client's cache marks"},
-		{"a schema", &Request{Messages: text("hi"), Format: &Format{Type: "json_schema", Schema: json.RawMessage(`{"type":"object"}`)}}, here, prompt, false, false, "a JSON schema"},
-		{"an image", &Request{Messages: []Message{{Role: "user", Parts: []Part{{Kind: Image, MediaType: "image/png", Data: "AA=="}}}}}, here, prompt, false, on, ""},
-		{"an image by its URL", &Request{Messages: []Message{{Role: "user", Parts: []Part{{Kind: Image, URL: "https://example.com/a.png"}}}}}, here, prompt, false, false, "an image known by its URL"},
-		{"a tool's image by its URL", &Request{Messages: []Message{{Role: "user", Parts: []Part{{Kind: ToolResult, Images: []Part{{Kind: Image, URL: "https://example.com/a.png"}}}}}}}, here, prompt, false, false, "an image known by its URL"},
-		{"a large image", &Request{Messages: text("hi")}, here, []map[string]any{{"type": "text", "text": "hi"}, {"type": "image", "source": map[string]any{"type": "base64", "data": strings.Repeat("A", tuiPromptMost)}}}, false, on, ""},
-		{"a long first message", &Request{Messages: text("hi")}, here, []map[string]any{{"type": "text", "text": strings.Repeat("x", tuiPromptMost)}}, false, false, "a first message over 400KB"},
+		{"a plain turn", &Request{Messages: text("hi")}, here, false, on, ""},
+		{"turned off", &Request{Messages: text("hi")}, here, true, false, "the interactive mode is turned off"},
+		{"in WSL", &Request{Messages: text("hi")}, claudeCLI{path: "claude", wsl: &wslrun.Tool{Distro: "Ubuntu", Home: "/home/me"}}, false, on, ""},
+		{"in WSL, its home unknown", &Request{Messages: text("hi")}, claudeCLI{path: "claude", wsl: &wslrun.Tool{Distro: "Ubuntu"}}, false, false, "Claude Code in WSL, its home unknown"},
+		{"safeguards", &Request{Messages: text("hi"), Safeguards: json.RawMessage(`{"a":1}`)}, here, false, on, ""},
+		{"client cache marks", &Request{Messages: text("hi"), clientCache: &clientCache{}}, here, false, on, ""},
+		{"a schema", &Request{Messages: text("hi"), Format: &Format{Type: "json_schema", Schema: json.RawMessage(`{"type":"object"}`)}}, here, false, false, "a JSON schema"},
+		{"an image", &Request{Messages: []Message{{Role: "user", Parts: []Part{{Kind: Image, MediaType: "image/png", Data: "AA=="}}}}}, here, false, on, ""},
+		{"an image by its URL", &Request{Messages: []Message{{Role: "user", Parts: []Part{{Kind: Image, URL: "https://example.com/a.png"}}}}}, here, false, false, "an image known by its URL"},
+		{"a tool's image by its URL", &Request{Messages: []Message{{Role: "user", Parts: []Part{{Kind: ToolResult, Images: []Part{{Kind: Image, URL: "https://example.com/a.png"}}}}}}}, here, false, false, "an image known by its URL"},
+		{"a long first message", &Request{Messages: text(strings.Repeat("the codebase as read so far. ", 40000))}, here, false, on, ""},
 	}
 	for _, c := range cases {
 		st := settings.Load()
@@ -57,10 +54,10 @@ func TestClaudeTUIChosen(t *testing.T) {
 		if err := settings.Save(st); err != nil {
 			t.Fatal(err)
 		}
-		if got, _ := claudeTUI(c.req, c.binary, c.prompt); got != c.want {
+		if got, _ := claudeTUI(c.req, c.binary); got != c.want {
 			t.Errorf("%s: claudeTUI = %v, want %v", c.name, got, c.want)
 		}
-		if got := claudePrintWhy(c.req, c.binary, c.prompt); on && got != c.why {
+		if got := claudePrintWhy(c.req, c.binary); on && got != c.why {
 			t.Errorf("%s: -p because %q, want %q", c.name, got, c.why)
 		}
 	}

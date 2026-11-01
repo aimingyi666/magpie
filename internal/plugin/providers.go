@@ -170,6 +170,12 @@ type Provider struct {
 	// magpie.maxConcurrency); 0 for none said. The user's setting on the
 	// provider goes over it.
 	MaxConcurrency int `json:"maxConcurrency,omitempty"`
+	// MaxAccounts is how many of its accounts the plugin says may take
+	// requests at the same time (the auth hook's maxAccounts, else
+	// package.json's magpie.maxAccounts: a vendor that blocks an address
+	// asking for more accounts at once); 0 for none said. The user's
+	// setting on the provider goes over it.
+	MaxAccounts int `json:"maxAccounts,omitempty"`
 }
 
 // Option is a switch a plugin declares for its provider (auth.options,
@@ -184,6 +190,16 @@ type Option struct {
 	// Confirm is asked before the switch is turned on, when the plugin
 	// says turning it on does something the user should agree to
 	Confirm string `json:"confirm,omitempty"`
+	// Labels, Descriptions and Confirms are the same words in the window's
+	// other languages, by its language ("zh", "zh-TW", "ja", "de"), as a
+	// page's Titles are (plugins#590); the plain ones are the fallback
+	Labels       map[string]string `json:"labels,omitempty"`
+	Descriptions map[string]string `json:"descriptions,omitempty"`
+	Confirms     map[string]string `json:"confirms,omitempty"`
+	// FiltersModels says the plugin's model list leaves models out while
+	// the switch is on (WorkBuddy's "Free models only"): the editor says
+	// so by the models
+	FiltersModels bool `json:"filtersModels,omitempty"`
 }
 
 // OptionOn is option o of a provider as it stands with the user's values

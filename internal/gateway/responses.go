@@ -346,6 +346,9 @@ func readResponsesFor(body []byte, facts, keepInstructions bool) (*Request, erro
 	// a Responses client's turns go to Claude with hour-long cache marks,
 	// unless it asked for its prompt to be kept in memory only
 	r.hourMarks = q.PromptCacheRetention != "in_memory"
+	// the instruction roles the client sent stand where they stood, and go
+	// back as they came (#2532)
+	r.instructionsKept = keepInstructions
 	if q.Reasoning != nil {
 		r.Effort = effortOf(q.Reasoning.Effort)
 		r.Thinking = true
@@ -1304,6 +1307,18 @@ func sealedReasoning(p Part) bool {
 
 // buildResponses renders a request for a Responses upstream.
 func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
+	// A translated request's system or developer message (Claude Code's
+	// environment as a {role: "system"} message) is the harness's, not an
+	// instruction item of a Responses client's own: it is folded into the
+	// instructions as the Chat and Anthropic builds fold it
+	// (responseInstructions) — a backend that takes user, assistant and
+	// developer alone refuses the role with a 400 the agent sees (#4632).
+	// A Responses client's own instruction items were kept by the read
+	// (#2532) and go where they stood; so do a codex account's, which its
+	// send says as developer ones in place (codexBody, buildFor).
+	if !r.instructionsKept {
+		r = responseInstructions(r)
+	}
 	// A turn's reasoning goes back as a reasoning item, as a model that
 	// thinks between tool calls wants it (DeepSeek: "The reasoning_text in
 	// the thinking mode must be passed back", #388). Only a DeepSeek model
@@ -1497,7 +1512,7 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 	var include []string
 	for _, v := range r.Include {
 		if v == "" || slices.Contains(include, v) || (v == "reasoning.encrypted_content" && out["reasoning"] == nil) ||
-			v == outputReplay && host != "chatgpt.com" && host != "api.openai.com" {
+			v == outputReplay && host != "chatgpt.com" && host != "api.openai.com" || !includeTaken(host, v) {
 			continue
 		}
 		include = append(include, v)
@@ -1513,8 +1528,9 @@ func buildResponses(r *Request, model, host string, rejectTemp bool) []byte {
 		if r.WebSearch {
 			tools = append(tools, map[string]any{"type": "web_search"})
 			// the pages it found, which a client of another protocol is
-			// told of (OpenAI's option; xAI's API isn't known to take it)
-			if host != "api.x.ai" && !slices.Contains(include, "web_search_call.action.sources") {
+			// told of (OpenAI's option; xAI's API isn't known to take it,
+			// and Ark's refuses it, arkIncludes)
+			if host != "api.x.ai" && includeTaken(host, "web_search_call.action.sources") && !slices.Contains(include, "web_search_call.action.sources") {
 				include = append(include, "web_search_call.action.sources")
 			}
 		}
@@ -2322,11 +2338,15 @@ func (e *responsesEncoder) event(ev Event) {
 		}
 		raw := json.RawMessage(ev.Text)
 		if e.open == Thinking && !e.thinkNew && (ev.ID == "" || ev.ID == e.itemID || ev.ID == e.thinkUp) {
-			// the item streamed so far, done as the upstream wrote it
-			e.closeAs(raw)
+			// the item streamed so far, done as the upstream wrote it,
+			// made over when it carries its text (another vendor's,
+			// #2855); its events name it by the id they already carried
+			e.closeAs(magpieMadeReasoningRaw(raw, e.itemID))
 			break
 		}
-		// none of it streamed (no summary): added and done whole
+		// none of it streamed (no summary): added and done whole, made
+		// over when the item carries its text (#2855)
+		raw = magpieMadeReasoningRaw(raw, "")
 		e.closeItem()
 		e.item++
 		e.thinkNew, e.thinkID = false, ""
@@ -2448,8 +2468,10 @@ func renderResponses(res Result, model string, named map[string]nsTool) []byte {
 				"content": []map[string]any{{"type": "output_text", "text": p.Text, "annotations": []any{}}}})
 		case Thinking:
 			if p.sealedBy(sealResponses) {
-				// as the upstream wrote it: id, summary, encrypted_content
-				output = append(output, p.Sealed)
+				// as the upstream wrote it: id, summary, encrypted_content;
+				// made over when it carries its text (another vendor's,
+				// #2855)
+				output = append(output, magpieMadeReasoningRaw(p.Sealed, ""))
 				continue
 			}
 			if p.sealedBy(sealAnthropic) {

@@ -450,7 +450,7 @@ func droidIn(at place) *Agent {
 				if c := cur["model"]; c != "" && !usesMagpie(c) && !seen[c] {
 					own = append([]Option{{Value: c, Icon: modelIcon("", c)}}, own...)
 				}
-				return append(group("Droid", own), viaMagpieShared("droid", magpieID+"/")...)
+				return withVia(group("Droid", own), "droid", magpieID+"/")
 			},
 		}},
 	}

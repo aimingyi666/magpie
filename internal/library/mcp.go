@@ -67,6 +67,10 @@ type Server struct {
 	// started in, or keeps a session's state (#4382, cuipengcx90).
 	Hub string `json:"hub,omitempty"`
 
+	// about is the hub entry's description, for an agent that shows a
+	// server by one before it has connected (Pi, hubServerFor)
+	about string
+
 	// startupWrote is the startup_timeout_sec magpie last wrote in the
 	// entry being written, 0 for none: one the entry has otherwise is the
 	// user's, and stays (startupTheirs)
@@ -168,7 +172,7 @@ func (s *Server) check() error {
 // have it doesn't matter.
 func (s *Server) same(o *Server) bool {
 	return s.Transport == o.Transport && s.Command == o.Command && slices.Equal(s.Args, o.Args) &&
-		maps.Equal(s.Env, o.Env) && s.URL == o.URL && maps.Equal(s.Headers, o.Headers)
+		maps.Equal(s.Env, o.Env) && s.URL == o.URL && maps.Equal(s.Headers, o.Headers) && s.about == o.about
 }
 
 // ---- each agent's own format ----------------------------------------------
@@ -219,6 +223,10 @@ const (
 	// fmtZed is Zed's settings.json context_servers: command/args/env, or
 	// url/headers, which Zed speaks streamable HTTP to
 	fmtZed
+	// fmtKiro is Kiro CLI's ~/.kiro/settings/mcp.json: mcpServers of
+	// command/args/env or url/headers — no type on an entry, its shape
+	// saying which, and no way to name SSE (kiro.dev/docs/mcp/configuration)
+	fmtKiro
 )
 
 // mcpFile is the file an agent keeps its user-wide MCP servers in.
@@ -269,7 +277,7 @@ func (f *mcpFile) supports(s *Server) error {
 	if f.Format == fmtDesktop && s.Remote() {
 		return errNoRemote
 	}
-	if s.Transport == "sse" && (f.Format == fmtCodex || f.Format == fmtGoose || f.Format == fmtDsh || f.Format == fmtPiNative || f.Format == fmtGrok || f.Format == fmtCommandCode || f.Format == fmtZed) {
+	if s.Transport == "sse" && (f.Format == fmtCodex || f.Format == fmtGoose || f.Format == fmtDsh || f.Format == fmtPiNative || f.Format == fmtGrok || f.Format == fmtCommandCode || f.Format == fmtZed || f.Format == fmtKiro) {
 		return errNoSSE
 	}
 	if f.Format == fmtDsh && s.Name != "" && !dshServerName.MatchString(s.Name) {
@@ -311,7 +319,8 @@ var errNoRemote = errors.New("no-remote")
 // over SSE (Codex, Goose, DeepSeek Harness, Pi's own MCP, Grok Build — its
 // type = "sse" is taken, but it speaks streamable HTTP to it all the same,
 // Command Code, whose own add refuses sse, Zed, whose only remote transport
-// POSTs to the url: crates/context_server/src/transport/http.rs).
+// POSTs to the url: crates/context_server/src/transport/http.rs, Kiro CLI,
+// whose docs name no SSE at all).
 var errNoSSE = errors.New("no-sse")
 
 // ordered is a JSON object that keeps its keys in the order given, so an
@@ -372,10 +381,15 @@ func (o ordered) MarshalYAML() (any, error) {
 
 // selfTimeout is the seconds an agent waits for a tool of s: what
 // magpie-image's video tool needs, at least two minutes for
-// magpie-browser's, else def.
+// magpie-browser's, magpie-web-search's and magpie-vision's, else def.
 func selfTimeout(s *Server, def int) int {
 	if s.Name == selfServerName && s.Command != "" {
 		return int(imagemcp.ToolTimeout().Seconds())
+	}
+	if (s.Name == searchServerName || s.Name == visionServerName) && s.Command != "" {
+		// a search a searcher model answers, a slow page, or a look at a
+		// big image takes a while
+		return max(def, 120)
 	}
 	if s.Name == browserServerName && s.Command != "" {
 		// a browser_wait waits up to a minute, and the page settles after
@@ -604,6 +618,9 @@ func (f *mcpFile) encode(s *Server) ordered {
 			add("args", list(s.Args))
 			optional("env", s.Env)
 		}
+		if s.about != "" {
+			add("description", s.about)
+		}
 	case fmtHermes, fmtAlma:
 		// Hermes' own `hermes mcp add` writes url/headers or
 		// command/args/env; transport: sse is its only other transport
@@ -645,6 +662,18 @@ func (f *mcpFile) encode(s *Server) ordered {
 			if f.Format == fmtDevin {
 				add("transport", "stdio")
 			}
+		}
+	case fmtKiro:
+		// as the docs show them: command/args/env, or url/headers — no
+		// type, the entry's shape saying which (kiro.dev/docs/mcp/
+		// configuration); an SSE server never comes this far
+		if s.Remote() {
+			add("url", s.URL)
+			optional("headers", s.Headers)
+		} else {
+			add("command", s.Command)
+			add("args", list(s.Args))
+			optional("env", s.Env)
 		}
 	case fmtCline:
 		// as `cline mcp add` writes it; a url with no type would be SSE
@@ -925,6 +954,19 @@ func (f *mcpFile) decode(name string, m map[string]any) (*Server, bool) {
 				t = "sse"
 			}
 			remote(t, u, m["headers"])
+		} else {
+			local(str(m, "command"), m["args"], m["env"])
+		}
+		// the hub entry's description is magpie's; any other is the user's
+		if f.Format == fmtPiNative && name == HubEntry {
+			s.about = str(m, "description")
+		}
+	case fmtKiro:
+		// a url is streamable HTTP: the docs give no way to name SSE
+		// (kiro.dev/docs/mcp/configuration), so no transport in the entry
+		// is read as one
+		if u := str(m, "url"); u != "" {
+			remote("http", u, m["headers"])
 		} else {
 			local(str(m, "command"), m["args"], m["env"])
 		}
@@ -1212,6 +1254,9 @@ var owned = map[mcpFormat][]string{
 	fmtCommandCode: {"transport", "type", "url", "headers", "command", "args", "env"},
 	// enabled, remote, timeout and oauth are the user's
 	fmtZed: {"url", "headers", "command", "args", "env"},
+	// disabled, autoApprove, disabledTools and oauth are the user's; a
+	// transport names nothing Kiro reads
+	fmtKiro: {"transport", "url", "headers", "command", "args", "env"},
 
 	// a url agy read in place of serverUrl goes when magpie writes one
 	fmtAntigravity: {"type", "serverUrl", "url", "headers", "command", "args", "env"},
@@ -1222,10 +1267,14 @@ var owned = map[mcpFormat][]string{
 // one there (refKeys): an env_vars or env_keys the user gave a server
 // whose library entry has none stays theirs.
 func (f *mcpFile) mine(s *Server) []string {
-	if extra := f.refKeys(s); len(extra) > 0 {
-		return append(slices.Clone(owned[f.Format]), extra...)
+	own := owned[f.Format]
+	if f.Format == fmtPiNative && s.Name == HubEntry {
+		own = append(slices.Clone(own), "description")
 	}
-	return owned[f.Format]
+	if extra := f.refKeys(s); len(extra) > 0 {
+		return append(slices.Clone(own), extra...)
+	}
+	return own
 }
 
 // current is the agent's entry read as the server, for comparing with s:

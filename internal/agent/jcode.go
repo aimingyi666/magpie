@@ -353,7 +353,7 @@ func jcodeAt(at place) *Agent {
 				return setPick(jcodePick{c.Provider.DefaultProvider, v})
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(jcodeOwn(path, keyPick, cur["model"]), viaMagpieShared("jcode", magpieID+"/")...)
+				return withVia(jcodeOwn(path, keyPick, cur["model"]), "jcode", magpieID+"/")
 			},
 		}},
 	}, path)

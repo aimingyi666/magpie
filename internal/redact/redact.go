@@ -1062,74 +1062,7 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 			i = max(b, a+1)
 		}
 	}
-	all := rules
-	if o.Secrets && len(o.Rules) > 0 {
-		// the user's first: where one of theirs and one of magpie's find
-		// the same value, it goes by the name they gave it
-		all = append(customRules(o.Rules), rules...)
-	}
-	lower := ""
-	// split are matches a rule took apart into values of their own
-	// (rkato@box17 as a user and a host): what another rule found from
-	// the same place in them, an email, goes
-	var split []span
-	for _, r := range all {
-		if !o.covers(r.cat) {
-			continue
-		}
-		if len(r.markers) > 0 && !containsAny(s, r.markers) {
-			continue
-		}
-		if len(r.fold) > 0 {
-			if lower == "" {
-				lower = lowerASCII(s)
-			}
-			if !containsAny(lower, r.fold) {
-				continue
-			}
-		}
-		for _, m := range r.matches(s, lower) {
-			if len(r.groups) > 0 {
-				took := false
-				for g, kind := range r.groups {
-					if a, b := m[2*g+2], m[2*g+3]; a >= 0 && r.takes(s, a, b, r.groupOK[g]) {
-						found = append(found, span{a, b, kind, r.by(), 0, false})
-						took = true
-					}
-				}
-				if took {
-					split = append(split, span{m[2], m[1], "", "", 0, false})
-				}
-				continue
-			}
-			a, b := m[0], m[1]
-			for g := 1; 2*g+1 < len(m); g++ {
-				if m[2*g] >= 0 {
-					a, b = m[2*g], m[2*g+1]
-					break
-				}
-				if !r.anyGroup {
-					break
-				}
-			}
-			ok := r.ok
-			if r.fix != nil {
-				var good bool
-				if a, b, good = r.fix(s, a, b); !good {
-					continue
-				}
-				ok = nil
-			}
-			if r.takes(s, a, b, ok) {
-				found = append(found, span{a, b, r.kind, r.by(), 0, false})
-			}
-		}
-	}
-	for _, sp := range split {
-		found = slices.DeleteFunc(found, func(f span) bool {
-			return f.kind == "EMAIL" && f.start == sp.start && f.end <= sp.end
-		})
-	}
+	found = append(found, ruleSpans(s, o)...)
 	// after the rules', so where a rule finds the same value it keeps the
 	// kind it has always had
 	if o.sent {
@@ -1151,6 +1084,86 @@ func mask(raw string, o Options, put func(kind, v string) string, escaped bool) 
 		noteScores(raw, found) // what is masked for a vendor, not a preview
 	}
 	return apply(raw, found, put, o)
+}
+
+// ruleSpans are what the rules, magpie's and the user's own, find in s,
+// the text the finders read.
+func ruleSpans(s string, o Options) []span {
+	return memoRules(s, o, func() []span {
+		if len(s) >= ruleMemoMin {
+			ruleRuns.Add(1)
+		}
+		var found []span
+		all := rules
+		if o.Secrets && len(o.Rules) > 0 {
+			// the user's first: where one of theirs and one of magpie's find
+			// the same value, it goes by the name they gave it
+			all = append(customRules(o.Rules), rules...)
+		}
+		lower := ""
+		// split are matches a rule took apart into values of their own
+		// (rkato@box17 as a user and a host): what another rule found from
+		// the same place in them, an email, goes
+		var split []span
+		for _, r := range all {
+			if !o.covers(r.cat) {
+				continue
+			}
+			if len(r.markers) > 0 && !containsAny(s, r.markers) {
+				continue
+			}
+			if len(r.fold) > 0 {
+				if lower == "" {
+					lower = lowerASCII(s)
+				}
+				if !containsAny(lower, r.fold) {
+					continue
+				}
+			}
+			for _, m := range r.matches(s, lower) {
+				if len(r.groups) > 0 {
+					took := false
+					for g, kind := range r.groups {
+						if a, b := m[2*g+2], m[2*g+3]; a >= 0 && r.takes(s, a, b, r.groupOK[g]) {
+							found = append(found, span{a, b, kind, r.by(), 0, false})
+							took = true
+						}
+					}
+					if took {
+						split = append(split, span{m[2], m[1], "", "", 0, false})
+					}
+					continue
+				}
+				a, b := m[0], m[1]
+				for g := 1; 2*g+1 < len(m); g++ {
+					if m[2*g] >= 0 {
+						a, b = m[2*g], m[2*g+1]
+						break
+					}
+					if !r.anyGroup {
+						break
+					}
+				}
+				ok := r.ok
+				if r.fix != nil {
+					var good bool
+					if a, b, good = r.fix(s, a, b); !good {
+						continue
+					}
+					ok = nil
+				}
+				if r.takes(s, a, b, ok) {
+					found = append(found, span{a, b, r.kind, r.by(), 0, false})
+				}
+			}
+		}
+		for _, sp := range split {
+			found = slices.DeleteFunc(found, func(f span) bool {
+				return f.kind == "EMAIL" && f.start == sp.start && f.end <= sp.end
+			})
+		}
+		return found
+	})
 }
 
 // learnLate makes known what the model finds in raw now that it didn't

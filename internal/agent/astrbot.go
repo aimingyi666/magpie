@@ -302,7 +302,7 @@ func astrbotAt(at place) *Agent {
 				return setPick(v)
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(astrbotOwn(path, cur["model"]), viaMagpieShared("astrbot", magpieID+"/")...)
+				return withVia(astrbotOwn(path, cur["model"]), "astrbot", magpieID+"/")
 			},
 		}},
 	}, path)

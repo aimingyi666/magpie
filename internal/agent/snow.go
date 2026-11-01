@@ -339,7 +339,7 @@ func snowIn(at place) *Agent {
 				return leave(to)
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(snowOwnOptions(profiles, cur["model"]), viaMagpieShared("snow", magpieID+"/")...)
+				return withVia(snowOwnOptions(profiles, cur["model"]), "snow", magpieID+"/")
 			},
 		}, {
 			// basicModel, the light model Snow's summaries, compaction and

@@ -222,7 +222,7 @@ func hermesIn(at place) *Agent {
 				return edit.SetYAML(path, edit.KV{Path: "model.default", Value: v})
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(ownOptions("", cur["model"]), viaMagpieShared("hermes", magpieID+"/")...)
+				return withVia(ownOptions("", cur["model"]), "hermes", magpieID+"/")
 			},
 		}, {
 			// agent.reasoning_effort, which Hermes's /reasoning saves; none
@@ -323,7 +323,7 @@ func hermesProfileFields(at place, dir string, provider func(string) any) []Fiel
 				return edit.SetYAML(p, edit.KV{Path: "model.default", Value: v})
 			},
 			Options: func(cur map[string]string) []Option {
-				return append(ownOptions("", cur[hermesProfileKey+name]), viaMagpieShared("hermes", magpieID+"/")...)
+				return withVia(ownOptions("", cur[hermesProfileKey+name]), "hermes", magpieID+"/")
 			},
 		})
 	}

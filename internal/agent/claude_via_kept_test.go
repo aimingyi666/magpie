@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"os"
+	"path/filepath"
+	"slices"
 	"strconv"
 	"testing"
 
@@ -41,6 +44,22 @@ func TestClaudeViaMagpieKept(t *testing.T) {
 	}
 	if got := values(); !got["oa/gpt-5.4"] {
 		t.Fatalf("a caller's write reached the options kept: %v", got)
+	}
+	// the model field joins the list kept to its own models: its
+	// options are never the kept list itself, even with no own models
+	home := os.Getenv("HOME")
+	writeFile(t, filepath.Join(home, ".claude", "settings.json"), `{}`)
+	field := claude(home).Field("model").Options(map[string]string{})
+	if !slices.ContainsFunc(field, func(o Option) bool { return o.Value == "oa/gpt-5.4" }) {
+		t.Fatal("the model field doesn't offer oa's models")
+	}
+	for i := range field {
+		field[i].Value = "x"
+	}
+	for _, fold := range []bool{false, true} {
+		if slices.ContainsFunc(claudeViaMagpie(fold), func(o Option) bool { return o.Value == "x" }) {
+			t.Fatalf("a write to the model field's options reached the options kept (folded %v)", fold)
+		}
 	}
 	// folded and not are kept apart
 	for _, o := range claudeViaMagpie(true) {

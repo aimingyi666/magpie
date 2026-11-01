@@ -41,6 +41,62 @@ func viaMagpieShared(agent, prefix string) []Option {
 	return builtOptions.shared(agent+"\x00"+prefix, func() []Option { return buildVia(agent, prefix) })
 }
 
+// withVia is append(own, viaMagpieShared(agent, prefix)...), the list a
+// model field offers, kept while own reads the same and the catalog's list
+// is the one kept: the append copied the whole catalog for each field of
+// each agent, every poll, about 60 MB of what forty polls of the Agents
+// page allocated with real accounts. Read only, as viaMagpieShared's.
+func withVia(own []Option, agent, prefix string) []Option {
+	via := viaMagpieShared(agent, prefix)
+	if len(own) == 0 {
+		return via
+	}
+	return joinedVia(own, via, [2]string{agent, prefix})
+}
+
+// joinedVia is append(own, via...) for a field whose via is a shared list,
+// kept under key while own reads the same and via is the list kept (see
+// withVia). Read only; with no own models it is still a list apart from
+// via, as Claude Code's model field has always given.
+func joinedVia(own, via []Option, key [2]string) []Option {
+	joinedOptions.Lock()
+	defer joinedOptions.Unlock()
+	if j, ok := joinedOptions.m[key]; ok && sameList(j.via, via) && slices.EqualFunc(j.own, own, sameOption) {
+		return j.out
+	}
+	out := make([]Option, 0, len(own)+len(via))
+	out = append(append(out, own...), via...)
+	if joinedOptions.m == nil {
+		joinedOptions.m = map[[2]string]joinedList{}
+	}
+	joinedOptions.m[key] = joinedList{own: out[:len(own)], via: via, out: out}
+	return out
+}
+
+var joinedOptions struct {
+	sync.Mutex
+	m map[[2]string]joinedList
+}
+
+type joinedList struct{ own, via, out []Option }
+
+// sameList reports whether a and b are the one list kept: the same array,
+// as long.
+func sameList(a, b []Option) bool {
+	return len(a) == len(b) && (len(a) == 0 || &a[0] == &b[0])
+}
+
+// sameOption reports whether a and b read the same, field by field.
+func sameOption(a, b Option) bool {
+	return a.Value == b.Value && a.Label == b.Label && a.Note == b.Note && a.Icon == b.Icon &&
+		slices.Equal(a.Icons, b.Icons) && a.Group == b.Group && a.GroupIcon == b.GroupIcon &&
+		a.Ref == b.Ref && a.Free == b.Free && a.Rate == b.Rate && a.RateWas == b.RateWas &&
+		a.Context == b.Context && a.Takes == b.Takes && a.Direct == b.Direct && a.Via == b.Via &&
+		a.Same == b.Same && a.Served == b.Served && a.Alias == b.Alias && a.FastFor == b.FastFor &&
+		a.Fast == b.Fast && a.OwnFast == b.OwnFast && a.UltraOK == b.UltraOK && a.Ultra == b.Ultra &&
+		a.own == b.own && a.sub == b.sub
+}
+
 // builtOptions is what viaMagpie built last, per agent and prefix. Each
 // agent's model field offers it, and the window's drift poll asked every
 // field's options of every agent each 15s: Claude Code's alone

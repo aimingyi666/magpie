@@ -136,7 +136,13 @@ func (p Provider) Fetched() (time.Time, bool) {
 // for a built-in, listed by its plugin for a plugin's.
 func (p Provider) Listed() (time.Time, bool) {
 	if p.IsPlugin() {
-		return plugin.ListedAt()
+		// one look at the plugins' list a request, not one a provider
+		type listed struct {
+			at time.Time
+			ok bool
+		}
+		l := heldOf("plugin-listed", func() listed { at, ok := plugin.ListedAt(); return listed{at, ok} })
+		return l.at, l.ok
 	}
 	return p.Fetched()
 }
@@ -1568,11 +1574,14 @@ func (p Provider) ExposedOf(avail []catalog.Model) []catalog.Model {
 		return out
 	}
 	picks := p.Models
-	if _, _, ok := p.live(); ok && p.Account != nil && p.Account.unusable != nil {
+	if _, _, ok := p.live(); ok && p.Account != nil && (p.Account.unusable != nil || p.Account.listedOnly) {
 		// A Copilot account is served what its list offers it, less what
 		// it was refused: a pick its list doesn't have (#371: gpt-6-luna,
 		// not in a Student plan's) or that it was refused is left out;
-		// with none left, as if none were picked.
+		// with none left, as if none were picked. A ChatGPT account's
+		// too: a pick made while its list had gpt-5.5 stayed offered after
+		// the list dropped it, and the backend refused every request for
+		// it (#4772). It comes back when the list has it again.
 		picks = slices.DeleteFunc(slices.Clone(picks), func(id string) bool { _, ok := byID[id]; return !ok })
 	} else if p.Account != nil && p.Account.unusable != nil {
 		// with no list fetched, a pick the account can't be served (a
@@ -2261,16 +2270,21 @@ func (p Provider) kimiCodeMember() bool {
 }
 
 // kimiCodeAPI is the Kimi API model a Kimi Code model id is, as Kimi
-// Code's docs name it (https://www.kimi.com/code/docs/en/, 2026-10-09):
+// Code's docs name it (https://www.kimi.com/code/docs/en/, 2026-11-01):
 // k3 is K3, k3-256k "K3 256K context version … the same results as K3",
-// kimi-for-coding-highspeed "K2.7 Code HighSpeed". Kimi's API prices both
-// per token (https://platform.kimi.ai/docs/pricing/chat: kimi-k3 $3 in,
-// $15 out, $0.30 cached; kimi-k2.7-code-highspeed $1.90, $8, $0.38).
+// k3.1-pro "K3.1 Pro", k3.1-pro-highspeed "K3.1 Pro Highspeed", and
+// kimi-for-coding-highspeed "K2.7 Code HighSpeed". Kimi's API prices them
+// per token (https://platform.kimi.ai/docs/pricing/chat, as models.dev's
+// moonshotai entry lists them, read 2026-10-31: kimi-k3 $3 in, $15 out,
+// $0.30 cached; kimi-k3.1-pro $2, $10, $0.20; kimi-k3.1-pro-highspeed
+// $4, $20, $0.20; kimi-k2.7-code-highspeed $1.90, $8, $0.38).
 // kimi-for-coding is "K2.8 Preview", which the API doesn't sell, so it has
 // no API price and stays unpriced.
 var kimiCodeAPI = map[string]string{
 	"k3":                        "kimi-k3",
 	"k3-256k":                   "kimi-k3",
+	"k3.1-pro":                  "kimi-k3.1-pro",
+	"k3.1-pro-highspeed":        "kimi-k3.1-pro-highspeed",
 	"kimi-for-coding-highspeed": "kimi-k2.7-code-highspeed",
 }
 
@@ -2597,10 +2611,16 @@ func pricedNames(model string) []string {
 	if model == "codex-auto-review" {
 		out = append(out, "gpt-5.6-luna")
 	}
-	if m := grokWindow.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model))); m != nil {
+	// both patterns name grok-: every other model of every provider's list
+	// went through two regexps on each Providers poll
+	l := strings.ToLower(strings.TrimSpace(model))
+	if !strings.Contains(l, "grok-") {
+		return out
+	}
+	if m := grokWindow.FindStringSubmatch(l); m != nil {
 		out = append(out, m[1])
 	}
-	if m := grokEffort.FindStringSubmatch(strings.ToLower(strings.TrimSpace(model))); m != nil {
+	if m := grokEffort.FindStringSubmatch(l); m != nil {
 		out = append(out, m[1])
 	}
 	return out

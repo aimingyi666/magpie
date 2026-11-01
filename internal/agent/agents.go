@@ -220,6 +220,7 @@ func onMachine(home, cfg string) []*Agent {
 		codex(home),
 		gemini(home),
 		agy(home),
+		antigravity(home),
 		opencode(home, cfg),
 		openChamber(home, cfg),
 		mimocode(home, cfg),
@@ -1000,7 +1001,7 @@ func openCodeLike(at place, id, name, icon, bin, dir, auth string, ua []string, 
 	provider := openCodeKept(path, func() any { return magpieProviderJSONAt("opencode", id, at.gw()) })
 	opts := func(key string) func(map[string]string) []Option {
 		return func(cur map[string]string) []Option {
-			return append(ownOptions(auth, cur[key]), viaMagpieShared(id, magpieID+"/")...)
+			return withVia(ownOptions(auth, cur[key]), id, magpieID+"/")
 		}
 	}
 	get := func(k string) string { v, _ := edit.GetJSON(path, k); return v }
@@ -1416,7 +1417,7 @@ func piLikeKeyed(at place, id, name, dir string, key func() string) *Agent {
 					return piScopeWith(path, v)
 				},
 				Options: func(cur map[string]string) []Option {
-					return append(ownOptionsFrom(piRegistry(id), auth, cur["model"]), viaMagpieShared(id, magpieID+"/")...)
+					return withVia(ownOptionsFrom(piRegistry(id), auth, cur["model"]), id, magpieID+"/")
 				},
 			},
 			{
@@ -1536,7 +1537,7 @@ func gooseIn(at place, cfg string) *Agent {
 				// only the native providers this goose is set up with (#987:
 				// every one of four was listed, OpenRouter's hundreds of
 				// models on a goose that had only magpie)
-				return append(ownOptions("", cur["model"], gooseConfigured(path, keyEnv)...), viaMagpieShared("goose", gooseProviderID+"/")...)
+				return withVia(ownOptions("", cur["model"], gooseConfigured(path, keyEnv)...), "goose", gooseProviderID+"/")
 			},
 		}, {
 			// GOOSE_THINKING_EFFORT, the effort goose asks of a model that
@@ -1657,6 +1658,15 @@ func copilot(home string) *Agent {
 // product.json of its own. A link on PATH is judged where it points.
 // A copilot a user installed itself, in npm's global folder, Homebrew's,
 // winget's Links or scoop's shims, is still the CLI.
+//
+// VS Code's versioned Windows layout (1.139's win32VersionedUpdate) moves
+// that product.json one level under the install root: the app's payload
+// lives in a folder named for the build's commit — the short hash, ten
+// lowercase hex digits, 2c33b50b16 for 1.144.0 — with resources\app under
+// it and bin beside it (microsoft/vscode#343045; Tony-ooo's 1.144.0, whose
+// every product.json the six places above miss, #3269). A folder of the
+// user's beside bin is not named as a commit's short hash is, so the cap
+// keeps its meaning: nothing wider than the same three folders is read.
 func editorLauncher(bin string) bool {
 	if real, err := filepath.EvalSymlinks(bin); err == nil {
 		bin = real
@@ -1670,6 +1680,14 @@ func editorLauncher(bin string) bool {
 			isFile(filepath.Join(dir, "resources", "app", "product.json")) {
 			return true
 		}
+		if entries, err := os.ReadDir(dir); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && commitHashName(e.Name()) &&
+					isFile(filepath.Join(dir, e.Name(), "resources", "app", "product.json")) {
+					return true
+				}
+			}
+		}
 		up := filepath.Dir(dir)
 		if up == dir {
 			break
@@ -1677,6 +1695,20 @@ func editorLauncher(bin string) bool {
 		dir = up
 	}
 	return false
+}
+
+// commitHashName is whether a folder is named as a build's short commit
+// hash is: ten lowercase hexadecimal digits (16507d91be, 2c33b50b16).
+func commitHashName(name string) bool {
+	if len(name) != 10 {
+		return false
+	}
+	for _, c := range []byte(name) {
+		if c < '0' || c > '9' && c < 'a' || c > 'f' {
+			return false
+		}
+	}
+	return true
 }
 
 func crush(home, cfg string) *Agent {
@@ -1754,7 +1786,7 @@ func crushAt(at place, path, data string) *Agent {
 					}
 				}
 			}
-			return append(ownOptions("", cur[key], extra...), viaMagpieShared("crush", magpieID+"/")...)
+			return withVia(ownOptions("", cur[key], extra...), "crush", magpieID+"/")
 		}
 	}
 	// replacePick puts v in place of the whole models.<type> object in the
