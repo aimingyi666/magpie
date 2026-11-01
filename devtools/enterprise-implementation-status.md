@@ -17,12 +17,14 @@ M2-C4 的 **C4-01** 网关机器协议，并通过 Go 单测、CLI 回归和隔�
 issuance journal、自动 apply/独立回读、失败补偿、启动恢复和同步后交付，auth-service
 当前 **23 passed, 0 failed**。**C4-03d** 部分实现：管理页已有额度/模型写表单和完整证据链
 状态，员工页已有本人额度、模型、凭证、设备、同步和恢复提示的只读门户；页面 E2E、失败
-设备恢复入口、operation/audit 查询和人工对账仍未实现。**C4-04 的单 Key 真实请求行为 E2E**
-已实现并通过（提交 `9bb0f94dc`）：真实 Magpie 在隔离端口和临时 `XDG_CONFIG_HOME` 中验证了
-模型白名单 `403`、Token 限额 `429`、旧 Key 撤销、轮换后策略保持、冲突不落盘和秘密扫描；
-多凭证真实故障注入、完整 `admin-service -> auth-service -> gateway-control -> Magpie`
-新签发/refresh/rotate 链路、Docker/共享卷和生产验收仍未完成。M2-C5、M2-D 和 M3-M6
-仍未实现。本状态只描述仓库中已经存在并有测试证据的能力。
+设备恢复入口、operation/audit 查询和人工对账仍未实现。**C4-04 完整管理到真实 Magpie
+策略流 E2E** 已实现并通过：隔离真实 Magpie 在随机端口和临时 `XDG_CONFIG_HOME` 中验证了
+模型白名单 `403`、Token 限额 `429`、旧 Key 撤销、轮换后策略保持、冲突不落盘、秘密扫描、
+多凭证部分失败、refresh/rotate 策略继承、故障后 `unknown/pending_sync`、Journal/孤儿 Key
+撤销和恢复同步；完整链路覆盖
+`admin-service -> auth-service -> gateway-control -> Magpie -> Mock 上游`。Docker/Compose、
+真实共享卷、真实企业 IdP、反向代理、浏览器自动化 E2E 和生产验收仍未完成。M2-C5、M2-D
+和 M3-M6 仍未实现。本状态只描述仓库中已经存在并有测试证据的能力。
 
 ## 1. 一句话结论
 
@@ -44,8 +46,8 @@ schema v1 的 `gateway-key describe <id> --json` 和原子
 严格 JSON 校验和 group 展开；C4-03b/C4-03c 已完成用户级策略核心、M1 `unknown` 迁移、
 首次分步设置、版本冲突、失败关闭、幂等签发、issuance journal、自动 apply/readback、
 失败补偿、启动恢复和同步后交付。C4-03d 已补管理页额度/模型写表单和员工只读状态门户；
-单 Key 真实 Magpie 请求行为 E2E 已经通过，但失败恢复入口、停用/吊销/轮换页面、
-operation/audit 查询、人工对账、多凭证真实故障注入和完整身份管理链路仍未实现。
+完整管理到真实 Magpie 策略流 E2E 已经通过，但失败恢复入口、停用/吊销/轮换页面、
+operation/audit 查询、人工对账和完整身份管理链路仍未实现。
 M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3/C4-02/C4-03c 尚未完成真实企业
 IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷和 Windows 计划任务的
 完整验收，因此不能标记为“企业生产版已完成”。
@@ -80,7 +82,7 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | M2-C4-03b 用户级策略核心 | 已实现，23 项 auth 测试通过 | 旧 M1 `unknown`、quota/models 分步提交、缺项失败关闭、版本冲突、逐凭证回读确认 |
 | M2-C4-03c 管理 API 与同步后交付 | 核心已实现，Mock/故障测试通过 | 管理端额度/模型 API、幂等签发、issuance journal、自动 apply/回读、同步后交付、失败补偿和启动恢复；真实环境验收待完成 |
 | M2-C4-03d 页面与运营状态 | 部分实现 | 管理页有额度/模型写表单和完整证据链状态；员工页有本人额度、模型、凭证、设备、同步和恢复提示只读视图；页面 E2E、恢复入口、operation/audit 查询和人工对账未完成 |
-| M2-C4-04 真实 Magpie 行为 E2E | 单 Key 切片已实现并通过 | 已验证真实模型拒绝、Token 限额、冲突不落盘、rotate 保持策略和旧 Key `401`；多凭证、refresh 继承、部分失败和故障注入待完成 |
+| M2-C4-04 真实 Magpie 行为 E2E | 完整管理到真实策略流已通过 | 管理 OIDC/CSRF、quota/models 分步设置、双设备 Key、真实模型拒绝和 Token 限额、`partial_success`、refresh/rotate 策略继承、故障后 `unknown/pending_sync`、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描均已验证 |
 | M2-C5 操作/审计查询与对账 | 已冻结契约，未实现 | 无代码、无测试；`dependency_invoked` 仍只能人工查存储 |
 | M2-D 看板与运营 | 已冻结契约，未实现 | 无看板、报表、导出和完整运营写 UI；员工只读状态门户已在 C4-03d 部分交付 |
 | M3 中央 MCP/资源库 | 未实现 | 只有产品/架构设计 |
@@ -133,9 +135,10 @@ admin-service
 - 服务间当前使用独立 Bearer 令牌，不是 mTLS；mTLS/SPIFFE/工作负载身份仍是生产加固项。
 - C4-03d 已实现管理页额度/模型写表单和员工只读状态门户，但尚无页面 E2E、失败设备恢复
   入口、operation/audit 查询和人工对账；C5/M2-D 仍负责这些能力。
-- C4-04 的单 Key 真实行为 E2E 已通过，证明真实 Magpie 的模型拒绝、Token 限额、冲突不写、
-  rotate 策略保持和旧 Key 撤销；多凭证真实故障注入、完整管理签发/refresh/rotate 链路、
-  Docker/共享卷和企业 IdP/反向代理/公司 CA 仍无验收证据。
+- C4-04 的完整管理到真实 Magpie 策略流 E2E 已通过，证明真实模型拒绝、Token 限额、
+  冲突不写、rotate 策略保持、双设备部分失败、refresh/rotate 策略继承、故障后 pending、
+  Journal/孤儿 Key 撤销和恢复同步；Docker/共享卷、企业 IdP、反向代理、公司 CA 和浏览器
+  自动化 E2E 仍无验收证据。
 - 旧凭证在没有独立网关回读前仍只能是 `unknown`，不能因为管理端存在策略 API 就标为
   `known`。
 
@@ -502,9 +505,10 @@ magpie gateway-key policy apply <id> --json
 500 万 tokens 正确回读；`policyRevision` 更新后独立回读一致；旧 revision 返回
 `gateway_policy_conflict` 且 `retryable=false`；输出未发现 Secret 或 masked key。
 
-这不等同于 C4 完成：C4-02/C4-03c 只完成了受控适配器、管理编排和 Mock/故障测试；真实
-请求限流/拒绝已由 4.8 的单 Key E2E 证明，但共享卷、多凭证部分成功、完整管理链路和
-refresh/issue 策略继承仍需继续验收。完整 CLI 包中的无关网络测试
+这不等同于 C4 完成：C4-02/C4-03c 的自动测试覆盖受控适配器、管理编排和 Mock/故障边界；
+4.8 的 C4-04 已通过隔离真实 Magpie E2E，覆盖完整管理链路、多凭证部分成功、
+refresh/rotate 策略继承、真实限流和模型拒绝。真实共享卷文件锁、Docker/Compose、
+真实企业 IdP 和生产部署仍需继续验收。完整 CLI 包中的无关网络测试
 `TestLibrarySkillRmGone` 曾超时，因此不能宣称整个 `internal/cli` 包全绿。
 
 ### 4.7 C4-02 `gateway-control` 受控适配器（已通过 Mock/故障测试）
@@ -536,9 +540,22 @@ refresh/issue 策略继承仍需继续验收。完整 CLI 包中的无关网络�
 gateway-control 接入，但不等于 Docker 镜像/Compose、真实共享卷文件锁、真实 Magpie
 请求行为或企业生产验收通过。
 
-### 4.8 C4-04 单 Key 真实请求行为 E2E（已通过）
+### 4.8 C4-04 完整管理到真实 Magpie 策略流 E2E（已通过）
 
-提交 `9bb0f94dc` 新增 `enterprise/test/c4-gateway-policy-e2e.ps1`，并对
+`enterprise/test/c4-enterprise-policy-e2e.ps1` 已通过 18 个阶段的企业链路测试，覆盖：
+
+- 首次 join 返回 `409 policy_setup_required`，管理员完成 OIDC、CSRF、quota/models
+  分步设置后，双设备获得独立 Gateway Key。
+- 模型白名单真实返回 `403` 且请求不达上游；Token 月限额真实返回 `429`，包含
+  `Retry-After`、`X-Magpie-Limit-Reset` 和 `X-Should-Retry: false`。
+- 单 Key 禁用产生精确 `partial_success`；恢复后两个凭证重新 `synced`；refresh 轮换后
+  旧 Key `401`、新 Key `200`，并继承当前策略。
+- `gateway-control` 故障时保留 `unknown/pending_sync`，故障期间 refresh 失败且不能产生
+  孤儿 Key；Journal 记录和孤儿 Key 撤销路径通过，恢复后重新同步。
+- usage 归属、凭证列表、健康检查、管理 API/store/usage/日志和 22 个非凭证文本文件
+  秘密扫描通过。
+
+提交 `9bb0f94dc` 还提供 `enterprise/test/c4-gateway-policy-e2e.ps1` 单 Key 底层切片，并对
 `enterprise/test/mock-upstream.mjs` 增加请求计数。脚本使用随机端口、临时 portable
 Magpie、隔离 `XDG_CONFIG_HOME` 和独立 Mock 上游，不接触真实用户目录或
 `127.0.0.1:3425`。
@@ -556,11 +573,10 @@ Magpie、隔离 `XDG_CONFIG_HOME` 和独立 Mock 上游，不接触真实用户�
   `caller-keys.json` 按设计只保留当前 Key 明文，并具备 Windows ACL 允许读取规则。
 - 不带 `-Keep` 的清理路径通过。
 
-边界：该脚本只验证**单个 Key 的真实网关行为**。尚未覆盖多凭证部分成功、真实故障注入、
-完整 `admin-service -> auth-service -> gateway-control -> Magpie` 新签发/refresh/rotate、
-共享卷文件锁、Docker Compose、mTLS、真实 IdP、反向代理、浏览器、Windows 计划任务、
-操作/审计查询、人工对账、MCP/资源库、正文审计和 HA，因此 W-11/W-13 及完整 C4-04
-仍不能标记为生产验收通过。
+边界：C4-04 已证明管理 API 到真实 Magpie 的多凭证、策略继承和故障恢复链路，但仍不等同
+生产验收。尚未覆盖共享卷文件锁、Docker Compose、mTLS、真实企业 IdP、反向代理、浏览器
+自动化、Windows 计划任务、操作/审计查询、人工对账、MCP/资源库、正文审计和 HA；C4-03c
+真实共享卷验收、C4-03d 页面 E2E 和 C5/D 仍不能标记为完成。
 
 ## 5. 未验证事项
 
@@ -573,12 +589,11 @@ Magpie、隔离 `XDG_CONFIG_HOME` 和独立 Mock 上游，不接触真实用户�
 5. Windows 计划任务刷新未实机验证；需要验证锁、用户登录状态、网络恢复和失败重试。
 6. SCIM/IdP 离职 Webhook 未接入；当前只有管理接口停用。
 7. C4-01/C4-02/C4-03a/C4-03b/C4-03c 均已实现并完成本地/Mock/故障测试；C4-02/C4-03c
-   的 Docker/Compose 构建、启动、健康检查、真实共享卷文件锁、服务令牌轮换、真实 Magpie
-   apply/readback 和公司反向代理未验收。C4-03d 已实现管理页额度/模型写表单和员工只读
-   状态门户，但页面 E2E、失败设备恢复入口、operation/audit 查询和人工对账未实现。C4-04
-   的单 Key 真实限额/模型拒绝/rotate 已通过，多凭证故障注入和完整 refresh/issue 管理链路
-   仍未完成。已有管理写接口及其 C3 幂等/审计尚未在真实 IdP、反向代理、
-   真实 auth-service 和真实网关上做端到端验收。
+   的 Docker/Compose 构建、启动、健康检查、真实共享卷文件锁、服务令牌轮换和公司反向代理
+   未验收。C4-03d 已实现管理页额度/模型写表单和员工只读状态门户，但页面 E2E、失败设备
+   恢复入口、operation/audit 查询和人工对账未实现。C4-04 的完整管理到真实 Magpie 策略流
+   已通过，包括多凭证部分失败、refresh/rotate 继承和故障恢复；真实 IdP、反向代理和浏览器
+   自动化仍未验收。
 8. 多实例、共享存储、限流分布式化和高可用未实现。
 
 ## 6. M1 验收门槛
@@ -629,8 +644,7 @@ Magpie、隔离 `XDG_CONFIG_HOME` 和独立 Mock 上游，不接触真实用户�
    均已覆盖；下一步把同一流程接入真实存储和真实管理请求链路。
 7. C4-02 受控适配器已通过 15 项 Mock/故障测试；C4-03b/C4-03c 的 auth-service 核心链路
    已通过 23 项 auth 回归和 35 项 admin 测试。下一步在 Docker 可用环境验证镜像、Compose、
-   健康检查、真实共享卷和故障恢复；C4-04 单 Key 行为 E2E 已通过，下一步补多凭证故障、
-   完整管理签发/refresh/rotate 链路和策略继承验证。
+   健康检查和真实共享卷故障恢复；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。
 8. 按 `feat/m2-c5-operations-audit` 实现 `audit-logs`、`operations/{id}`、失败对账和补偿；
    再按 `feat/m2-d-admin-operations` 补齐完整管理写 UI、看板、导出和运营历史。
 9. 每个阶段完成后更新第 9 节，记录实际分支、commit、命令、结果、未覆盖项和秘密扫描；
@@ -646,8 +660,8 @@ Magpie、隔离 `XDG_CONFIG_HOME` 和独立 Mock 上游，不接触真实用户�
 | M0 企业网关基线 | `feat/enterprise-plan` / `enterprise/` | 企业网关 Compose、员工 Key 开通、客户端加入、验收脚本、Mock 上游 E2E | `enterprise/test/e2e.ps1` | 真实 Magpie 客户端 → 企业网关 → Mock 上游通过；用量按员工 Key 归属 | 正式 TLS、公司 OTLP/SIEM、MDM 分发 |
 | M1 身份与设备 | `feat/enterprise-plan` / `enterprise/auth-service/` | OIDC+PKCE、加入码、设备注册/心跳/刷新/吊销、短期 Key、管理停用接口、并发刷新串行化、凭证元数据 | `node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `23 passed, 0 failed` | 真实企业 IdP、Docker、Windows 计划任务 |
 | M1 真实链路 | `feat/enterprise-plan` / `enterprise/test/auth-e2e.ps1` | 真实 issuer Key、Mock OIDC、真实网关、Mock 上游、刷新、停用、重启和脱敏检查 | `enterprise/test/auth-e2e.ps1 -Magpie ... -Node ...` | 全部 PASS | 真实 IdP、Compose 健康检查、计划任务实机 |
-| M2-A 管理身份底座 | `feat/enterprise-plan` / `enterprise/admin-service/` | 独立管理 OIDC、MFA/ACR、已验证邮箱、会话/CSRF/IP、RBAC、组织范围、服务间独立令牌、最小页面、Compose `admin` profile | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `35 passed, 0 failed`；auth `23 passed, 0 failed` | 真实 IdP、Docker/浏览器/反向代理；C4-03d 剩余能力、C4-04 多凭证/完整链路、C5 和 D 未实现或未验收 |
-| M2-B 只读治理 | `feat/enterprise-plan` / `enterprise/auth-service/`、`enterprise/admin-service/` | 用户/部门/设备/凭证/模型/用量只读 API、凭证元数据、用户组织映射、服务端子树过滤、只读 usage 读取和管理页摘要 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `35 passed, 0 failed`；auth `23 passed, 0 failed` | 真实 `usage.jsonl` 数据卷、真实 IdP、Docker/浏览器/代理、C4-03d 剩余能力、C4-04 多凭证/完整链路、C5/D |
+| M2-A 管理身份底座 | `feat/enterprise-plan` / `enterprise/admin-service/` | 独立管理 OIDC、MFA/ACR、已验证邮箱、会话/CSRF/IP、RBAC、组织范围、服务间独立令牌、最小页面、Compose `admin` profile | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `35 passed, 0 failed`；auth `23 passed, 0 failed` | 真实 IdP、Docker/浏览器/反向代理；C4-03d 剩余能力、C5 和 D 未实现或未验收 |
+| M2-B 只读治理 | `feat/enterprise-plan` / `enterprise/auth-service/`、`enterprise/admin-service/` | 用户/部门/设备/凭证/模型/用量只读 API、凭证元数据、用户组织映射、服务端子树过滤、只读 usage 读取和管理页摘要 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `35 passed, 0 failed`；auth `23 passed, 0 failed` | 真实 `usage.jsonl` 数据卷、真实 IdP、Docker/浏览器/代理、C4-03d 剩余能力、C5/D |
 | M2-C1 Auth 内部写接口 | `feat/enterprise-plan` / `enterprise/auth-service/` | 内部停用/启用、设备吊销、当前凭证轮换；停用撤销设备/会话/凭证，启用不恢复旧凭据，轮换按设备串行化并清理孤儿 Key | `node --check`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `23 passed, 0 failed` | admin-service 对外写 API、RBAC/CSRF/幂等/理由/审计、真实 IdP 和真实网关验收 |
 | M2-C2 管理写接口 | `feat/enterprise-plan` / `enterprise/admin-service/` | 四个管理写 API；会话/CSRF/RBAC/组织子树/理由校验；目标预检和响应白名单；依赖故障映射 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | 当前回归 `35 passed, 0 failed`（C2 新增 3 组测试） | 停用/吊销/轮换页面按钮、真实 IdP/代理/网关验收 |
 | M2-C3 幂等与管理审计 | `feat/enterprise-plan` / `enterprise/admin-service/` | `adminOperations`/`adminIdempotency` 集合；键哈希和请求指纹；同键重放/冲突/执行中；intent/result 审计；审计失败阻断；operationId 返回和失败重放 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | `35 passed, 0 failed`（含 7 项目录测试；C3 新增 5 组测试） | 操作/审计查询、失败对账、页面 E2E、真实 IdP/代理/网关验收 |
@@ -656,7 +670,7 @@ Magpie、隔离 `XDG_CONFIG_HOME` 和独立 Mock 上游，不接触真实用户�
 | C4-03a 正式只读模型目录 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/admin-service/` | 只读 `ADMIN_MODEL_CATALOG_PATH`、严格 JSON、schema v1、稳定模型 ID、显式 Provider 通配符、group 展开、2 MiB 上限、SHA-256 digest、安全状态摘要、启动审计和 `GET /api/v1/admin/models` 正式目录 | `Get-ChildItem enterprise/admin-service/src/*.js \| ForEach-Object { node --check $_.FullName }`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | `35 passed, 0 failed`（7 项目录专项 + 28 项管理集成） | auth-service 不加载目录，只接收稳定 ID；真实 Docker/共享卷、真实 IdP、浏览器、反向代理和生产环境未验收 |
 | C4-03b 用户级策略核心 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/auth-service/` | 版本化 `gatewayPolicy`、0-5 额度窗口、稳定模型、M1 `unknown` 迁移、quota/models 分步设置、缺项失败关闭、`expectedVersion`/`If-Match`、join/refresh/rotate 前置门禁和凭证回读确认 | `node --check enterprise/auth-service/src/service.js`；`node --check enterprise/auth-service/test/auth-service.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | `23 passed, 0 failed` | 真实 E2E、页面剩余能力和生产验收未完成 |
 | C4-03c 管理 API 与同步后交付 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/admin-service/`、`enterprise/auth-service/` | 额度/模型 API、模型选择器展开、payload 幂等、issuance journal、`enterpriseIssuanceId` 幂等签发、apply/readback、同步后交付、失败补偿、启动恢复和 `partial_success` | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | admin `35 passed, 0 failed`；auth `23 passed, 0 failed` | Docker/共享卷、真实 Magpie、真实 IdP、mTLS、人工对账和生产验收未完成 |
-| C4-04 单 Key 真实请求行为 E2E | `feat/m2-c4-gateway-policy-e2e` / `enterprise/test/c4-gateway-policy-e2e.ps1` | 真实 Magpie 模型白名单、Token 限额、冲突不落盘、rotate 保持策略、旧/新 Key 行为、Mock 上游未调用断言和秘密扫描 | `enterprise/test/c4-gateway-policy-e2e.ps1 -Magpie <magpie.exe> -Node <node.exe>` | 全部 `PASS`；实际使用随机端口、临时 portable 数据和隔离 `XDG_CONFIG_HOME` | 多凭证、真实故障注入、完整管理签发/refresh/rotate、Docker/共享卷和生产验收未覆盖 |
-| C4-03d/C4-04 剩余 + C5/D | 计划 `feat/m2-c5-operations-audit` / `feat/m2-d-admin-operations` | C4-03d 已实现管理页额度/模型写表单和员工只读状态门户；C4-04 单 Key 真实 E2E 已完成；页面 E2E、失败设备恢复入口、operation/audit 查询、人工对账、多凭证故障和完整策略继承未实现 | C4-04 E2E 已实际执行；页面/API 静态路径由 Node 测试覆盖 | C4-04 单 Key `PASS`；其余部分 | C4-03d 剩余项、C4-04 多凭证/完整链路 + C5/D 全部 |
+| C4-04 完整管理到真实 Magpie 策略流 E2E | `feat/m2-c4-gateway-policy-e2e` / `enterprise/test/c4-enterprise-policy-e2e.ps1` | 管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、真实模型拒绝和 Token 限额、部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描 | `enterprise/test/c4-enterprise-policy-e2e.ps1 -Magpie <magpie.exe> -Node <node.exe>` | 全部 `PASS`；18 个阶段覆盖真实管理到网关链路 | Docker/共享卷、真实企业 IdP、反向代理、浏览器自动化、C5/D 和生产验收未覆盖 |
+| C4-03d/C5/D | 计划 `feat/m2-c5-operations-audit` / `feat/m2-d-admin-operations` | C4-03d 已实现管理页额度/模型写表单和员工只读状态门户；页面 E2E、失败设备恢复入口、operation/audit 查询、人工对账、看板和报表未实现 | 页面/API 静态路径由 Node 测试覆盖 | C4-03d 部分实现 | C4-03d 剩余项、C5/D 全部 |
 | M2-C5 操作/审计查询与对账 | 计划 `feat/m2-c5-operations-audit` | 仅有完整设计；尚无查询、对账和子 operation 代码 | 未执行 | 未测试、不可用 | 所有 C5 项 |
 | M2-D 管理运营 | 计划 `feat/m2-d-admin-operations` | 仅有完整设计；尚无完整写 UI、看板、导出和运营历史；员工只读状态页已在 C4-03d 部分交付 | 未执行 | 未测试、不可用 | 所有 M2-D 项 |

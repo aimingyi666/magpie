@@ -4,8 +4,8 @@
 它不解析人类可读 CLI 文本，不直接读写 `caller-keys.json`，也不暴露任意命令执行能力。
 
 当前实现对应 M2-C4-02，并已由 admin-service -> auth-service 的 C4-03c 管理链路自动调用。
-它已完成代码和 Mock/故障测试，但尚未完成真实 Magpie 请求行为 E2E、Docker 构建或企业
-生产验收。
+它已完成代码和 Mock/故障测试，并在 C4-04 的 18 阶段真实管理链路 E2E 中被调用；尚未完成
+Docker 构建、真实共享卷或企业生产验收。
 
 ## 调用链
 
@@ -149,8 +149,9 @@ docker compose --profile gateway-control up -d
   apply/readback 后交付、失败补偿和启动恢复的 Mock/故障测试；C4-03d 已补管理页额度/模型
   写表单、完整证据链状态和员工只读状态门户，但仍缺页面 E2E、失败恢复入口、
   operation/audit 查询和人工对账。
-- 未证明真实 Magpie 的多凭证更新、零额度/低额度实际拒绝和模型白名单行为，属于 C4-04。
-- 部分成功汇总已进入 C4-03c 核心测试；人工对账仍未实现，真实网关下的策略继承和旧凭证迁移端到端证据也尚未完成。
+- C4-04 已在隔离真实 Magpie 链路中证明多凭证更新、零额度/低额度实际拒绝、模型白名单、
+  `partial_success`、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复同步。
+- 人工对账仍未实现；旧 M1 凭证迁移的更多组合、Docker/真实共享卷和生产部署仍待验收。
 - 未接入 mTLS、公司 CA、反向代理、Docker/Compose 实机和企业 IdP。
 
 因此当前状态是“受控适配器代码已实现并通过 Mock/故障测试”，不是

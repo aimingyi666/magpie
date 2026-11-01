@@ -1,11 +1,11 @@
 <#
 .SYNOPSIS
-Verify the real Magpie issuer API and the enterprise-auth M1 flow.
+Verify the real Magpie issuer API and the enterprise-auth policy flow.
 
 .DESCRIPTION
-Starts a temporary portable Magpie gateway, a mock OpenAI-compatible
+Starts a temporary Magpie gateway, gateway-control, a mock OpenAI-compatible
 upstream, a mock OIDC provider, and enterprise/auth-service. It then exercises
-OIDC join, a real /v1/magpie/keys issue, an employee model call, usage
+policy setup, OIDC join, a real issuer key, an employee model call, usage
 attribution, refresh, immediate old-key revocation, employee disable, and
 auth-service restart. It never touches the user's running Magpie data.
 
@@ -20,6 +20,7 @@ param(
     [int]$UpstreamPort = 3732,
     [int]$GatewayPort = 3733,
     [int]$AuthPort = 3734,
+    [int]$GatewayControlPort = 3735,
     [string]$WorkDir,
     [switch]$Keep
 )
@@ -275,6 +276,82 @@ function Start-AuthJob {
     } -ArgumentList $NodeExe, $AuthDir, $Environment
 }
 
+function Start-NodeJob {
+    param(
+        [Parameter(Mandatory = $true)][string]$NodeExe,
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [Parameter(Mandatory = $true)][hashtable]$Environment
+    )
+    return Start-Job -ScriptBlock {
+        param($NodePath, $Directory, $Script, $Values)
+        Set-Location -LiteralPath $Directory
+        foreach ($entry in $Values.GetEnumerator()) {
+            Set-Item -Path ("Env:" + $entry.Key) -Value ([string]$entry.Value)
+        }
+        & $NodePath $Script 2>&1
+    } -ArgumentList $NodeExe, $WorkingDirectory, $ScriptPath, $Environment
+}
+
+function Wait-HttpHealthy {
+    param(
+        [Parameter(Mandatory = $true)][string]$Url,
+        [Parameter(Mandatory = $true)][object]$Job,
+        [Parameter(Mandatory = $true)][string]$Label,
+        [int]$TimeoutSec = 30
+    )
+    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSec)
+    $last = ""
+    while ([DateTime]::UtcNow -lt $deadline) {
+        if ($Job.State -ne "Running") {
+            $details = Receive-Job -Job $Job -Keep -ErrorAction SilentlyContinue
+            throw "$Label stopped before becoming healthy`n" + ($details -join "`n")
+        }
+        try {
+            $response = Invoke-WebRequest `
+                -Uri $Url `
+                -SkipHttpErrorCheck `
+                -TimeoutSec 5
+            if ($response.StatusCode -eq 200) {
+                return
+            }
+            $last = "HTTP $($response.StatusCode)"
+        } catch {
+            $last = $_.Exception.Message
+        }
+        Start-Sleep -Milliseconds 300
+    }
+    throw "$Label did not become healthy: $last"
+}
+
+function Invoke-InternalAdmin {
+    param(
+        [Parameter(Mandatory = $true)][string]$Method,
+        [Parameter(Mandatory = $true)][string]$Path,
+        [AllowNull()][object]$Body = $null,
+        [int]$Expected = 200
+    )
+    $arguments = @{
+        Uri = "$authBase$Path"
+        Method = $Method
+        Headers = @{ Authorization = "Bearer $internalAdminToken" }
+        SkipHttpErrorCheck = $true
+        TimeoutSec = 30
+    }
+    if ($null -ne $Body) {
+        $arguments.ContentType = "application/json"
+        $arguments.Body = ($Body | ConvertTo-Json -Depth 8 -Compress)
+    }
+    $response = Invoke-WebRequest @arguments
+    if ($response.StatusCode -ne $Expected) {
+        throw "$Method $Path returned HTTP $($response.StatusCode), expected ${Expected}: $($response.Content)"
+    }
+    if ($response.Content) {
+        return ($response.Content | ConvertFrom-Json)
+    }
+    return $null
+}
+
 function Assert-Status {
     param(
         [Parameter(Mandatory = $true)][string]$Label,
@@ -296,8 +373,10 @@ $oidcScript = Join-Path $PSScriptRoot "mock-oidc.mjs"
 $upstreamScript = Join-Path $PSScriptRoot "mock-upstream.mjs"
 $authDir = Join-Path (Split-Path $PSScriptRoot -Parent) "auth-service"
 $authServer = Join-Path $authDir "src\server.js"
+$gatewayControlDir = Join-Path (Split-Path $PSScriptRoot -Parent) "gateway-control"
+$gatewayControlServer = Join-Path $gatewayControlDir "src/server.js"
 
-foreach ($path in @($magpiePath, $oidcScript, $upstreamScript, $authServer)) {
+foreach ($path in @($magpiePath, $oidcScript, $upstreamScript, $authServer, $gatewayControlServer)) {
     if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
         throw "required file not found: $path"
     }
@@ -311,20 +390,23 @@ $base = if ($WorkDir) {
 New-Item -ItemType Directory -Path $base -Force | Out-Null
 $root = Join-Path $base ("magpie-enterprise-auth-e2e-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
 $serverDir = Join-Path $root "server"
-$serverData = Join-Path $serverDir "data"
 $sandboxHome = Join-Path $root "home"
 $authData = Join-Path $root "auth"
-New-Item -ItemType Directory -Path $serverData, $authData, $sandboxHome -Force | Out-Null
+$sharedConfig = Join-Path $root "shared-config"
+New-Item -ItemType Directory -Path $serverDir, $sharedConfig, $authData, $sandboxHome -Force | Out-Null
 $serverExe = Join-Path $serverDir "magpie.exe"
 Copy-Item -LiteralPath $magpiePath -Destination $serverExe
 
 $issuerKey = "issuer-" + (New-RandomUrlToken -Bytes 36)
 $adminToken = "admin-" + (New-RandomUrlToken -Bytes 36)
+$internalAdminToken = "internal-" + (New-RandomUrlToken -Bytes 36)
+$gatewayControlToken = "control-" + (New-RandomUrlToken -Bytes 36)
 $cookieSecret = "cookie-" + (New-RandomUrlToken -Bytes 36)
 $oidcClientId = "magpie-enterprise-e2e"
 $oidcClientSecret = "oidc-" + (New-RandomUrlToken -Bytes 36)
 $employeeEmail = "alice@corp.example"
 $gatewayBase = "http://127.0.0.1:$GatewayPort"
+$gatewayControlBase = "http://127.0.0.1:$GatewayControlPort"
 $gatewayHost = Get-LocalIPv4
 $remoteGatewayBase = "http://${gatewayHost}:$GatewayPort"
 $authBase = "http://127.0.0.1:$AuthPort"
@@ -332,6 +414,8 @@ $oidcBase = "http://127.0.0.1:$OidcPort"
 $jobs = [ordered]@{}
 $authJob = $null
 $succeeded = $false
+$savedXdgConfigHome = $env:XDG_CONFIG_HOME
+$env:XDG_CONFIG_HOME = $sharedConfig
 
 $authEnvironment = @{
     AUTH_BIND = "127.0.0.1"
@@ -340,6 +424,7 @@ $authEnvironment = @{
     AUTH_STORE_PATH = (Join-Path $authData "auth-store.json")
     AUTH_COOKIE_SECRET = $cookieSecret
     AUTH_ADMIN_TOKEN = $adminToken
+    AUTH_INTERNAL_ADMIN_TOKEN = $internalAdminToken
     AUTH_SECURE_COOKIE = "false"
     AUTH_RATE_LIMIT_PER_MINUTE = "1000"
     OIDC_ISSUER = $oidcBase
@@ -352,7 +437,19 @@ $authEnvironment = @{
     MAGPIE_ISSUER_KEY = $issuerKey
     MAGPIE_KEY_TTL = "1h"
     MAGPIE_KEY_MODELS = "mock/mock-model"
+    GATEWAY_CONTROL_URL = $gatewayControlBase
+    GATEWAY_CONTROL_TOKEN = $gatewayControlToken
+    GATEWAY_CONTROL_TIMEOUT_MS = "10000"
     AUTH_DEVICE_TOKEN_TTL_DAYS = "30"
+}
+
+$gatewayControlEnvironment = @{
+    GATEWAY_CONTROL_BIND = "127.0.0.1"
+    GATEWAY_CONTROL_PORT = "$GatewayControlPort"
+    GATEWAY_CONTROL_TOKEN = $gatewayControlToken
+    GATEWAY_CONTROL_MAGPIE = $serverExe
+    GATEWAY_CONTROL_CONFIG_HOME = $sharedConfig
+    GATEWAY_CONTROL_TIMEOUT_MS = "10000"
 }
 
 try {
@@ -401,17 +498,28 @@ try {
     Write-Host "PASS  real Magpie issuer key created"
 
     $jobs.gateway = Start-Job -ScriptBlock {
-        param($Exe, $Port, $HomePath)
+        param($Exe, $Port, $HomePath, $ConfigHome)
         $env:MAGPIE_ADDR = "0.0.0.0:$Port"
         $env:HOME = $HomePath
         $env:USERPROFILE = $HomePath
         $env:APPDATA = Join-Path $HomePath "AppData\Roaming"
         $env:LOCALAPPDATA = Join-Path $HomePath "AppData\Local"
-        $env:XDG_CONFIG_HOME = Join-Path $HomePath ".config"
+        $env:XDG_CONFIG_HOME = $ConfigHome
         & $Exe serve 2>&1
-    } -ArgumentList $serverExe, $GatewayPort, $sandboxHome
+    } -ArgumentList $serverExe, $GatewayPort, $sandboxHome, $sharedConfig
     Wait-Tcp -Port $GatewayPort -Job $jobs.gateway
     Wait-MagpieHealthy -Exe $serverExe -Port $GatewayPort -Job $jobs.gateway
+
+    $jobs.gatewayControl = Start-NodeJob `
+        -NodeExe $nodePath `
+        -WorkingDirectory $gatewayControlDir `
+        -ScriptPath $gatewayControlServer `
+        -Environment $gatewayControlEnvironment
+    Wait-Tcp -Port $GatewayControlPort -Job $jobs.gatewayControl
+    Wait-HttpHealthy `
+        -Url "$gatewayControlBase/healthz" `
+        -Job $jobs.gatewayControl `
+        -Label "gateway-control"
 
     $authJob = Start-AuthJob -NodeExe $nodePath -AuthDir $authDir -Environment $authEnvironment
     $jobs.auth = $authJob
@@ -421,6 +529,43 @@ try {
     $state = New-RandomUrlToken -Bytes 24
     $verifier = New-RandomUrlToken -Bytes 48
     $joinCode = Get-OidcJoinCode -AuthBase $authBase -State $state -Verifier $verifier
+
+    $users = Invoke-InternalAdmin -Method "GET" -Path "/api/v1/internal/admin/users"
+    $employee = @($users.users | Where-Object { $_.email -eq $employeeEmail }) | Select-Object -First 1
+    if (-not $employee) {
+        throw "the OIDC login did not create an employee record"
+    }
+    if ([int]$employee.policy.version -ne 0 -or
+        $employee.policy.quotaStatus -ne "unknown" -or
+        $employee.policy.modelStatus -ne "unknown") {
+        throw "a new employee did not start with unknown policy status"
+    }
+    $quotaWrite = Invoke-InternalAdmin `
+        -Method "PUT" `
+        -Path "/api/v1/internal/admin/users/$($employee.id)/policy/quota" `
+        -Body @{
+            expectedVersion = 0
+            limits = @()
+            operationId = "auth-e2e-quota"
+        }
+    if ([int]$quotaWrite.data.policy.version -ne 1 -or
+        (@($quotaWrite.data.policy.missing) -notcontains "models")) {
+        throw "quota setup did not advance the policy and report missing models"
+    }
+    $modelsWrite = Invoke-InternalAdmin `
+        -Method "PATCH" `
+        -Path "/api/v1/internal/admin/users/$($employee.id)/policy/models" `
+        -Body @{
+            expectedVersion = 1
+            models = @("mock/mock-model")
+            operationId = "auth-e2e-models"
+        }
+    if ([int]$modelsWrite.data.policy.version -ne 2 -or
+        $modelsWrite.data.policy.quotaStatus -ne "known" -or
+        $modelsWrite.data.policy.modelStatus -ne "known") {
+        throw "model setup did not make both policy halves known"
+    }
+
     $exchangeBody = @{
         code = $joinCode
         codeVerifier = $verifier
@@ -456,7 +601,7 @@ try {
     Assert-Status -Label "employee /v1/models" -Response $models -Expected 200
 
     $chatBody = @{
-        model = "mock-model"
+        model = "mock/mock-model"
         messages = @(@{ role = "user"; content = "ping" })
     } | ConvertTo-Json -Depth 6
     $chat = Invoke-WebRequest `
@@ -474,7 +619,7 @@ try {
     }
     Write-Host "PASS  issued key reached the real gateway and mock upstream"
 
-    $usagePath = Join-Path $serverData "usage.jsonl"
+    $usagePath = Join-Path $sharedConfig "magpie\\usage.jsonl"
     $deadline = [DateTime]::UtcNow.AddSeconds(10)
     $usageLine = $null
     while ([DateTime]::UtcNow -lt $deadline -and -not $usageLine) {
@@ -596,12 +741,13 @@ try {
     Write-Host "PASS  auth store holds hashes and identifiers, not plaintext keys"
 
     $succeeded = $true
-    Write-Host "PASS  M1 real Magpie issuer end-to-end"
+    Write-Host "PASS  real Magpie issuer and policy end-to-end"
 } catch {
     Write-Host "FAIL  $($_.Exception.Message)"
     Show-JobLogs -Jobs $jobs
     throw
 } finally {
+    $env:XDG_CONFIG_HOME = $savedXdgConfigHome
     foreach ($job in $jobs.Values) {
         try {
             Stop-Job -Job $job -ErrorAction SilentlyContinue
@@ -619,6 +765,6 @@ try {
             Remove-Item -LiteralPath $resolvedRoot -Recurse -Force
         }
     } else {
-        Write-Host "logs and portable data kept in: $root"
+        Write-Host "logs and isolated data kept in: $root"
     }
 }

@@ -39,7 +39,9 @@ auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b**
 apply/独立回读、同步后交付、失败补偿和启动恢复核心已实现并通过 Mock/故障测试；
 C4-03d 部分实现：管理页已有额度/模型写表单和完整证据链状态，员工页已有本人额度/模型/
 凭证/设备只读门户；失败恢复入口、停用/吊销/轮换页面、operation/audit 查询和人工对账仍
-未实现。C4-04 真实 Magpie 请求行为 E2E、M2-C5、M2-D 和 M3-M6 也仍未实现。
+未实现。C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实限额/
+模型拒绝、多凭证部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销
+和恢复同步；M2-C5、M2-D 和 M3-M6 仍未实现。
 C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
 宣称管理员已经可以在生产自助调额或授予模型。
 `APR-01` 审批/step-up/职责分离和 `NOTIFY-01` outbox/邮件/IM/Webhook/SIEM/工单目前只有
@@ -56,7 +58,7 @@ C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未�
   -> C4-03b：用户级 gatewayPolicy、旧 M1 unknown、首次初始化和逐凭证 known（核心已完成）
   -> C4-03c：额度/模型管理 API、issuance journal、同步后交付和无孤儿补偿（核心已完成；待真实环境验收）
   -> C4-03d：页面/运营真实状态、失败凭证和对账入口（部分完成）
-  -> C4-04：真实 Magpie E2E、部分成功和对账证据
+  -> C4-04：完整管理到真实 Magpie 策略流 E2E（已完成；待 Docker/共享卷和真实 IdP 验收）
   -> C5：operations/audit-logs/reconcile
   -> APR-01a/b/c：审批绑定/一次性消费、外部审批、step-up
   -> NOTIFY-01a/b/c：outbox、邮件/IM/Webhook/工单、SIEM
@@ -75,7 +77,8 @@ C4-01 已按以下机器协议边界实现；后续适配器和管理 API 必须
    再回读；使用 `expectedPolicyRevision` 乐观锁，冲突不写文件。
 4. `gateway-control` 只允许 describe/apply/健康检查，使用固定 argv 数组、独立服务令牌或 mTLS、
    10 秒超时、64 KiB 上限和专用配置目录；写入后必须再独立执行一次 describe。
-5. 只有独立回读一致且真实请求行为符合目标策略，才能把策略标为 `known`；否则保持 `pending`。
+5. 只有独立回读一致且真实请求行为符合目标策略，才能把策略标为 `known`；否则保持
+   `pending`。C4-04 已在隔离真实链路中验证这一点，但 Docker/共享卷和真实企业 IdP 仍需验收。
 
 详细 schema、状态机、接口和验收字段见
 [`enterprise-feature-spec.md`](enterprise-feature-spec.md) 第 12.8.1.5 节和

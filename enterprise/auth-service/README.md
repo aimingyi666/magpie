@@ -167,10 +167,13 @@ curl http://127.0.0.1:${AUTH_HOST_PORT:-3444}/healthz
 同步后交付、失败补偿和启动恢复已实现并通过 Mock/故障测试。C4-03d 部分实现：管理页已有
 额度/模型写表单和完整证据链状态，auth-service 员工页和 `/api/v1/me` 已返回当前员工的
 额度、模型、凭证、设备、策略同步和恢复提示；页面 E2E、operation/audit 查询和人工对账
-仍未完成。C4-04、M2-C5 和 M2-D 仍未实现。完整契约见
+仍未完成。C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实
+限额/模型拒绝、多凭证部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key
+撤销和恢复同步；Docker/共享卷、真实企业 IdP 和反向代理仍未验收。M2-C5 和 M2-D 仍未
+实现。完整契约见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第 12.8.1 节。
 
-## M2-C4 策略状态（C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 未实现）
+## M2-C4 策略状态（C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 完整策略流 E2E 已通过）
 
 auth-service 中的用户级 `gatewayPolicy` 是策略意图的唯一事实来源，不是
 `caller-keys.json`：
@@ -244,12 +247,12 @@ C4-03 的具体门禁：
 - **C4-03c（核心已实现并通过 Mock/故障测试）**：join/refresh/rotate 的顺序固定为确认
   `known` -> journal -> 幂等签发 Key -> apply -> 独立 describe -> 原子持久化 -> 交付。
   同步完成前不能把 Key 返回客户端；签发、同步或提交失败会补偿撤销可确认的新 Key，
-  撤销不确定时保留 `unknown` 供启动或人工重试。真实 Magpie 行为 E2E 和生产验收仍属于
-  C4-04 及部署验收。
+  撤销不确定时保留 `unknown` 供启动或人工重试。C4-04 已通过隔离真实 Magpie 的完整
+  管理链路 E2E；真实共享卷、真实企业 IdP、反向代理和生产部署仍待验收。
 - **C4-03d（部分实现）**：管理页已展示策略版本、凭证同步状态、最后同步时间和错误码；
   `unknown` 不显示为 0/无限，`pending` 和 `partial_success` 不能显示为已生效。仍缺员工
-  门户、调额/模型写按钮、operation/audit 查询和人工对账。员工网页不能直接修改设备上的
-  Agent 文件。
+  页面 E2E、失败恢复入口、operation/audit 查询和人工对账；调额/模型写表单和员工只读
+  门户已存在。员工网页不能直接修改设备上的 Agent 文件。
 
 C4-03c 使用以下配置：
 
@@ -261,8 +264,9 @@ GATEWAY_CONTROL_TIMEOUT_MS
 
 当前 auth-service 已具备用户级 `gatewayPolicy`、内部额度/模型写接口、M1 迁移、回读确认、
 自动调用 `gateway-control`、issuance journal、同步后交付、失败补偿和启动恢复。启动时
-同时 drain 撤销队列并扫描非 `committed` journal。仍未完成的是真实 Magpie 限额/模型拒绝/
-多凭证行为 E2E、Docker/Compose 实机、mTLS 和人工对账。详细 schema、状态机和错误码见
+同时 drain 撤销队列并扫描非 `committed` journal。真实 Magpie 限额/模型拒绝、多凭证、
+refresh/rotate 继承和故障恢复已有 C4-04 证据；Docker/Compose 实机、真实共享卷、真实企业
+IdP、反向代理、mTLS 和人工对账仍未完成。详细 schema、状态机和错误码见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第
 12.8.1.1 至 12.8.1.6 节。
 
