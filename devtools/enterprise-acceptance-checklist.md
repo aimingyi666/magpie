@@ -58,7 +58,7 @@
 | A-07 | 审计失败阻断 | 审计不可写时拒绝写操作，依赖服务调用次数为 0 | M2-C3 Mock 已覆盖 intent 失败依赖调用为 0、result 失败不返回成功；真实存储待验收 |
 | A-08 | 职责分离 | 正文查看、审计导出、角色修改和留存修改不能由一人静默完成 | 设计已定义，待实现 |
 
-## 5. M2-C 写操作（C1/C2/C3 已验证，C4-01/C4-02 已实现本地/Mock 测试，C4-03a 已实现待部署验收，C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04/C5 未完成）
+## 5. M2-C 写操作（C1/C2/C3 已验证，C4-01/C4-02 已实现本地/Mock 测试，C4-03a 已实现待部署验收，C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 单 Key 已通过，C5 未完成）
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
@@ -69,16 +69,16 @@
 | W-04b | 首次策略初始化与 `unknown` 迁移（C4-03b） | 旧 M1 只迁移为 `quotaStatus/modelStatus=unknown`；quota/models 可任意顺序首次提交但不得伪造缺项；缺项返回 `policy_setup_required`；两项完整并逐凭证回读后才 `known` | auth-service 核心已实现，`23/23` 测试通过；管理端已编排额度/模型写入，真实 Compose/共享卷、真实 IdP 和真实请求行为尚未验收 |
 | W-04c | 管理 API 与同步后交付（C4-03c） | `PUT quota`/`PATCH models` 具备会话、CSRF、RBAC、范围、理由、版本、payload 指纹和 intent/result 审计；issuance journal -> 签发 -> apply -> 独立回读 -> 原子持久化 -> 才交付；同步前客户端拿不到 Key；任一步失败撤销且启动恢复处理可确认的孤儿 Key | 核心已实现并通过 Mock/故障测试；真实 Magpie apply/readback、共享卷、真实 IdP、多凭证故障注入和生产验收未完成 |
 | W-04d | 页面与运营状态（C4-03d） | `unknown/pending/partial_success/dependency_invoked` 显示真实状态、计数、失败凭证和恢复入口；只有 `succeeded + known + synced + 回读一致` 显示“已生效”；禁止自动重试不确定操作 | 部分实现；管理页已有额度/模型写表单、完整证据链和失败证据，员工页已有本人额度/模型/凭证/设备只读门户；页面 E2E、恢复入口、operation/audit 查询和人工对账未完成 |
-| W-04e | 机器可读控制契约与受控适配器 | `gateway-key describe/policy apply --json` 只接受 schema v1，原子写入、稳定错误码、64 KiB 限制和无秘密输出；`gateway-control` 只允许白名单路由/argv、独立服务令牌、10 秒超时、64 KiB 上限、写入后独立回读；不确定结果为 `pending` | C4-01 已通过 Go 单测、CLI 回归和隔离真实二进制冒烟；C4-02 已通过 `15/15` Mock/故障测试。管理 API、真实 Magpie 请求行为、Docker/Compose、真实共享卷和 C4-04 E2E 未验收，因此不是完整生产验收通过 |
-| W-05 | 模型授权 | 只接受稳定模型 ID；空数组、显示名、裸 `*`、未知模型和隐式扩大范围被拒绝；旧 Key 实际被拒 | 管理 API、目录展开、策略同步和 Mock 拒绝路径已实现；真实旧 Key 被网关拒绝属于 C4-04，尚未验收 |
+| W-04e | 机器可读控制契约与受控适配器 | `gateway-key describe/policy apply --json` 只接受 schema v1，原子写入、稳定错误码、64 KiB 限制和无秘密输出；`gateway-control` 只允许白名单路由/argv、独立服务令牌、10 秒超时、64 KiB 上限、写入后独立回读；不确定结果为 `pending` | C4-01 已通过 Go 单测、CLI 回归和隔离真实二进制冒烟；C4-02 已通过 `15/15` Mock/故障测试；C4-04 单 Key E2E 已通过真实 apply/readback、冲突不落盘、模型拒绝、限额和 rotate 后回读。多凭证、完整管理链路、Docker/Compose 和真实共享卷仍未验收，不能标记为完整生产验收通过 |
+| W-05 | 模型授权 | 只接受稳定模型 ID；空数组、显示名、裸 `*`、未知模型和隐式扩大范围被拒绝；旧 Key 实际被拒 | 管理 API、目录展开、策略同步和 Mock 拒绝路径已实现；C4-04 单 Key E2E 已证明白名单外模型返回 `403` 且请求未到上游，rotate 后旧 Key 返回 `401`。多凭证与完整管理与签发链路仍未验收 |
 | W-06 | 幂等冲突 | 同请求只执行一次；同键不同请求体返回 `409 idempotency_conflict`；执行中返回 `409 operation_in_progress` | M2-C3 Mock 已覆盖成功/失败重放、同键异体和并发执行中；真实环境待验收 |
 | W-07 | 依赖故障 | auth/gateway 不可用返回 `502 dependency_unavailable`，不伪造成功 | Auth C1 内部失败回滚和管理面写依赖故障 Mock 已通过；真实网关未验收 |
 | W-08 | 操作查询 | `GET /api/v1/admin/operations/{operationId}` 返回真实状态、依赖时间、失败项和对账状态 | 未实现 |
 | W-09 | 审计查询 | `GET /api/v1/admin/audit-logs` 支持授权范围内的过滤/游标分页，只返回脱敏元数据 | 未实现 |
 | W-10 | 人工对账 | 重试、回滚、确认已生效/未生效生成子 operation，原审计不可修改 | 未实现 |
-| W-11 | 部分成功 | 多凭证中部分失败返回 `partial_success`，列出 credentialId/deviceId/errorCode，策略保持 `pending` | C4-03c 核心 Mock/故障测试已覆盖；真实多凭证故障注入待 C4-04 |
+| W-11 | 部分成功 | 多凭证中部分失败返回 `partial_success`，列出 credentialId/deviceId/errorCode，策略保持 `pending` | C4-03c 核心 Mock/故障测试已覆盖；C4-04 单 Key E2E 不覆盖多凭证，真实多凭证故障注入仍未完成 |
 | W-12 | 幂等指纹 | 额度/模型 payload 纳入指纹；同键不同额度或模型不能重放旧结果 | 管理 API 测试已覆盖；真实存储和多实例行为待验收 |
-| W-13 | 策略继承 | 新签发、refresh、rotate 继承当前策略；`pending` 时失败关闭且无新偏差凭证 | auth-service Mock 已覆盖；真实 Magpie 请求行为待 C4-04 |
+| W-13 | 策略继承 | 新签发、refresh、rotate 继承当前策略；`pending` 时失败关闭且无新偏差凭证 | auth-service Mock 已覆盖；C4-04 单 Key E2E 已证明 rotate 保留策略且旧 Key `401`，但真实新签发、refresh 和完整管理链路继承仍未验收 |
 | W-14 | 管理写 UI | 只有完整证据链显示“已生效”；`partial_success`/`pending`/`unknown` 显示真实状态 | C4-03d 部分实现：额度/模型策略写表单和员工只读状态门户已通过 HTML/API/静态脚本测试；停用/吊销/轮换页面、页面 E2E、恢复入口和 operation/audit 查询未实现 |
 | W-15 | 报表与导出 | 人/部门/Agent/模型筛选、费用趋势、授权导出和操作历史符合权限与审计 | M2-D 未实现 |
 
@@ -108,7 +108,8 @@ C4-01 已完成本地单元、CLI 回归和隔离真实二进制冒烟；C4-02 �
 15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项和 28 项管理服务集成测试，管理服务合计
 35/35 通过；真实 Compose、只读挂载和 digest 重启仍未验收。C4-03b/C4-03c 核心已通过
 23 项 auth-service 测试，但真实部署和真实 Magpie 行为尚未验收；C4-03d 已部分实现
-管理页额度/模型写表单和员工只读状态门户，页面 E2E、恢复入口、C4-04、C5/D 未完成。后续应至少运行：
+管理页额度/模型写表单和员工只读状态门户；C4-04 单 Key 真实请求 E2E 已通过，页面 E2E、
+恢复入口、多凭证真实故障注入、完整管理签发/refresh/rotate 链路和 C5/D 未完成。后续应至少运行：
 
 W-04a-d 还必须逐项保留以下证据：
 
@@ -135,13 +136,16 @@ node --test enterprise/auth-service/test/auth-service.test.mjs
 .\enterprise\test\c4-gateway-policy-e2e.ps1 -Magpie <magpie.exe> -Node <node.exe>
 ```
 
-`c4-gateway-policy-e2e.ps1` 是 C4-04 必须新增的验收脚本；当前脚本不存在，因此 W-04/W-05
-只能记为“部分验证”。W-04e 的 C4-01 证据覆盖 schema v1、64 KiB 输入输出上限、稳定错误
-码、无秘密输出、`expectedPolicyRevision` 冲突不写文件、文件锁内原子替换和独立回读；
-C4-02 证据覆盖固定路由/argv、服务令牌隔离、10 秒超时、64 KiB 上限和独立回读，但目前
-仍是 Mock/故障测试。脚本还必须验证真实 Magpie 请求行为、
-人类可读 CLI 文本变化不影响 `describe --json`，以及 `policy apply` 不会产生部分多窗口状态。
-C5/D 的脚本和页面测试同样必须以实际文件与原始输出为准，不能只在清单中勾选。
+`c4-gateway-policy-e2e.ps1` 已由提交 `9bb0f94dc` 加入并实际执行，全部 `PASS`。它使用随机
+端口、临时 portable Magpie、隔离 `XDG_CONFIG_HOME` 和独立 Mock 上游，证明模型白名单
+`403`、Token 限额 `429`、冲突不写、rotate 保持策略、旧 Key `401`、新 Key 可用，以及
+`describe/apply`、日志和 `usage.jsonl` 的秘密扫描通过。W-04e 的 C4-01 证据仍覆盖 schema
+v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPolicyRevision` 冲突不写文件、
+文件锁内原子替换和独立回读；C4-02 证据覆盖固定路由/argv、服务令牌隔离、10 秒超时、
+64 KiB 上限和独立回读，但仍属于 Mock/故障测试。W-04e/W-05 可记录该真实单 Key 证据，
+但多凭证部分成功、完整 `admin-service -> auth-service -> gateway-control -> Magpie`
+签发/refresh/rotate、Docker/共享卷和生产环境仍未验收。C5/D 的脚本和页面测试同样必须以
+实际文件与原始输出为准，不能只在清单中勾选。
 
 完整 `go test ./internal/cli` 还包含会访问网络的上游测试，当前曾因 `TestLibrarySkillRmGone`
 超时；因此 C4-01 的 CLI 证据只采用 `-run '^TestGatewayKey'` 的定向回归，不能把定向回归写成
