@@ -1421,12 +1421,67 @@ test("policy management expands catalog selectors and reports credential sync st
     "synced",
     "pending",
     "policy_unknown",
-    "ready",
+    "Policy operations",
+    "Manage bob@corp.example",
+    "Set quota windows",
+    "Set model authorization",
   ]) {
     assert.ok(html.includes(expected), `page should include ${expected}`);
   }
+  assert.ok(html.includes('src="/admin/app.js"'));
+  assert.ok(html.includes('name="csrf-token"'));
+  assert.ok(!html.includes("Applied and verified."));
+  const script = await fetch(`${f.base}/admin/app.js`);
+  assert.equal(script.status, 200);
+  assert.match(script.headers.get("content-type"), /^text\/javascript/);
+  const scriptText = await script.text();
+  assert.ok(scriptText.includes("idempotency-key"));
+  assert.ok(scriptText.includes("Do not retry automatically"));
   assertNoWriteSecrets([quota.body, models.body], f, jar);
   assertNoWriteSecrets(await fs.readFile(f.config.storePath, "utf8"), f, jar);
+});
+
+test("admin page shows verified policy only with a complete evidence chain", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  await f.admin.store.mutate((data) => {
+    data.adminOperations.op_mock_policy_ready = {
+      id: "op_mock_policy_ready",
+      action: "user.policy.models",
+      targetType: "user",
+      targetId: "usr_alice",
+      status: "succeeded",
+      createdAt: "2026-10-31T08:01:00.000Z",
+      updatedAt: "2026-10-31T08:01:01.000Z",
+      completedAt: "2026-10-31T08:01:01.000Z",
+      responseBody: {
+        result: {
+          state: "succeeded",
+          requiresReconciliation: false,
+          credentials: {
+            total: 1,
+            succeeded: 1,
+            failed: 0,
+            pending: 0,
+            unknown: 0,
+          },
+        },
+      },
+    };
+  });
+
+  const jar = await adminLogin(f);
+  const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.ok(html.includes("Applied and verified."));
+  assert.ok(html.includes("Policy v2; 1 active credentials verified by independent readback."));
+  assert.ok(html.includes("op_mock_policy_ready"));
+  assert.ok(!html.includes("should-not-leak-gateway-key"));
+  assert.ok(!html.includes("should-not-leak-token-hash"));
 });
 
 test("policy writes replay by payload and reject conflicting idempotency reuse", { timeout: 30000 }, async (t) => {
@@ -1577,6 +1632,14 @@ test("auditor reads only permitted metadata and has no write permissions", { tim
   const crossScopeUser = await adminGet(f, jar, "/api/v1/admin/users/usr_alice");
   assert.equal(crossScopeUser.response.status, 403);
   assert.equal(crossScopeUser.body.error.code, "forbidden_scope");
+
+  const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.ok(html.includes("Read-only access. Your role cannot change user policies."));
+  assert.ok(!html.includes("policy-write-form"));
+  assert.ok(!html.includes("Save quota"));
+  assert.ok(!html.includes("Save models"));
 });
 
 test("M2-C2 global admin write routes call auth-service and return only safe fields", { timeout: 30000 }, async (t) => {

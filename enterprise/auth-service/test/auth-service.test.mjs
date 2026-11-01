@@ -765,6 +765,120 @@ test("OIDC join, device lifecycle, revocation and session", { timeout: 30000 }, 
   assert.equal(f.auth.handoffs.size, 0);
 });
 
+test("employee portal shows only the signed-in user's policy and credential evidence", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  const joined = await joinDevice(f, "Alice Portal PC");
+  const alice = await userByEmail(f);
+  await f.auth.store.mutate((data) => {
+    data.users.usr_bob = {
+      id: "usr_bob",
+      subject: "employee-bob",
+      email: "bob@corp.example",
+      name: "Bob Private",
+      status: "active",
+      createdAt: "2026-10-01T00:00:00.000Z",
+      lastLoginAt: "2026-10-31T00:00:00.000Z",
+      gatewayPolicy: {
+        version: 1,
+        limits: [{ period: "month", tokens: 999999, cost: 99 }],
+        models: ["private/bob-model"],
+        quotaStatus: "known",
+        modelStatus: "known",
+        including: ["quota", "models"],
+        missing: [],
+        updatedAt: "2026-10-31T00:00:00.000Z",
+        confirmedAt: "2026-10-31T00:01:00.000Z",
+        operationId: "op_bob_private",
+      },
+    };
+    data.devices.dev_bob_private = {
+      id: "dev_bob_private",
+      userId: "usr_bob",
+      name: "Bob Private PC",
+      platform: "windows",
+      clientVersion: "9.9.9",
+      status: "active",
+      createdAt: "2026-10-31T00:00:00.000Z",
+      lastSeenAt: "2026-10-31T01:00:00.000Z",
+      gatewayKeyId: "key-bob-private",
+      gatewayKeyExpiresAt: "2026-11-01T00:00:00.000Z",
+      tokenHash: "bob-token-hash-must-not-leak",
+    };
+    data.credentials["key-bob-private"] = {
+      id: "key-bob-private",
+      userId: "usr_bob",
+      deviceId: "dev_bob_private",
+      status: "active",
+      createdAt: "2026-10-31T00:00:00.000Z",
+      expiresAt: "2026-11-01T00:00:00.000Z",
+      policyVersion: 1,
+      policySyncState: "synced",
+      lastPolicySyncedAt: "2026-10-31T00:01:00.000Z",
+    };
+  });
+
+  const jar = await browserLogin(f);
+  const me = await fetch(`${f.authBase}/api/v1/me`, { headers: { cookie: jar.header() } });
+  assert.equal(me.status, 200);
+  const body = await jsonBody(me);
+  assert.equal(body.user.email, "alice@corp.example");
+  assert.ok(body.devices.every((device) => device.userId === alice.id));
+  assert.ok(body.credentials.every((credential) => credential.userId === alice.id));
+  assert.equal(body.evidence.policyKnown, true);
+  assert.equal(body.evidence.activeCredentialsSynced, true);
+  assert.ok(body.evidence.activeCredentialCount >= 1);
+  assertNoPrivateValues(body, f, [joined.gateway.key, joined.deviceToken]);
+  assert.ok(!JSON.stringify(body).includes("Bob Private"));
+  assert.ok(!JSON.stringify(body).includes("bob-token-hash-must-not-leak"));
+
+  const page = await fetch(`${f.authBase}/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  for (const expected of [
+    "alice@corp.example",
+    "Alice Portal PC",
+    "deepseek/deepseek-chat",
+    "Policy confirmed after independent gateway readback.",
+    "Credentials",
+    "Devices",
+    "The browser never writes Agent files",
+  ]) {
+    assert.ok(html.includes(expected), `page should include ${expected}`);
+  }
+  assert.ok(!html.includes("Bob Private"));
+  assert.ok(!html.includes("private/bob-model"));
+  assert.ok(!html.includes(joined.gateway.key));
+  assert.ok(!html.includes(joined.deviceToken));
+  assert.ok(!html.includes("tokenHash"));
+});
+
+test("employee portal labels historical quota and model scope as unknown", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  const jar = await browserLogin(f);
+  const me = await fetch(`${f.authBase}/api/v1/me`, { headers: { cookie: jar.header() } });
+  assert.equal(me.status, 200);
+  const body = await jsonBody(me);
+  assert.equal(body.evidence.policyKnown, false);
+  assert.equal(body.evidence.activeCredentialsSynced, false);
+  assert.equal(body.evidence.activeCredentialCount, 0);
+
+  const page = await fetch(`${f.authBase}/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.ok(html.includes("Historical quota unknown."));
+  assert.ok(html.includes("Historical model scope unknown."));
+  assert.ok(!html.includes("Policy confirmed after independent gateway readback."));
+  assert.ok(!html.includes("tokens, $"));
+});
+
 test("internal admin status requires its own service token", { timeout: 30000 }, async (t) => {
   const f = await fixture();
   t.after(() => f.close());

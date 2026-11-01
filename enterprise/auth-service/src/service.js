@@ -174,6 +174,30 @@ function publicCredential(credential, devices) {
   };
 }
 
+function publicSelfView(data, user) {
+  const devices = Object.values(data.devices)
+    .filter((device) => device.userId === user.id)
+    .map(publicDevice);
+  const credentials = Object.values(data.credentials)
+    .filter((credential) => credential.userId === user.id)
+    .map((credential) => publicCredential(credential, data.devices));
+  const activeCredentials = credentials.filter((credential) => credential.status === "active");
+  return {
+    user: publicUser(user),
+    devices,
+    credentials,
+    evidence: {
+      policyKnown: policyIsKnown(user.gatewayPolicy),
+      activeCredentialCount: activeCredentials.length,
+      activeCredentialsSynced: activeCredentials.length > 0 && activeCredentials.every(
+        (credential) => credential.policyVersion === user.gatewayPolicy?.version
+          && credential.policySyncState === "synced",
+      ),
+      confirmedAt: user.gatewayPolicy?.confirmedAt || "",
+    },
+  };
+}
+
 function keyName(user, deviceName) {
   const value = `Enterprise · ${user.email} · ${deviceName}`;
   return [...value].slice(0, 120).join("");
@@ -510,11 +534,37 @@ async function readJson(req) {
   }
 }
 
-function htmlPage(user) {
-  const identity = user
-    ? `<p>Signed in as <strong>${escapeHtml(user.email)}</strong>.</p><p>Use the enterprise join command on the computer that runs Magpie.</p>`
-    : `<p>Sign in with your company account, or start the Magpie enterprise join command.</p>`;
-  return `<!doctype html>
+function credentialRows(credentials) {
+  if (credentials.length === 0) return "<p>No credentials have been issued to this account.</p>";
+  return `<div class="table-wrap"><table><thead><tr>
+    <th>Key</th><th>Device</th><th>Status</th><th>Policy</th><th>Sync</th><th>Last error</th><th>Last synced</th>
+  </tr></thead><tbody>${credentials.map((credential) => `<tr>
+    <td><code>${escapeHtml(credential.id)}</code></td>
+    <td>${escapeHtml(credential.deviceName || credential.deviceId)}</td>
+    <td>${escapeHtml(credential.status)}</td>
+    <td>v${escapeHtml(credential.policyVersion)}</td>
+    <td>${escapeHtml(credential.policySyncState)}</td>
+    <td>${escapeHtml(credential.lastPolicyErrorCode || "")}</td>
+    <td>${escapeHtml(credential.lastPolicySyncedAt || "")}</td>
+  </tr>`).join("")}</tbody></table></div>`;
+}
+
+function deviceRows(devices) {
+  if (devices.length === 0) return "<p>No active device has joined this account.</p>";
+  return `<div class="table-wrap"><table><thead><tr>
+    <th>Device</th><th>Platform</th><th>Status</th><th>Last seen</th><th>Key ID</th>
+  </tr></thead><tbody>${devices.map((device) => `<tr>
+    <td>${escapeHtml(device.name)}</td>
+    <td>${escapeHtml(device.platform)}</td>
+    <td>${escapeHtml(device.status)}</td>
+    <td>${escapeHtml(device.lastSeenAt || "")}</td>
+    <td><code>${escapeHtml(device.gatewayKeyId || "")}</code></td>
+  </tr>`).join("")}</tbody></table></div>`;
+}
+
+function htmlPage(view) {
+  if (!view) {
+    return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
@@ -523,10 +573,77 @@ function htmlPage(user) {
   <style>
     body{margin:0;background:#f2efe6;color:#172018;font:18px/1.6 Georgia,serif}
     main{max-width:720px;margin:10vh auto;padding:48px;background:#fffdf5;border:1px solid #d6cfbd;box-shadow:12px 12px 0 #d8c9a6}
-    h1{font-size:44px;line-height:1.05;margin:0 0 24px} code{background:#e9e1cd;padding:2px 6px}
+    h1{font-size:44px;line-height:1.05;margin:0 0 24px} a{color:#9e2518}
   </style>
 </head>
-<body><main><h1>Magpie Enterprise</h1>${identity}</main></body>
+<body><main><h1>Magpie Enterprise</h1>
+  <p>Sign in with your company account, or start the Magpie enterprise join command.</p>
+  <p><a href="/login">Sign in</a></p>
+</main></body>
+</html>`;
+  }
+  const { user, devices, credentials, evidence } = view;
+  const policy = user.policy;
+  const ready = evidence.policyKnown
+    && evidence.activeCredentialsSynced
+    && Boolean(evidence.confirmedAt);
+  const noActiveCredentials = Number(evidence.activeCredentialCount) === 0;
+  const quotaUnknown = !Array.isArray(policy?.limits);
+  const modelsUnknown = !Array.isArray(policy?.models);
+  const quota = quotaUnknown
+    ? "<p><strong>Historical quota unknown.</strong> No value is inferred from old data.</p>"
+    : `<ul>${policy.limits.map((limit) => `<li><code>${escapeHtml(limit.period)}</code>`
+      + `: ${escapeHtml(limit.tokens)} tokens, $${escapeHtml(limit.cost)}`
+      + `${limit.cacheReads ? ", cache reads counted" : ""}</li>`).join("")}</ul>`;
+  const models = modelsUnknown
+    ? "<p><strong>Historical model scope unknown.</strong> Ask an administrator to set it before joining.</p>"
+    : `<ul>${policy.models.map((model) => `<li><code>${escapeHtml(model)}</code></li>`).join("")}</ul>`;
+  const stateText = ready
+    ? "Policy confirmed after independent gateway readback."
+    : policy?.quotaStatus === "pending" || policy?.modelStatus === "pending"
+      ? "Policy synchronization is pending. Check the failed credential evidence below."
+      : !evidence.policyKnown
+        ? "Your policy is incomplete or historical. An administrator must set quota and models."
+        : noActiveCredentials
+          ? "No active credential has joined yet. Run the enterprise join command on your computer."
+          : "Your active credentials have not all confirmed the current policy.";
+  return `<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Magpie Enterprise</title>
+  <style>
+    :root{--ink:#172018;--paper:#f2efe6;--card:#fffdf5;--line:#d6cfbd;--accent:#9e2518;--ok:#17643a}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top right,#e8dcc0,transparent 36%),var(--paper);color:var(--ink);font:18px/1.6 Georgia,serif}
+    main{max-width:960px;margin:7vh auto;padding:clamp(24px,5vw,52px);background:var(--card);border:1px solid var(--line);box-shadow:12px 12px 0 #d8c9a6}
+    h1{font-size:clamp(40px,7vw,68px);line-height:.95;margin:0 0 20px}h2{margin-top:32px;border-bottom:1px solid var(--line);padding-bottom:7px}
+    code{background:#e9e1cd;padding:2px 6px;overflow-wrap:anywhere}.status{border-left:5px solid ${ready ? "var(--ok)" : "var(--accent)"};padding:10px 14px;background:#f8f0df}
+    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:16px}.box{border:1px solid var(--line);padding:16px}
+    .table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font-size:14px}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
+    button{border:0;background:var(--ink);color:white;padding:11px 16px;font:700 14px Georgia,serif;cursor:pointer}
+  </style>
+</head>
+<body><main>
+  <h1>Magpie Enterprise</h1>
+  <p>Signed in as <strong>${escapeHtml(user.email)}</strong>.</p>
+  <p class="status">${escapeHtml(stateText)}</p>
+  <div class="grid">
+    <section class="box"><h2>Identity</h2><p>${escapeHtml(user.name)}<br><code>${escapeHtml(user.id)}</code></p></section>
+    <section class="box"><h2>Policy</h2><p>Version ${escapeHtml(policy?.version ?? 0)}</p>
+      <p>Quota: <code>${escapeHtml(policy?.quotaStatus || "unknown")}</code><br>
+      Models: <code>${escapeHtml(policy?.modelStatus || "unknown")}</code></p>
+      <p>Last confirmed: ${escapeHtml(evidence.confirmedAt || "not confirmed")}</p>
+    </section>
+  </div>
+  <h2>Quota</h2>${quota}
+  <h2>Authorized models</h2>${models}
+  <h2>Credentials</h2>${credentialRows(credentials)}
+  <h2>Devices</h2>${deviceRows(devices)}
+  <h2>Join another computer</h2>
+  <p>Run the enterprise join command on the computer that runs Magpie. The browser never writes Agent files or exposes a Gateway Key.</p>
+  <form method="post" action="/api/v1/logout"><button type="submit">Sign out</button></form>
+</main></body>
 </html>`;
 }
 
@@ -1397,8 +1514,11 @@ export async function createEnterpriseAuthServer(config, options = {}) {
 
     if (req.method === "GET" && url.pathname === "/") {
       const current = await userForSession(req);
+      const view = current
+        ? await store.read((data) => publicSelfView(data, data.users[current.user.id]))
+        : null;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(htmlPage(current?.user || null));
+      res.end(htmlPage(view));
       return;
     }
 
@@ -1492,14 +1612,8 @@ export async function createEnterpriseAuthServer(config, options = {}) {
     if (req.method === "GET" && url.pathname === "/api/v1/me") {
       const current = await userForSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your company account");
-      json(res, 200, {
-        user: publicUser(current.user),
-        devices: await store.read((data) =>
-          Object.values(data.devices)
-            .filter((device) => device.userId === current.user.id)
-            .map(publicDevice),
-        ),
-      });
+      const view = await store.read((data) => publicSelfView(data, data.users[current.user.id]));
+      json(res, 200, view);
       return;
     }
 

@@ -32,11 +32,13 @@
 **当前事实：** M0、M1、M2-A、M2-B、M2-C1、M2-C2 和 M2-C3 已有代码及 Mock/本地测试
 证据；C4-01 的 schema v1 机器协议已实现，并通过 Go 单测、gateway-key CLI 回归和隔离
 真实二进制冒烟；C4-02 `enterprise/gateway-control/` 受控适配器已实现，并通过 15 项
-Mock/故障测试。C4-03a 正式只读模型目录已实现，并通过 7 项目录专项和 27 项管理服务集成
-测试，管理服务合计 34 项通过；C4-03b 的用户级 `gatewayPolicy` 核心已在 auth-service 实现，
-覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 21 项测试通过。
+Mock/故障测试。C4-03a 正式只读模型目录已实现，并通过 7 项目录专项和 28 项管理服务集成
+测试，管理服务合计 35 项通过；C4-03b 的用户级 `gatewayPolicy` 核心已在 auth-service 实现，
+覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 23 项测试通过。
 C4-03c 的管理 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿
-和启动恢复核心已实现，并通过 Mock/故障测试；C4-03d 仅完成管理页同步状态展示。
+和启动恢复核心已实现，并通过 Mock/故障测试；C4-03d 部分实现：管理页已有额度/模型写
+表单和完整证据链状态，员工页已有本人额度、模型、凭证和设备只读门户；失败恢复入口、
+停用/吊销/轮换页面和 operation/audit 查询仍未实现。
 C4-04 真实 Magpie 行为 E2E、M2-C5 和 M2-D 仍未实现。真实企业 IdP、Docker Compose、真实共享卷、
 Windows 计划任务、
 反向代理、真实网关调额/模型授权、操作审计查询、中央 MCP/资源库、会话正文审计、安全运营
@@ -349,10 +351,11 @@ Issue、临时豁免期限和负责人。
 M2-C4 的目标不是“在管理页写一个额度数字”，而是证明用户级 `gatewayPolicy` 已经在所有
 活跃网关凭证上生效。C4-01 已完成底层机器协议和本地测试；C4-02 已完成受控适配器和
 15 项 Mock/故障测试，但 Docker/Compose、真实共享卷和健康检查尚未实机验收；C4-03a 已完成
-管理服务只读目录和 34 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
-核心并通过 21 项测试；C4-03c 已完成管理 API、幂等签发、issuance journal、自动
+管理服务只读目录和 35 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
+核心并通过 23 项测试；C4-03c 已完成管理 API、幂等签发、issuance journal、自动
 apply/readback、同步后交付、失败补偿和启动恢复的本地 Mock/故障链路，但真实 Magpie 和
-共享卷验收未完成；C4-03d 仅完成管理页状态展示，C4-04 尚未实现。后续必须按切片顺序交付，
+共享卷验收未完成；C4-03d 已完成管理页额度/模型写表单和员工只读状态门户，但页面 E2E、
+恢复入口、operation/audit 查询和人工对账未完成，C4-04 尚未实现。后续必须按切片顺序交付，
 每个切片使用独立功能分支、独立 PR 和独立验收证据，
 不能把机器协议、适配器、管理 API 和真实 E2E 堆成一个无法审查的 PR。
 
@@ -360,10 +363,10 @@ apply/readback、同步后交付、失败补偿和启动恢复的本地 Mock/故
 | --- | --- | --- | --- | --- |
 | C4-01 | 已完成，本地测试通过 | `feat/m2-c4-gateway-contract` | `magpie gateway-key describe <id> --json` 和原子 `magpie gateway-key policy apply <id> --json` | schema v1、无秘密输出、文件锁内原子替换、`expectedPolicyRevision` 冲突不写文件、64 KiB 输入输出上限；Go 单测、CLI 回归和隔离真实二进制冒烟通过 |
 | C4-02 | 已完成 Mock/故障测试，待 Docker/真实卷验收 | `feat/m2-c4-gateway-control` | 独立的 `enterprise/gateway-control/` 服务 | 仅 describe/apply/健康检查；专用非 root 账号、固定 `GATEWAY_CONTROL_CONFIG_HOME`、独立 Bearer 服务令牌、无公网端口、无 Docker socket、写后独立回读、默认 10 秒超时并终止子进程；Docker/Compose、真实共享卷、mTLS 和生产环境未验收 |
-| C4-03a | 已实现，待真实部署验收 | `feat/m2-c4-gateway-policy` | admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、SHA-256 digest 和安全投影 | 7 项专项 + 27 项管理集成测试通过；坏文件、未知字段、重复 ID/group、空目录、未知引用和超 2 MiB 失败关闭；真实只读挂载/digest 重启及 auth-service 接入待完成 |
-| C4-03b | 核心已实现，管理链路待建 | `feat/m2-c4-gateway-policy` | auth-service 的 `gatewayPolicy`、旧 M1 `unknown` 迁移和首次初始化 | 21/21 测试已验证 quota/models 分步提交不伪造另一项、缺项 `policy_setup_required`、版本冲突和回读确认；管理端编排与真实部署待验收 |
+| C4-03a | 已实现，待真实部署验收 | `feat/m2-c4-gateway-policy` | admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、SHA-256 digest 和安全投影 | 7 项专项 + 28 项管理集成测试通过；坏文件、未知字段、重复 ID/group、空目录、未知引用和超 2 MiB 失败关闭；真实只读挂载/digest 重启待完成 |
+| C4-03b | 核心已实现，管理链路已接通 | `feat/m2-c4-gateway-policy` | auth-service 的 `gatewayPolicy`、旧 M1 `unknown` 迁移和首次初始化 | 23/23 测试已验证 quota/models 分步提交不伪造另一项、缺项 `policy_setup_required`、版本冲突、回读确认和员工门户脱敏；真实部署待验收 |
 | C4-03c | 核心已实现，Mock/故障测试通过 | `feat/m2-c4-gateway-policy` | 额度/模型管理 API、issuance journal、apply/readback 和同步后交付 | 版本与 `If-Match`、payload 指纹、apply/独立回读/原子持久化后才交付；失败补偿和启动恢复已有测试；真实环境待验收 |
-| C4-03d | 部分实现 | `feat/m2-c4-gateway-policy` | 管理页和员工页的策略/同步状态 | 管理页已展示策略版本、逐凭证同步状态、最后同步时间和错误码；写按钮、完整员工门户、`dependency_invoked` 查询和人工对账待完成 |
+| C4-03d | 部分实现 | `feat/m2-c4-gateway-policy-ui` | 管理页额度/模型写表单、完整证据链状态和员工只读状态门户 | 管理页自动携带 CSRF/幂等键/理由/版本并区分 pending/partial/unknown；员工页展示本人额度、模型、凭证、设备和同步；页面 E2E、失败恢复入口、`dependency_invoked` 查询和人工对账待完成 |
 | C4-04 | 未实现 | `feat/m2-c4-gateway-policy-e2e` | 真实 Magpie E2E、故障注入和对账证据 | 多张旧 Key 的真实额度和模型范围变化、真实限流、刷新/轮换继承、部分失败不伪造成功、隔离临时目录和端口 |
 
 固定信任边界：
@@ -704,7 +707,7 @@ C4/C5/D、M3-M5 中本次实际启用的功能
 | 4 | 在干净环境验证 Compose、真实 IdP、代理、Windows 和公司 CA | IT/SRE | `enterprise-acceptance-checklist.md` 证据 |
 | 5 | 复核并归档 C4-01：机器协议、原子写入、冲突和秘密输出测试 | 平台/安全 | 重跑 Go 单测/CLI 回归/隔离真实二进制冒烟并保存证据 |
 | 6 | 复核并实机验收 C4-02：`gateway-control` Docker/Compose、真实共享卷、健康检查和故障恢复 | 平台/安全 | 镜像构建、Compose 启动、健康检查、文件锁、重启恢复和故障测试证据 |
-| 7 | 验收 C4-03c 并完成 C4-03d/C4-04：管理 API 自动编排、issuance journal、同步后交付和失败补偿已有 Mock/故障证据；继续补齐页面剩余状态和真实 E2E；C4-03a 已完成管理端只读目录并纳入部署验收，C4-03b 核心已通过 21 项 auth-service 测试 | 平台/安全 | 真实 Compose 只读挂载/digest、管理端策略编排、缺项零依赖、真实 Key 回读、限流、刷新/轮换继承、部分成功和审计失败测试 |
+| 7 | 验收 C4-03c 并完成 C4-03d/C4-04：管理 API 自动编排、issuance journal、同步后交付和失败补偿已有 Mock/故障证据；继续补齐页面剩余状态和真实 E2E；C4-03a 已完成管理端只读目录并纳入部署验收，C4-03b 核心已通过 23 项 auth-service 测试 | 平台/安全 | 真实 Compose 只读挂载/digest、管理端策略编排、缺项零依赖、真实 Key 回读、限流、刷新/轮换继承、部分成功和审计失败测试 |
 | 8 | 完成 C5：operation/audit 查询、对账和子 operation | 平台/安全 | 失败可查询、可对账、审计不可修改 |
 | 9 | 完成 M2-D：管理写 UI、真实状态、看板和授权导出 | 前端/平台 | 页面 E2E、权限和状态验收 |
 | 10 | 建立员工/管理员/审计/SRE 培训和客服手册 | 产品/IT/SRE | 培训记录和 FAQ |

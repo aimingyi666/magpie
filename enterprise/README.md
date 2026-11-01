@@ -19,15 +19,17 @@ Agent → magpie(客户端，本地网关) ──→ magpie(服务端网关) ─
 - 客户端和服务端是同一份 magpie 二进制、不同的数据目录和配置，不需要改代码。
 
 当前可用范围是 M0、M1、M2-A/M2-B、M2-C1/C2/C3 和 M2-C4-01/C4-02/C4-03a/C4-03b 核心，
-以及 C4-03c 的管理 API、签发 journal、自动 apply/独立回读、同步后交付和启动补偿：
+以及 C4-03c 的管理 API、签发 journal、自动 apply/独立回读、同步后交付和启动补偿，
+外加 C4-03d 的管理页额度/模型写表单和员工只读状态门户：
 手工/OIDC 加入、短期 Key、设备注册与吊销、管理身份与只读治理、四个受控管理写 API、
 管理额度/模型 API、持久化幂等、管理审计、schema v1 的网关策略机器回读/原子写入、
 受控 `gateway-control` 适配器、正式只读模型目录，以及 auth-service 的用户级策略状态机。
-`gateway-control` 已通过 15 项 Mock/故障测试；auth-service 已通过 21 项测试；
-admin-service 已通过 34 项测试（27 项管理服务集成测试 + 7 项目录专项测试）。
+`gateway-control` 已通过 15 项 Mock/故障测试；auth-service 已通过 23 项测试；
+admin-service 已通过 35 项测试（28 项管理服务集成测试 + 7 项目录专项测试）。
 `GET /api/v1/admin/models` 使用正式目录，由 admin-service 将 group/provider 选择器展开为
-稳定模型 ID 后再交给 auth-service。C4-03d 仅部分实现：管理页已展示策略版本和凭证同步
-状态，但没有写按钮、完整员工门户、operation/audit 查询或人工对账。Docker/Compose
+稳定模型 ID 后再交给 auth-service。C4-03d 部分实现：管理页已展示策略版本、完整证据链和
+凭证同步状态，并提供额度/模型写表单；员工页可查看本人额度、模型、凭证、设备和同步状态。
+页面 E2E、失败恢复入口、operation/audit 查询和人工对账仍未完成。Docker/Compose
 实机构建、启动和健康检查，真实共享卷、真实企业 IdP、浏览器、反向代理、Windows
 计划任务和 mTLS 尚未验收；C4-04 真实 Magpie 限额/模型拒绝/多凭证行为 E2E、M2-C5、
 M2-D 和 M3-M6 仍未实现。当前不是生产就绪版本。
@@ -100,10 +102,11 @@ C4-03a/C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 仍未实现�
   签发失败会补偿撤销新 Key；启动时扫描非 `committed` journal，对可确认的孤儿 Key 执行
   幂等撤销，撤销结果不确定时保留 `unknown` 供后续重试。核心已通过 Mock/故障测试，
   但尚未完成真实 Magpie 行为 E2E 和生产验收。
-- C4-03d 只有 `succeeded + known + synced + 回读一致` 才允许按“已生效”呈现；
-  `unknown`、`pending`、`partial_success` 和 `dependency_invoked` 不能显示为成功。
-  当前管理页已展示凭证同步状态、最后同步时间和错误码，但尚无调额/模型写按钮、完整员工
-  门户、operation/audit 查询和人工对账。员工网页仍不能直接修改本机 Agent 文件。
+- C4-03d 只有完整证据链（`succeeded + known + synced + operation 匹配 + 无需对账`）
+  才允许按“已生效”呈现；`unknown`、`pending`、`partial_success` 和
+  `dependency_invoked` 不能显示为成功。管理页已提供额度/模型写表单和失败证据，员工页已
+  提供本人状态只读门户；页面 E2E、operation/audit 查询和人工对账仍未完成。员工网页仍不能
+  直接修改本机 Agent 文件。
 `pending` 时 join、refresh 和 rotate 必须失败关闭，不能扩散未确认策略。
 
 详细字段、状态和验收见
@@ -237,8 +240,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
 管理会话、CSRF、RBAC、组织范围和非空 `reason`；M2-C3 已接入 `Idempotency-Key` 持久化/
 重放/冲突、`operationId`、intent/result 管理审计和审计失败阻断，因此 API 层面的敏感操作
 已有可追溯性。C4-03c 已提供额度/模型管理 API、自动同步、同步后交付和失败状态持久化；
-管理页可查看策略版本、凭证同步状态、最后同步时间和错误码。管理台写按钮、operation/audit
-查询、失败对账、完整筛选/导出和看板仍属于 C4-03d、M2-C5/D，尚未实现。详见
+管理页可查看策略版本、凭证同步状态、最后同步时间和错误码，并可提交额度/模型策略；员工
+页可查看本人额度、模型、凭证、设备和同步状态。停用/吊销/轮换页面、operation/audit 查询、
+失败对账、失败恢复入口、完整筛选/导出和看板仍未实现。详见
 [`admin-service/README.md`](admin-service/README.md)。
 
 ## 5. 当前员工与管理员流程（只列已实现）
@@ -251,8 +255,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
    短期网关 Key，把企业 Provider 写入本地 Magpie，并可选调用 Magpie 原生 Agent 一键配置。
 3. 脚本在当前 Windows 用户下安装刷新计划任务；设备随后通过短期 Key 访问企业网关，真实
    厂商 Key 只保留在网关。
-4. 当前员工网页能完成 OIDC 身份建立，并通过 `/api/v1/me` 返回本人身份和本人的设备元数据。
-   完整员工门户、本人额度/模型范围、凭证恢复提示和操作历史属于 M2-D，尚未实现。
+4. 员工网页已完成 OIDC 身份建立，并展示本人身份、额度、模型、凭证、设备、策略同步状态和
+   恢复提示；`/api/v1/me` 也只返回当前登录员工的同类数据。页面不返回 Gateway Key、设备令牌
+   或 token hash。操作历史和完整资源视图仍属于后续阶段。
 5. **网页不能直接修改员工电脑上的 Agent 文件。** 必须由本地 Magpie/加入脚本执行 Provider
    写入和 Agent 一键配置；只打开浏览器、不安装本地 Magpie，不能设置本机 Agent。
 
@@ -268,9 +273,10 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
    管理员目前**不能查看员工对话正文**；正文审计属于 M4，尚未实现。
 4. M2-C1/C2 已提供四个受控写 API：停用/启用用户、吊销设备、轮换当前凭证。API 要求管理
    会话、CSRF、RBAC、组织范围和非空理由；M2-C3 已接入幂等、`operationId` 和
-   intent/result 管理审计。当前管理页还没有这些写操作的按钮，只能由受控 API 客户端调用。
-5. 管理员当前可以**通过受控 API 调整员工额度或模型授权**，但管理页还没有对应写按钮。
-   写操作要求 `expectedVersion`/`If-Match`、`Idempotency-Key`、组织范围和理由，并产生
+   intent/result 管理审计。当前管理页还没有停用/吊销/轮换按钮，仍只能由受控 API 客户端调用。
+5. 管理员可以在管理页填写理由和 `expectedVersion` 后提交额度/模型策略；页面自动携带
+   CSRF 与 `Idempotency-Key`，并区分 `pending_sync`、`partial_success`、`unknown`。
+   写操作要求组织范围和版本，并产生
    `operationId` 与 intent/result 审计。同步完成后凭证状态才显示 `synced`；部分失败返回
    `partial_success` 并保持待对账。管理员**不能查询 operation/audit 日志或执行人工对账**，
    因为 C5 尚未实现。真实 Magpie 限额/模型拒绝 E2E 与 Docker/共享卷验收也未完成。
@@ -283,8 +289,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
 ### 5.3 当前结论
 
 员工不是“只通过网页就能设置本地 Agent”。已实现的闭环是“网页 OIDC 授权 + 本地 Magpie
-落配置”；管理员也不是“完整企业控制台”，当前具备身份底座、只读治理、四个受控写 API
-和额度/模型策略 API，但缺少管理台写按钮、查询对账、真实行为 E2E 和生产验收。
+落配置”；员工网页可以只读查看本人策略、凭证、设备和同步状态。管理员也不是“完整企业
+控制台”，当前具备身份底座、只读治理、四个受控写 API、额度/模型策略写表单和完整证据链
+状态，但缺少停用/吊销/轮换页面、查询对账、真实行为 E2E 和生产验收。
 在 C4-03d/C4-04、C5/D、M3/M4 和生产验收完成前，整体只能描述为“可演示、可受控技术
 试点”。
 
@@ -342,9 +349,10 @@ auth-service 重启和凭据脱敏。脚本通过本机非回环 IPv4 访问网�
   返回成功。C4-01 已提供机器回读/原子写入，C4-02 已提供经 15 项 Mock/故障测试的受控
   适配器和独立 Bearer 服务令牌；C4-03a 已提供正式只读模型目录和摘要固定，并由
   admin-service 在写入前展开选择器；C4-03b 已提供 auth-service 的策略核心和内部接口；
-  C4-03c 已把调度、apply、独立回读、同步后交付、失败补偿和启动恢复串成实现。真实
+  C4-03c 已把调度、apply、独立回读、同步后交付、失败补偿和启动恢复串成实现。C4-03d
+  已补管理页额度/模型写表单、完整证据链状态和员工只读状态门户。真实
   Magpie 请求行为验证属于 C4-04；操作查询、审计查询和人工对账属于 M2-C5；
-  管理台写按钮、完整筛选/分页、导出和看板属于 M2-D，均尚未实现。真实 IdP、Compose、
+  停用/吊销/轮换页面、完整筛选/分页、导出和看板仍未实现。真实 IdP、Compose、
   浏览器、反向代理、真实共享卷和真实用量卷也尚未验收。当前不是 mTLS。
 
 ## 9. 目录
@@ -372,8 +380,8 @@ enterprise/
 
 当前真实实现状态见 `devtools/enterprise-implementation-status.md`。完整管理层方案见
 `devtools/enterprise-plan-summary.md`；后续路线见 `devtools/enterprise-master-plan.md` 和
-`devtools/enterprise-roadmap.md`：C4-03d/C4-04 的页面与真实请求 E2E、
-操作/审计查询、管理台写按钮、
+`devtools/enterprise-roadmap.md`：C4-03d/C4-04 的页面 E2E 与真实请求 E2E、
+操作/审计查询、剩余管理写表单、
 中央 MCP/资源库、内容审计、可观测性和高可用。生产验收按
 `devtools/enterprise-acceptance-checklist.md` 逐项留证；当前只能作为受控技术试点，不能把
 Mock 测试、只读治理或网页登录描述为“企业生产版已完成”。

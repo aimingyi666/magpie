@@ -226,14 +226,14 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 | M2-C3 | 已实现，Mock 测试 | 持久化幂等、`operationId`、intent/result 审计和审计失败阻断 | 真实审计存储和查询/对账 |
 | C4-01 | 已实现，本地测试通过 | schema v1、原子 `policy apply`、版本冲突、无秘密输出、文件锁和真实二进制冒烟 | 管理链路 |
 | C4-02 | 已实现，15 项 Mock/故障测试通过 | 固定路由/argv、服务令牌、超时、输出上限、独立回读和 `pending` | Docker、真实共享卷、mTLS |
-| C4-03a | 已实现，34/34 管理测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启和 auth-service 接入 |
-| C4-03b | 核心已实现，21/21 auth 测试通过 | 用户级 `gatewayPolicy`、M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | 管理端自动编排、正式目录接入、真实部署和真实请求 E2E |
+| C4-03a | 已实现，35/35 管理测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启 |
+| C4-03b | 核心已实现，23/23 auth 测试通过 | 用户级 `gatewayPolicy`、M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | 真实部署和真实请求 E2E |
 | C4-03c | 核心已实现，Mock/故障测试通过 | 管理额度/模型 API、幂等签发、issuance journal、apply/readback、同步后交付、失败补偿和启动恢复 | 真实 Magpie/共享卷故障注入、真实 IdP 和生产验收 |
-| C4-03d | 部分实现 | 管理页可查看策略版本、逐凭证同步状态、最后同步时间和错误码 | 写按钮、完整员工门户、operation/audit 查询、人工对账和页面 E2E |
+| C4-03d | 部分实现 | 管理页有额度/模型写表单、完整证据链和失败证据；员工页有本人额度/模型/凭证/设备只读门户 | 页面 E2E、失败恢复入口、停用/吊销/轮换页面、operation/audit 查询和人工对账 |
 | C4-04 | 未实现 | 只有 E2E 契约 | 真实 Magpie 限额、模型拒绝、refresh/rotate 继承和部分失败 |
 | M2-C5 | 未实现 | 只有查询/对账设计 | operations、audit-logs 和人工对账 |
 | M2-E | 未实现 | APR-01/NOTIFY-01 设计完成 | 审批、step-up、break-glass、outbox、SIEM/Webhook/工单 |
-| M2-D | 未实现 | 只有页面设计 | 管理写 UI、看板、报表、导出和员工状态页 |
+| M2-D | 未实现 | 员工只读状态门户已在 C4-03d 部分交付 | 看板、报表、导出、完整运营写 UI 和操作历史 |
 | M3 | 未实现 | 只有完整设计 | 中央 MCP、Skills、Instructions、Subagents、签名资源、同步、漂移和回滚 |
 | M4 | 未实现 | 只有审计分级设计 | 对话正文、工具审计、脱敏、检索、留存和导出 |
 | M5 | 未实现 | 只有规则与响应设计 | 告警、阻断、SIEM、值班处置闭环 |
@@ -241,8 +241,8 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 
 当前已执行并通过的本地测试：
 
-- `enterprise/auth-service`：`21 passed, 0 failed`
-- `enterprise/admin-service`：`34 passed, 0 failed`（27 项管理集成 + 7 项目录专项）
+- `enterprise/auth-service`：`23 passed, 0 failed`
+- `enterprise/admin-service`：`35 passed, 0 failed`（28 项管理集成 + 7 项目录专项）
 - `enterprise/gateway-control`：`15 passed, 0 failed`
 
 这些结果不等于真实 IdP、Docker、共享卷、Windows、反向代理或生产请求行为已验收。
@@ -253,7 +253,8 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 
 - 通过管理 API/最小管理页查看本人身份、组织范围和只读治理摘要。
 - 查看用户、部门、设备、凭证元数据、正式模型目录和 L0 用量元数据。
-- 通过已有 API 执行停用/启用、设备吊销和当前凭证轮换；但管理页尚无完整写按钮。
+- 通过已有 API 执行停用/启用、设备吊销和当前凭证轮换；管理页已接入额度/模型策略写表单，
+  但停用/吊销/轮换仍无页面写表单。
 
 当前不可以：
 
@@ -436,7 +437,7 @@ M3 要解决的是“全公司能用什么”，不是只在员工电脑上手�
 - 不能承诺当前有对话正文/工具审计；属于 M4。
 - 不能承诺当前有审批、step-up、break-glass、Webhook/SIEM/工单；属于 M2-E/M5。
 - 不能承诺当前是高可用、多副本、多地域；属于 M6。
-- 不能把 21/34/15 项本地/Mock 测试等同于真实 IdP、Docker、Windows、代理和生产验收。
+- 不能把 23/35/15 项本地/Mock 测试等同于真实 IdP、Docker、Windows、代理和生产验收。
 
 ## 17. 建议的管理决策
 

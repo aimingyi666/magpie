@@ -12,10 +12,12 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 34 项管理测试通过（27 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
+当前总计 35 项管理测试通过（28 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
-交付已实现并通过 21 项测试。C4-03d 仅部分实现：管理页可查看策略版本和凭证同步状态，
-但仍没有写按钮、完整员工门户、operation/audit 查询或人工对账；后者属于 C5/D。真实
+交付已实现并通过 23 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
+CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据链成立时显示“已生效”；
+员工页已提供本人额度、模型、凭证、设备和同步状态只读门户。页面 E2E、失败恢复入口、
+operation/audit 查询和人工对账仍未完成；后者属于 C5/D。真实
 Magpie 限额/模型拒绝行为 E2E 属于 C4-04。当前是“可演示 + 受控技术试点”，不是完整管理台
 或企业生产完成，也仍没有对话正文审计。
 
@@ -101,7 +103,8 @@ admin-service 不能直接读写网关的 `caller-keys.json`，也不能获得�
 C4-03a 由 admin-service 加载正式目录并把 group/provider 选择器展开为稳定模型 ID；
 auth-service 和 gateway-control 只接收稳定模型 ID，不加载目录。C4-03b/C4-03c 的策略核心、
 自动 apply/readback、issuance journal、失败补偿和同步后交付已在 auth-service 接通；
-C4-03d 只完成管理页的状态展示，C4-04 的真实 Magpie 行为 E2E 仍未实现。
+C4-03d 已补管理页额度/模型写表单、完整证据链状态和员工只读状态门户；页面 E2E、恢复入口、
+operation/audit 查询和人工对账仍未完成，C4-04 的真实 Magpie 行为 E2E 也仍未实现。
 完整契约见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第
 12.8.1.5 节和
@@ -301,7 +304,7 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\admin-service.test.mjs test\model-catalog.test.mjs
 ```
 
-2026-11-01 的实际结果：`34 passed, 0 failed`（27 项管理服务集成测试 + 7 项目录专项测试）。
+2026-11-02 的实际结果：`35 passed, 0 failed`（28 项管理服务集成测试 + 7 项目录专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
 拒绝、用户详情跨范围拒绝、会话过期、IP fail-closed、依赖不可用、凭证元数据、用量归属、
@@ -313,7 +316,9 @@ Get-ChildItem src\*.js | ForEach-Object {
 尾随内容拒绝、2 MiB 上限、schema 版本、稳定模型 ID、显式 Provider 通配符、group 展开、
 digest 不匹配和失败关闭。C4-03c 集成测试覆盖额度/模型 API、模型选择器展开、
 `expectedVersion` 冲突、payload 绑定幂等、同步状态透传、`partial_success` 和依赖故障。
-Auth 服务当前为 `21 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`。
+C4-03d 页面测试覆盖 CSRF meta、静态脚本、只读角色无写表单、完整证据链才显示 verified，
+以及页面不泄漏 Gateway Key 或 token hash。Auth 服务当前为 `23 passed, 0 failed`，
+gateway-control 为 `15 passed, 0 failed`。
 
 尚未验证：
 
@@ -321,8 +326,8 @@ Auth 服务当前为 `21 passed, 0 failed`，gateway-control 为 `15 passed, 0 f
 - Docker Compose 构建和健康检查；当前机器没有 Docker CLI。
 - 浏览器、反向代理、真实 Cookie 域和公司 CA 的端到端演练。
 - C4-03a 的真实部署验收，以及真实共享卷上的用户级模型授权链路。
-- C4-03c 的 Docker/真实共享卷、真实 Magpie 回读和故障恢复验收；C4-03d 仍缺管理台写按钮、
-  完整员工门户、operation/audit 查询和人工对账，C4-04、M2-C5/D 也尚未验收。
+- C4-03c 的 Docker/真实共享卷、真实 Magpie 回读和故障恢复验收；C4-03d 仍缺页面 E2E、
+  停用/吊销/轮换页面、失败恢复入口、operation/audit 查询和人工对账，C4-04、M2-C5/D 也尚未验收。
 - 四个 M2-C2 写接口在真实 IdP、反向代理、真实 auth-service 和真实网关上的端到端演练。
 
 ## 当前限制

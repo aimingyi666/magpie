@@ -1,5 +1,6 @@
 import http from "node:http";
 import crypto from "node:crypto";
+import fs from "node:fs/promises";
 import { AuthServiceClient } from "./auth-client.js";
 import { normalizeAdminIdentity, OidcClient } from "./oidc.js";
 import {
@@ -37,6 +38,7 @@ import { readUsageFile } from "./usage-reader.js";
 const MAX_BODY = 16 * 1024;
 const DEFAULT_USAGE_WINDOW_DAYS = 7;
 const MAX_TIMESERIES_POINTS = 10000;
+const ADMIN_APP_JS = await fs.readFile(new URL("./admin-app.js", import.meta.url), "utf8");
 
 class HttpError extends Error {
   constructor(statusCode, code, message) {
@@ -485,6 +487,139 @@ function overviewError(error, fallback) {
   return `${fallback} (${String(code)}).`;
 }
 
+function policyEvidence(user, credentials, operation) {
+  const policy = user.policy;
+  if (!policy) {
+    return {
+      verified: false,
+      label: "No policy record",
+      detail: "This identity has no gateway policy. Do not infer quota or model access.",
+    };
+  }
+  if (policy.quotaStatus === "unknown" || policy.modelStatus === "unknown") {
+    return {
+      verified: false,
+      label: "Historical state unknown",
+      detail: `Unknown sections: ${policy.missing?.length ? policy.missing.join(", ") : "quota, models"}. `
+        + "Set both sections before a client can join.",
+    };
+  }
+  const active = credentials.filter((credential) => credential.userId === user.id
+    && credential.status === "active");
+  const hasActiveCredentials = active.length > 0;
+  const allSynced = hasActiveCredentials
+    && active.every((credential) => credential.policyVersion === policy.version
+    && credential.policySyncState === "synced");
+  const operationMatches = Boolean(operation
+    && operation.operationId
+    && operation.operationId === policy.operationId);
+  const verified = policy.quotaStatus === "known"
+    && policy.modelStatus === "known"
+    && hasActiveCredentials
+    && allSynced
+    && operationMatches
+    && operation.state === "succeeded"
+    && !operation.requiresReconciliation;
+  if (verified) {
+    return {
+      verified: true,
+      label: "Applied and verified",
+      detail: `Policy v${policy.version}; ${active.length} active credentials verified by independent readback.`,
+    };
+  }
+  if (operationMatches && operation.state === "unknown") {
+    return {
+      verified: false,
+      label: "Gateway result unknown",
+      detail: `Operation ${operation.operationId} invoked the gateway but its result is unconfirmed. `
+        + "Do not retry automatically.",
+    };
+  }
+  if (operationMatches && operation.state === "dependency_invoked") {
+    return {
+      verified: false,
+      label: "Gateway invoked, awaiting evidence",
+      detail: `Operation ${operation.operationId} has not recorded a confirmed result. `
+        + "Do not retry automatically.",
+    };
+  }
+  if (!hasActiveCredentials) {
+    return {
+      verified: false,
+      label: "Policy saved; no active credentials",
+      detail: "No active credential exists to verify by gateway readback. "
+        + "The next join will apply this policy before delivering a key.",
+    };
+  }
+  return {
+    verified: false,
+    label: allSynced ? "Operation evidence incomplete" : "Pending gateway sync",
+    detail: `${active.length} active credentials; ${active.filter((credential) => credential.policySyncState !== "synced"
+      || credential.policyVersion !== policy.version).length} pending or unknown.`,
+  };
+}
+
+function policyEditor(user, evidence, operation, access) {
+  const canQuota = access.permissions.includes("quota.write");
+  const canModels = access.permissions.includes("models.write");
+  if (!canQuota && !canModels) {
+    return `<p class="notice">Read-only access. Your role cannot change user policies.</p>`;
+  }
+  const policy = user.policy;
+  if (!policy) {
+    return `<p class="notice">No policy record is available for this user.</p>`;
+  }
+  const currentLimits = Array.isArray(policy.limits)
+    ? JSON.stringify(policy.limits, null, 2)
+    : "";
+  const currentModels = Array.isArray(policy.models) ? policy.models.join("\n") : "";
+  const operationLine = operation
+    ? `<p><strong>Latest operation:</strong> <code>${escapeHtml(operation.operationId)}</code> `
+      + `state <code>${escapeHtml(operation.state)}</code>`
+      + `${operation.errorCode ? ` error <code>${escapeHtml(operation.errorCode)}</code>` : ""}</p>`
+    : `<p>No management operation evidence is stored for this policy version.</p>`;
+  const quotaForm = canQuota
+    ? `<form class="policy-write-form" data-part="quota"
+        data-endpoint="/api/v1/admin/users/${encodeURIComponent(user.id)}/policy/quota"
+        data-method="PUT" data-version="${escapeHtml(policy.version)}">
+        <h4>Set quota windows</h4>
+        <p>Use a JSON array with 0-5 windows. Unknown history is not replaced by a default.</p>
+        <label>Quota JSON
+          <textarea name="limits" rows="7" required
+            placeholder='[{&quot;period&quot;:&quot;month&quot;,&quot;tokens&quot;:100000,&quot;cost&quot;:25}]'>${escapeHtml(currentLimits)}</textarea>
+        </label>
+        <label>Reason <input name="reason" maxlength="500" required></label>
+        <label>Approval ID (optional) <input name="approvalId" maxlength="128"></label>
+        <input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}">
+        <button type="submit">Save quota</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : `<p class="notice">Your role cannot change quota.</p>`;
+  const modelsForm = canModels
+    ? `<form class="policy-write-form" data-part="models"
+        data-endpoint="/api/v1/admin/users/${encodeURIComponent(user.id)}/policy/models"
+        data-method="PATCH" data-version="${escapeHtml(policy.version)}">
+        <h4>Set model authorization</h4>
+        <p>One selector per line or comma-separated. Groups and explicit provider wildcards are expanded by the catalog.</p>
+        <label>Model selectors
+          <textarea name="selectors" rows="6" required
+            placeholder="group/engineering-approved&#10;company-model/*">${escapeHtml(currentModels)}</textarea>
+        </label>
+        <label>Reason <input name="reason" maxlength="500" required></label>
+        <label>Approval ID (optional) <input name="approvalId" maxlength="128"></label>
+        <input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}">
+        <button type="submit">Save models</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : `<p class="notice">Your role cannot change model authorization.</p>`;
+  return `<details class="policy-editor">
+    <summary>Manage ${escapeHtml(user.email)}</summary>
+    <p><strong>Policy evidence:</strong> ${escapeHtml(evidence.label)}. ${escapeHtml(evidence.detail)}</p>
+    ${operationLine}
+    <div class="editor-grid">${quotaForm}${modelsForm}</div>
+  </details>`;
+}
+
 function adminPage(session, access, orgUnits, csrfToken, overview) {
   const roles = access.roles.length > 0 ? access.roles.join(", ") : "No active role";
   const scopes = access.scopeOrgUnitIds.length > 0 ? access.scopeOrgUnitIds.join(", ") : "None";
@@ -492,6 +627,11 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
     ? orgUnits.map((org) => `<li><strong>${escapeHtml(org.name)}</strong> <code>${escapeHtml(org.path)}</code></li>`).join("")
     : "<li>No organization scope</li>";
   const usage = overview.usage;
+  const editors = overview.users.map((user) => {
+    const operation = overview.operationsByUser[user.id] || null;
+    const evidence = policyEvidence(user, overview.credentials, operation);
+    return policyEditor(user, evidence, operation, access);
+  }).join("");
   const usageBox = usage
     ? `<div class="grid">
         <section class="box"><h2>Requests</h2><p class="figure">${escapeHtml(usage.totals.requests)}</p></section>
@@ -506,9 +646,10 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="csrf-token" content="${escapeHtml(csrfToken)}">
   <title>Magpie Enterprise Admin</title>
   <style>
-    :root{--ink:#172018;--paper:#f4f0e4;--card:#fffdf6;--line:#d7cfb9;--accent:#b93c2b}
+    :root{--ink:#172018;--paper:#f4f0e4;--card:#fffdf6;--line:#d7cfb9;--accent:#b93c2b;--ok:#17643a;--warn:#9a5b00;--danger:#9e2518}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top right,#e6d9b8,transparent 38%),var(--paper);color:var(--ink);font:17px/1.55 Georgia,serif}
     main{width:min(960px,calc(100% - 32px));margin:6vh auto;padding:clamp(24px,5vw,56px);background:var(--card);border:1px solid var(--line);box-shadow:14px 14px 0 #dbca9d}
     h1{font-size:clamp(38px,7vw,74px);line-height:.92;margin:0 0 12px;letter-spacing:-.04em}
@@ -519,6 +660,10 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
     .figure{font-size:38px;line-height:1;margin:8px 0 0}.notice{border-left:4px solid var(--accent);padding:10px 14px;background:#faf5e7}
     .table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font:14px/1.4 Georgia,serif}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
     button{appearance:none;border:0;background:var(--ink);color:white;padding:12px 18px;font:700 14px/1 Georgia,serif;cursor:pointer}
+    .policy-editor{margin:14px 0;border:1px solid var(--line);background:#faf5e7;padding:14px}.policy-editor summary{cursor:pointer;font-weight:700}
+    .editor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}.editor-grid form{border-top:1px solid var(--line);padding-top:12px}
+    label{display:grid;gap:6px;margin:10px 0;font-weight:700}input,textarea{width:100%;border:1px solid var(--line);background:var(--card);padding:10px;font:15px/1.4 ui-monospace,monospace}
+    .write-result{min-height:3em;border-left:4px solid var(--line);padding:8px 12px}.write-result[data-tone="error"]{border-color:var(--danger)}.write-result[data-tone="unknown"]{border-color:var(--warn)}.write-result[data-tone="result"]{border-color:var(--ok)}
   </style>
 </head>
 <body><main>
@@ -542,9 +687,16 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
       user.policy ? `v${user.policy.version}` : "Missing",
       user.policy?.quotaStatus || "unknown",
       user.policy?.modelStatus || "unknown",
-      user.policy?.missing?.length ? `missing ${user.policy.missing.join(", ")}` : "ready",
+      policyEvidence(
+        user,
+        overview.credentials,
+        overview.operationsByUser[user.id] || null,
+      ).label,
     ]),
   )}
+  <h2>Policy operations</h2>
+  <p class="notice">Only a complete evidence chain permits the verified state. Pending, partial, and unknown results are never converted into success by this page.</p>
+  ${editors || "<p>No users available in your organization scope.</p>"}
   <h2>Devices</h2>
   <p class="notice">${escapeHtml(overview.devicesError || "No device token or Gateway Key is exposed.")}</p>
   ${table(
@@ -595,7 +747,7 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
     <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">
     <button type="submit">Sign out</button>
   </form>
-</main></body></html>`;
+</main><script src="/admin/app.js" defer></script></body></html>`;
 }
 
 function clearedSessionCookies(config) {
@@ -717,6 +869,24 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           errorCode: String(item?.errorCode || ""),
         }))
         : [],
+    };
+  }
+
+  function safeOperationSummary(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const result = value.responseBody?.result;
+    return {
+      operationId: String(value.id || ""),
+      action: String(value.action || ""),
+      targetId: String(value.targetId || ""),
+      status: String(value.status || "unknown"),
+      state: String(result?.state || value.status || "unknown"),
+      createdAt: String(value.createdAt || ""),
+      updatedAt: String(value.updatedAt || ""),
+      completedAt: String(value.completedAt || ""),
+      errorCode: String(value.errorCode || ""),
+      requiresReconciliation: Boolean(result?.requiresReconciliation),
+      credentials: safePolicyCredentialSummary(result?.credentials),
     };
   }
 
@@ -1216,6 +1386,19 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       }, []),
       capture(() => usageReport(session, new URLSearchParams(), false), null),
     ]);
+    const visibleUserIds = new Set((users.value.users || []).map((user) => user.id));
+    const operationsByUser = await store.read((data) => {
+      const latest = {};
+      for (const operation of Object.values(data.adminOperations)) {
+        if (!visibleUserIds.has(operation.targetId)) continue;
+        if (!String(operation.action || "").startsWith("user.policy.")) continue;
+        const current = latest[operation.targetId];
+        if (!current || String(operation.createdAt) > String(current.createdAt)) {
+          latest[operation.targetId] = safeOperationSummary(operation);
+        }
+      }
+      return latest;
+    });
 
     return {
       users: users.value.users || [],
@@ -1229,6 +1412,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       modelCatalog: { ...modelCatalog.status },
       usage: usage.value ? usageSummaryResponse(usage.value) : null,
       usageError: usage.error,
+      operationsByUser,
     };
   }
 
@@ -1290,7 +1474,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     res.setHeader("cache-control", "no-store");
     res.setHeader(
       "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
 
     if (!requestAllowed(req, config)) {
@@ -1315,6 +1499,15 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         ...status,
         modelCatalog: { ...modelCatalog.status },
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/admin/app.js") {
+      res.writeHead(200, {
+        "content-type": "text/javascript; charset=utf-8",
+        "content-length": Buffer.byteLength(ADMIN_APP_JS),
+      });
+      res.end(ADMIN_APP_JS);
       return;
     }
 
@@ -1416,6 +1609,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         current.session,
         {
           roles: payload.value.roles,
+          permissions: payload.value.permissions,
           scopeOrgUnitIds: payload.value.scopeOrgUnitIds,
         },
         payload.value.orgUnits,

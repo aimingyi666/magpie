@@ -146,8 +146,9 @@ docker compose --profile gateway-control up -d
 以下事项必须继续保持为“未完成/未验收”：
 
 - C4-03c 已由 admin-service -> auth-service 自动调用本适配器，并完成 issuance journal、
-  apply/readback 后交付、失败补偿和启动恢复的 Mock/故障测试；C4-03d 只完成管理页同步状态
-  展示，仍缺写按钮、完整员工门户、operation/audit 查询和人工对账。
+  apply/readback 后交付、失败补偿和启动恢复的 Mock/故障测试；C4-03d 已补管理页额度/模型
+  写表单、完整证据链状态和员工只读状态门户，但仍缺页面 E2E、失败恢复入口、
+  operation/audit 查询和人工对账。
 - 未证明真实 Magpie 的多凭证更新、零额度/低额度实际拒绝和模型白名单行为，属于 C4-04。
 - 部分成功汇总已进入 C4-03c 核心测试；人工对账仍未实现，真实网关下的策略继承和旧凭证迁移端到端证据也尚未完成。
 - 未接入 mTLS、公司 CA、反向代理、Docker/Compose 实机和企业 IdP。
