@@ -61,7 +61,19 @@ type Issue struct {
 	// Issuer is the id of the key it is issued under; "" for one the
 	// user issues themselves (the command line, or loopback with no key).
 	Issuer string
+	// EnterpriseIssuanceID and its digest make an enterprise controller's
+	// retries idempotent. Both are empty for every other caller. The ID is
+	// global, not scoped to an issuer, so a collision can never hand one
+	// tenant another tenant's key.
+	EnterpriseIssuanceID     string
+	EnterpriseIssuanceDigest string
 }
+
+// IssuanceConflict is an idempotency key already used for another issuer or
+// another request. The HTTP endpoint maps it to 409.
+type IssuanceConflict struct{ Why string }
+
+func (c *IssuanceConflict) Error() string { return c.Why }
 
 // Issued is a key IssueKey made, its secret told once.
 type Issued struct {
@@ -87,6 +99,31 @@ func IssueKey(in Issue) (Issued, error) {
 	}
 	now := Now().Round(0)
 	keys, _ = prune(keys, now)
+	if in.EnterpriseIssuanceID != "" {
+		if !safeIssuanceID(in.EnterpriseIssuanceID) {
+			return Issued{}, errors.New("enterpriseIssuanceId must be 8 to 128 letters, digits, dots, colons, underscores or hyphens")
+		}
+		if len(in.EnterpriseIssuanceDigest) != 64 || !isLowerHex(in.EnterpriseIssuanceDigest) {
+			return Issued{}, errors.New("enterprise issuance digest must be a lowercase SHA-256 digest")
+		}
+		// Replay goes before every issuer, model and quota check. A retry must
+		// still receive the key it already created after its issuer was
+		// disabled, otherwise the controller could not tell the replay apart
+		// from a failed first attempt.
+		i := slices.IndexFunc(keys, func(k Key) bool {
+			return k.EnterpriseIssuanceID == in.EnterpriseIssuanceID
+		})
+		if i >= 0 {
+			k := keys[i]
+			if k.Issuer != in.Issuer {
+				return Issued{}, &IssuanceConflict{Why: "The enterprise issuance ID already belongs to another issuer"}
+			}
+			if k.EnterpriseIssuanceDigest != in.EnterpriseIssuanceDigest {
+				return Issued{}, &IssuanceConflict{Why: "The enterprise issuance ID was already used for a different request"}
+			}
+			return issuedKey(k), nil
+		}
+	}
 	name := strings.TrimSpace(in.Name)
 	if name == "" {
 		name = "Issued " + now.Format("2006-01-02 15:04")
@@ -155,12 +192,44 @@ func IssueKey(in Issue) (Issued, error) {
 		return Issued{}, err
 	}
 	k := Key{ID: id, Name: name, Secret: Prefix + token, Limit: lim, Models: models, Accounts: accounts,
-		ReadOnly: readOnly, Expires: expires, Issuer: in.Issuer}
+		ReadOnly: readOnly, Expires: expires, Issuer: in.Issuer,
+		EnterpriseIssuanceID: in.EnterpriseIssuanceID, EnterpriseIssuanceDigest: in.EnterpriseIssuanceDigest}
 	keys = append(keys, k)
 	if err := save(keys); err != nil {
 		return Issued{}, err
 	}
 	return Issued{ID: k.ID, Name: k.Name, Key: k.Secret, Expires: k.Expires, Issuer: k.Issuer, Models: models, Accounts: accounts, Limit: lim, ReadOnly: readOnly}, nil
+}
+
+func issuedKey(k Key) Issued {
+	return Issued{
+		ID: k.ID, Name: k.Name, Key: k.Secret, Expires: k.Expires, Issuer: k.Issuer,
+		Models: slices.Clone(k.Models), Accounts: slices.Clone(k.Accounts),
+		Limit: k.Limit, ReadOnly: k.ReadOnly,
+	}
+}
+
+func safeIssuanceID(id string) bool {
+	if len(id) < 8 || len(id) > 128 {
+		return false
+	}
+	for _, r := range id {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') ||
+			r == '.' || r == ':' || r == '_' || r == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func isLowerHex(value string) bool {
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
 }
 
 // RevokeIssued removes the issued key id. by is the key asking: it may

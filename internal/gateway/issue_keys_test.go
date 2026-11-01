@@ -177,6 +177,37 @@ func TestKeysEndpointWhoMayIssue(t *testing.T) {
 	}
 }
 
+func TestKeysEndpointEnterpriseIssuanceIsIdempotent(t *testing.T) {
+	fresh(t)
+	t.Setenv("MAGPIE_ADDR", "")
+	budget.Forget()
+	keys, secrets := newCaller(t, "Enterprise controller")
+	if _, err := access.Update("issuer-key", access.Change{Key: keys[0].ID, Issues: true}); err != nil {
+		t.Fatal(err)
+	}
+	h := New().Handler()
+	body := `{"name":"agent","ttl":"1h","models":["plan/m1"],"enterpriseIssuanceId":"eiss_gateway_retry_0001"}`
+
+	first := issuedFrom(t, keysCall(h, "POST", KeysPath, fromThere, secrets[0], body))
+	again := issuedFrom(t, keysCall(h, "POST", KeysPath, fromThere, secrets[0], body))
+	if again.ID != first.ID || again.Key != first.Key || !again.Expires.Equal(first.Expires) {
+		t.Fatalf("retry made another key: first=%+v again=%+v", first, again)
+	}
+	changed := strings.Replace(body, `"plan/m1"`, `"other/m2"`, 1)
+	if w := keysCall(h, "POST", KeysPath, fromThere, secrets[0], changed); w.Code != http.StatusConflict {
+		t.Fatalf("reused an issuance ID for another request: %d %s", w.Code, w.Body.String())
+	}
+	if w := keysCall(h, "POST", KeysPath, fromThere, secrets[0], strings.Replace(body, "eiss_gateway_retry_0001", "short", 1)); w.Code != http.StatusBadRequest {
+		t.Fatalf("unsafe issuance ID: %d %s", w.Code, w.Body.String())
+	}
+	// The old request shape is unchanged for clients that do not know about
+	// enterprise idempotency.
+	legacy := issuedFrom(t, keysCall(h, "POST", KeysPath, fromThere, secrets[0], `{"ttl":"1h"}`))
+	if legacy.ID == "" || legacy.Key == "" {
+		t.Fatal(legacy)
+	}
+}
+
 // What an issued key spends counts against its issuer's limit: a hundred
 // sandboxes each with a key of its own can't spend more than the one key
 // they were issued under may.

@@ -70,6 +70,7 @@ export function loadConfig(env = process.env) {
   const adminToken = required(env, "AUTH_ADMIN_TOKEN");
   const internalAdminToken = required(env, "AUTH_INTERNAL_ADMIN_TOKEN");
   const issuerKey = required(env, "MAGPIE_ISSUER_KEY");
+  const gatewayControlToken = required(env, "GATEWAY_CONTROL_TOKEN");
   const clientSecret = required(env, "OIDC_CLIENT_SECRET");
 
   for (const [name, value] of [
@@ -77,6 +78,7 @@ export function loadConfig(env = process.env) {
     ["AUTH_ADMIN_TOKEN", adminToken],
     ["AUTH_INTERNAL_ADMIN_TOKEN", internalAdminToken],
     ["MAGPIE_ISSUER_KEY", issuerKey],
+    ["GATEWAY_CONTROL_TOKEN", gatewayControlToken],
     ["OIDC_CLIENT_SECRET", clientSecret],
   ]) {
     if (value.length < MIN_SECRET_LENGTH) {
@@ -118,6 +120,11 @@ export function loadConfig(env = process.env) {
       tokens: integer(env, "MAGPIE_KEY_TOKENS", 0, 0, Number.MAX_SAFE_INTEGER),
       cost: number(env, "MAGPIE_KEY_COST", 0),
     },
+    gatewayControl: {
+      url: url(env, "GATEWAY_CONTROL_URL"),
+      token: gatewayControlToken,
+      timeoutMs: integer(env, "GATEWAY_CONTROL_TIMEOUT_MS", 10000, 500, 30000),
+    },
   };
 
   if (config.oidc.tokenAuthMethod !== "client_secret_basic" && config.oidc.tokenAuthMethod !== "client_secret_post") {
@@ -125,6 +132,9 @@ export function loadConfig(env = process.env) {
   }
   if (!config.oidc.scopes.includes("openid")) {
     throw new Error("OIDC_SCOPES must include openid");
+  }
+  if (config.gatewayControl.token === config.magpie.issuerKey) {
+    throw new Error("GATEWAY_CONTROL_TOKEN must not reuse MAGPIE_ISSUER_KEY");
   }
   return config;
 }

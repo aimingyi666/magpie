@@ -179,13 +179,14 @@ function canonicalValue(value) {
   return value;
 }
 
-function writeRequestFingerprint(action, targetType, targetId, reason, approvalId) {
+function writeRequestFingerprint(action, targetType, targetId, reason, approvalId, payload = {}) {
   return sha256(JSON.stringify(canonicalValue({
     action,
     targetType,
     targetId,
     reason,
     approvalId,
+    payload,
   })));
 }
 
@@ -532,8 +533,17 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
   <h2>Users</h2>
   <p class="notice">${escapeHtml(overview.usersError || "Current organization-scoped identities.")}</p>
   ${table(
-    ["Name", "Email", "Status", "Department"],
-    overview.users.map((user) => [user.name, user.email, user.status, user.orgUnit?.path || "Unmapped"]),
+    ["Name", "Email", "Status", "Department", "Policy", "Quota", "Models", "Sync"],
+    overview.users.map((user) => [
+      user.name,
+      user.email,
+      user.status,
+      user.orgUnit?.path || "Unmapped",
+      user.policy ? `v${user.policy.version}` : "Missing",
+      user.policy?.quotaStatus || "unknown",
+      user.policy?.modelStatus || "unknown",
+      user.policy?.missing?.length ? `missing ${user.policy.missing.join(", ")}` : "ready",
+    ]),
   )}
   <h2>Devices</h2>
   <p class="notice">${escapeHtml(overview.devicesError || "No device token or Gateway Key is exposed.")}</p>
@@ -566,11 +576,15 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
   <h2>Credentials</h2>
   <p class="notice">${escapeHtml(overview.credentialsError || "Gateway Key metadata only.")}</p>
   ${table(
-    ["Key ID", "Device", "Status", "Expires"],
+    ["Key ID", "Device", "Status", "Policy", "Policy sync", "Last synced", "Last error", "Expires"],
     overview.credentials.map((credential) => [
       credential.id,
       credential.deviceName || credential.deviceId,
       credential.status,
+      `v${credential.policyVersion}`,
+      credential.policySyncState,
+      credential.lastPolicySyncedAt || credential.lastPolicyAttemptedAt || "",
+      credential.lastPolicyErrorCode || "",
       credential.expiresAt || "",
     ]),
   )}
@@ -653,6 +667,59 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     return result;
   }
 
+  function safeStringList(value) {
+    return Array.isArray(value) ? value.map(String) : [];
+  }
+
+  function safePolicySummary(policy) {
+    if (!policy || typeof policy !== "object" || Array.isArray(policy)) return null;
+    return {
+      version: Number.isSafeInteger(policy.version) ? policy.version : 0,
+      models: Array.isArray(policy.models) ? safeStringList(policy.models) : null,
+      limits: Array.isArray(policy.limits) ? safePolicyLimits(policy.limits) : null,
+      quotaStatus: String(policy.quotaStatus || "unknown"),
+      modelStatus: String(policy.modelStatus || "unknown"),
+      updatedAt: String(policy.updatedAt || ""),
+      confirmedAt: String(policy.confirmedAt || ""),
+      operationId: String(policy.operationId || ""),
+      including: safeStringList(policy.including),
+      missing: safeStringList(policy.missing),
+    };
+  }
+
+  function safePolicyLimits(limits) {
+    return limits.map((limit) => {
+      if (!limit || typeof limit !== "object" || Array.isArray(limit)) return {};
+      const output = {
+        period: String(limit.period || ""),
+      };
+      for (const key of ["days", "hours", "tokens", "cost"]) {
+        if (Number.isFinite(Number(limit[key]))) output[key] = Number(limit[key]);
+      }
+      if (typeof limit.cacheReads === "boolean") output.cacheReads = limit.cacheReads;
+      return output;
+    });
+  }
+
+  function safePolicyCredentialSummary(value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return {
+      total: safeNumber(value.total),
+      succeeded: safeNumber(value.succeeded),
+      failed: safeNumber(value.failed),
+      pending: safeNumber(value.pending),
+      unknown: safeNumber(value.unknown),
+      failedOnly: safeNumber(value.failedOnly),
+      failedItems: Array.isArray(value.failedItems)
+        ? value.failedItems.map((item) => ({
+          credentialId: String(item?.credentialId || ""),
+          deviceId: String(item?.deviceId || ""),
+          errorCode: String(item?.errorCode || ""),
+        }))
+        : [],
+    };
+  }
+
   function publicAuthUser(data, user) {
     const orgUnitId = activeUserOrgUnit(data, user.id);
     const org = orgUnitId ? data.orgUnits[orgUnitId] : null;
@@ -665,6 +732,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       lastLoginAt: user.lastLoginAt || "",
       orgUnitId,
       orgUnit: org ? orgUnitSummary(org) : null,
+      policy: safePolicySummary(user.policy),
     };
   }
 
@@ -698,6 +766,15 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       lastSeenAt: credential.lastSeenAt || "",
       publicKeySha256: credential.publicKeySha256 || "",
       models: Array.isArray(credential.models) ? credential.models.map(String) : [],
+      policyVersion: Number.isSafeInteger(credential.policyVersion) ? credential.policyVersion : 0,
+      policySyncState: String(credential.policySyncState || "pending"),
+      lastPolicyResult: String(credential.lastPolicyResult || credential.policySyncState || "pending"),
+      lastPolicyErrorCode: String(credential.lastPolicyErrorCode || ""),
+      lastPolicyAttemptedAt: String(credential.lastPolicyAttemptedAt || ""),
+      lastPolicySyncedAt: String(credential.lastPolicySyncedAt || ""),
+      lastPolicyOperationId: String(credential.lastPolicyOperationId || ""),
+      lastPolicyGatewayRequestId: String(credential.lastPolicyGatewayRequestId || ""),
+      lastPolicyRevision: String(credential.lastPolicyRevision || ""),
     };
   }
 
@@ -732,6 +809,16 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         device: value.device ? publicAdminDevice(value.device) : null,
         affectedCredentials: safeNumber(value.affectedCredentials),
         revocations: safeRevocations(value.revocations),
+      };
+    }
+    if (action === "user.policy.quota" || action === "user.policy.models") {
+      return {
+        operationId: String(value.operationId || ""),
+        state: String(value.state || ""),
+        policy: safePolicySummary(value.policy),
+        credentials: safePolicyCredentialSummary(value.credentials),
+        requiresReconciliation: Boolean(value.requiresReconciliation),
+        superseded: Boolean(value.superseded),
       };
     }
     return {
@@ -879,12 +966,16 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       options.targetId,
     );
     const targetId = targetResult.target.id;
+    const prepared = options.prepare
+      ? options.prepare(body, targetResult.target)
+      : {};
     const requestFingerprint = writeRequestFingerprint(
       options.action,
       options.targetType,
       targetId,
       reason,
       approvalId,
+      prepared,
     );
     const idempotencyKeyHash = idempotencyKey
       ? sha256(`${current.session.subjectId}\u0000${idempotencyKey}`)
@@ -999,7 +1090,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     let errorCode = "";
     let operationError = null;
     try {
-      const dependencyResponse = await options.call(targetId);
+      const dependencyResponse = await options.call(targetId, operation.id, prepared);
       responseBody = {
         ok: true,
         requestId,
@@ -1411,6 +1502,56 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
       const result = await scopedUserDetail(current.session, userMatch[1]);
       json(res, 200, { user: result.user });
+      return;
+    }
+
+    const policyWriteMatch = /^\/api\/v1\/admin\/users\/([A-Za-z0-9_-]+)\/policy\/(quota|models)$/.exec(
+      url.pathname,
+    );
+    if (policyWriteMatch
+        && ((policyWriteMatch[2] === "quota" && req.method === "PUT")
+          || (policyWriteMatch[2] === "models" && req.method === "PATCH"))) {
+      const policyPart = policyWriteMatch[2];
+      await performWrite(req, res, requestId, {
+        action: `user.policy.${policyPart}`,
+        permission: policyPart === "quota" ? "quota.write" : "models.write",
+        targetType: "user",
+        targetId: policyWriteMatch[1],
+        prepare: (body) => {
+          if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 0) {
+            throw new HttpError(
+              400,
+              "version_required",
+              "expectedVersion must be the user's current policy version",
+            );
+          }
+          if (policyPart === "quota") {
+            if (!Array.isArray(body.limits)) {
+              throw new HttpError(400, "invalid_quota", "limits must be an array");
+            }
+            return {
+              expectedVersion: body.expectedVersion,
+              limits: body.limits,
+            };
+          }
+          try {
+            return {
+              expectedVersion: body.expectedVersion,
+              models: [...modelCatalog.expandSelectors(body.models)],
+            };
+          } catch (error) {
+            if (error?.name === "ModelCatalogError") {
+              throw new HttpError(400, error.code || "invalid_models", error.message);
+            }
+            throw error;
+          }
+        },
+        call: (id, operationId, prepared) => (
+          policyPart === "quota"
+            ? authService.updateQuota(id, { ...prepared, operationId })
+            : authService.updateModels(id, { ...prepared, operationId })
+        ),
+      });
       return;
     }
 

@@ -2,8 +2,18 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { createUnknownPolicy, normalizeStoredPolicy } from "./policy.js";
 
-export const STORE_SCHEMA_VERSION = 2;
+export const STORE_SCHEMA_VERSION = 3;
 export const POLICY_MIGRATION_VERSION = 1;
+export const ISSUANCE_STATES = Object.freeze([
+  "preparing",
+  "issued",
+  "syncing",
+  "synced",
+  "committed",
+  "failed",
+  "unknown",
+]);
+const ISSUANCE_STATE_SET = new Set(ISSUANCE_STATES);
 
 function emptyStore() {
   return {
@@ -14,6 +24,7 @@ function emptyStore() {
     credentials: {},
     sessions: {},
     pendingRevocations: [],
+    issuanceJournal: [],
   };
 }
 
@@ -34,6 +45,25 @@ function migrateLoaded(data) {
   }
   if (!Array.isArray(data.pendingRevocations)) {
     throw new Error("auth store pendingRevocations must be an array");
+  }
+  if (!Array.isArray(data.issuanceJournal)) {
+    throw new Error("auth store issuanceJournal must be an array");
+  }
+  for (const entry of data.issuanceJournal) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+      throw new Error("auth store issuanceJournal must contain objects");
+    }
+    if (!entry.id || !entry.enterpriseIssuanceId || !ISSUANCE_STATE_SET.has(entry.state)) {
+      throw new Error("auth store issuanceJournal entry is invalid");
+    }
+    if (entry.keySecret || entry.deviceToken || entry.tokenHash) {
+      throw new Error("auth store issuanceJournal must not contain credentials");
+    }
+  }
+  for (const entry of data.pendingRevocations) {
+    if (!entry || typeof entry !== "object" || !entry.id) {
+      throw new Error("auth store pendingRevocations must contain key ids");
+    }
   }
 
   // Older M1 stores kept only each device's current Gateway Key ID. Keep that
@@ -69,7 +99,7 @@ function migrateLoaded(data) {
     if (!Number.isSafeInteger(credential.policyVersion) || credential.policyVersion < 0) {
       credential.policyVersion = policy.version;
     }
-    if (!["pending", "synced", "failed"].includes(credential.policySyncState)) {
+    if (!["pending", "synced", "failed", "partial", "unknown"].includes(credential.policySyncState)) {
       credential.policySyncState = "pending";
       credential.lastPolicyErrorCode = "policy_setup_required";
     }

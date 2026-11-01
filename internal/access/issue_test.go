@@ -235,6 +235,59 @@ func TestIssuedKeyLifeLimit(t *testing.T) {
 	}
 }
 
+func TestEnterpriseIssuanceIsIdempotent(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", t.TempDir())
+	clockAt(t, time.Date(2026, 10, 31, 9, 0, 0, 0, time.UTC))
+	digest := strings.Repeat("a", 64)
+	in := Issue{
+		Name: "enterprise-agent", TTL: time.Hour, Models: []string{"openai/gpt-5"},
+		EnterpriseIssuanceID: "eiss_0123456789abcdef", EnterpriseIssuanceDigest: digest,
+	}
+	first, err := IssueKey(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := IssueKey(in)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.ID != first.ID || again.Key != first.Key || !again.Expires.Equal(first.Expires) {
+		t.Fatalf("replay made another key: first=%+v again=%+v", first, again)
+	}
+	in.EnterpriseIssuanceDigest = strings.Repeat("b", 64)
+	var conflict *IssuanceConflict
+	if _, err := IssueKey(in); !errors.As(err, &conflict) {
+		t.Fatalf("different semantics reused an issuance ID: %v", err)
+	}
+
+	issuerA, _ := addKey(t, "Issuer A")
+	issuerB, _ := addKey(t, "Issuer B")
+	for _, id := range []string{issuerA, issuerB} {
+		if _, err := Update("issuer-key", Change{Key: id, Issues: true}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	in = Issue{
+		TTL: time.Hour, Issuer: issuerA,
+		EnterpriseIssuanceID: "eiss_fedcba9876543210", EnterpriseIssuanceDigest: digest,
+	}
+	if _, err := IssueKey(in); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Update("off-key", Change{Key: issuerA}); err != nil {
+		t.Fatal(err)
+	}
+	if replay, err := IssueKey(in); err != nil {
+		t.Fatalf("replay after the issuer was disabled failed: %v", err)
+	} else if replay.ID == "" || replay.Key == "" {
+		t.Fatalf("replay after the issuer was disabled returned no key: %+v", replay)
+	}
+	in.Issuer = issuerB
+	if _, err := IssueKey(in); !errors.As(err, &conflict) {
+		t.Fatalf("another issuer reused an issuance ID: %v", err)
+	}
+}
+
 // An issuer may revoke only the keys issued under it; the user any
 // issued key, and no key of their own through RevokeIssued.
 func TestRevokeIssued(t *testing.T) {

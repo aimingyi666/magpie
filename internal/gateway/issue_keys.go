@@ -2,11 +2,14 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -40,6 +43,9 @@ type issuedKeyBody struct {
 	Tokens   int64           `json:"tokens"`
 	Cost     float64         `json:"cost"`
 	ReadOnly bool            `json:"readOnly"`
+	// EnterpriseIssuanceID lets an enterprise controller retry safely.
+	// Older clients omit it and keep the old non-idempotent behavior.
+	EnterpriseIssuanceID string `json:"enterpriseIssuanceId"`
 }
 
 // keyIssuer is the id of the key r issues under ("" for the user, over
@@ -78,14 +84,56 @@ func (s *Server) issueKey(w http.ResponseWriter, r *http.Request) {
 		writeError(w, provider.Chat, http.StatusBadRequest, err.Error())
 		return
 	}
+	digest := ""
+	if in.EnterpriseIssuanceID != "" {
+		digest, err = issuanceDigest(in, ttl, by)
+		if err != nil {
+			writeError(w, provider.Chat, http.StatusBadRequest, err.Error())
+			return
+		}
+	}
 	k, err := access.IssueKey(access.Issue{Name: in.Name, TTL: ttl, Models: in.Models, Accounts: in.Accounts,
-		Tokens: in.Tokens, Cost: in.Cost, ReadOnly: in.ReadOnly, Issuer: by})
+		Tokens: in.Tokens, Cost: in.Cost, ReadOnly: in.ReadOnly, Issuer: by,
+		EnterpriseIssuanceID: in.EnterpriseIssuanceID, EnterpriseIssuanceDigest: digest})
 	if err != nil {
-		writeError(w, provider.Chat, http.StatusBadRequest, err.Error())
+		status := http.StatusBadRequest
+		var conflict *access.IssuanceConflict
+		if errors.As(err, &conflict) {
+			status = http.StatusConflict
+		}
+		writeError(w, provider.Chat, status, err.Error())
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusCreated, k)
+}
+
+func issuanceDigest(in issuedKeyBody, ttl time.Duration, issuer string) (string, error) {
+	models := append([]string(nil), in.Models...)
+	accounts := append([]string(nil), in.Accounts...)
+	slices.Sort(models)
+	slices.Sort(accounts)
+	canonical := struct {
+		Name                 string   `json:"name"`
+		TTLNanoseconds       int64    `json:"ttlNanoseconds"`
+		Models               []string `json:"models"`
+		Accounts             []string `json:"accounts"`
+		Tokens               int64    `json:"tokens"`
+		Cost                 float64  `json:"cost"`
+		ReadOnly             bool     `json:"readOnly"`
+		Issuer               string   `json:"issuer"`
+		EnterpriseIssuanceID string   `json:"enterpriseIssuanceId"`
+	}{
+		Name: strings.TrimSpace(in.Name), TTLNanoseconds: int64(ttl),
+		Models: models, Accounts: accounts, Tokens: in.Tokens, Cost: in.Cost,
+		ReadOnly: in.ReadOnly, Issuer: issuer, EnterpriseIssuanceID: in.EnterpriseIssuanceID,
+	}
+	b, err := json.Marshal(canonical)
+	if err != nil {
+		return "", errors.New("the enterprise issuance request could not be canonicalized")
+	}
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:]), nil
 }
 
 func (s *Server) issuedKeys(w http.ResponseWriter, r *http.Request) {

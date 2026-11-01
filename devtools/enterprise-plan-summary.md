@@ -1,8 +1,8 @@
 # Magpie 企业版完整方案（管理层总览）
 
-状态：方案评审与实施基线 v3.5（与功能方案、实施总纲和运营手册同步）
+状态：方案评审与实施基线 v3.6（与功能方案、实施总纲和运营手册同步）
 
-日期：2026-11-01
+日期：2026-11-02
 
 适用范围：基于 `aimingyi666/magpie`（`yetone/magpie` 的 fork）建设企业内部 AI 客户端、
 模型/MCP 网关和管理控制面。
@@ -226,10 +226,10 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 | M2-C3 | 已实现，Mock 测试 | 持久化幂等、`operationId`、intent/result 审计和审计失败阻断 | 真实审计存储和查询/对账 |
 | C4-01 | 已实现，本地测试通过 | schema v1、原子 `policy apply`、版本冲突、无秘密输出、文件锁和真实二进制冒烟 | 管理链路 |
 | C4-02 | 已实现，15 项 Mock/故障测试通过 | 固定路由/argv、服务令牌、超时、输出上限、独立回读和 `pending` | Docker、真实共享卷、mTLS |
-| C4-03a | 已实现，31/31 管理测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启和 auth-service 接入 |
-| C4-03b | 核心已实现，18/18 auth 测试通过 | 用户级 `gatewayPolicy`、M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | 管理端自动编排、正式目录接入、真实部署和真实请求 E2E |
-| C4-03c | 未实现 | 只有冻结契约 | 管理 API、issuance journal、apply/readback/持久化后交付、崩溃恢复和无孤儿证明 |
-| C4-03d | 未实现 | 只有状态语义设计 | 管理页/员工页真实同步状态、失败凭证和对账入口 |
+| C4-03a | 已实现，34/34 管理测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启和 auth-service 接入 |
+| C4-03b | 核心已实现，21/21 auth 测试通过 | 用户级 `gatewayPolicy`、M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | 管理端自动编排、正式目录接入、真实部署和真实请求 E2E |
+| C4-03c | 核心已实现，Mock/故障测试通过 | 管理额度/模型 API、幂等签发、issuance journal、apply/readback、同步后交付、失败补偿和启动恢复 | 真实 Magpie/共享卷故障注入、真实 IdP 和生产验收 |
+| C4-03d | 部分实现 | 管理页可查看策略版本、逐凭证同步状态、最后同步时间和错误码 | 写按钮、完整员工门户、operation/audit 查询、人工对账和页面 E2E |
 | C4-04 | 未实现 | 只有 E2E 契约 | 真实 Magpie 限额、模型拒绝、refresh/rotate 继承和部分失败 |
 | M2-C5 | 未实现 | 只有查询/对账设计 | operations、audit-logs 和人工对账 |
 | M2-E | 未实现 | APR-01/NOTIFY-01 设计完成 | 审批、step-up、break-glass、outbox、SIEM/Webhook/工单 |
@@ -241,8 +241,8 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 
 当前已执行并通过的本地测试：
 
-- `enterprise/auth-service`：`18 passed, 0 failed`
-- `enterprise/admin-service`：`31 passed, 0 failed`（24 项管理集成 + 7 项目录专项）
+- `enterprise/auth-service`：`21 passed, 0 failed`
+- `enterprise/admin-service`：`34 passed, 0 failed`（27 项管理集成 + 7 项目录专项）
 - `enterprise/gateway-control`：`15 passed, 0 failed`
 
 这些结果不等于真实 IdP、Docker、共享卷、Windows、反向代理或生产请求行为已验收。
@@ -258,7 +258,7 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 当前不可以：
 
 - 不能查看员工对话正文、Prompt、回复、附件正文或完整工具参数。
-- 不能从页面自助调额或修改用户模型范围；C4-03c/C4-03d/C4-04 尚未贯通。
+- 不能从页面自助调额或修改用户模型范围；C4-03c 核心链路已有 API，但管理页写入口和 C4-04 真实请求验收仍未完成。
 - 不能查询 operations/audit-logs 或执行人工对账；C5 尚未实现。
 - 不能配置中央 MCP 服务器、工具权限或公司资源库；M3 尚未实现。
 - 不能宣称审批、step-up、break-glass、Webhook/SIEM/工单已可用；APR-01/NOTIFY-01 尚未实现。
@@ -422,7 +422,7 @@ M3 要解决的是“全公司能用什么”，不是只在员工电脑上手�
 - Docker Compose、真实共享卷、健康检查、只读挂载、日志脱敏和故障恢复。
 - 真实 `usage.jsonl` 归属、轮转、损坏检测和管理容器不可写。
 - 至少一次离职、设备丢失、跨部门越权和 Key 泄露演练。
-- C4-03c/C4-03d/C4-04 真实管理链路和 Magpie 请求行为通过。
+- C4-03c/C4-03d 的完整管理链路和 C4-04 真实 Magpie 请求行为通过。
 - C5 操作/审计查询与人工对账通过。
 - APR-01/NOTIFY-01 高风险审批、step-up 和通知 outbox 通过。
 
@@ -436,12 +436,12 @@ M3 要解决的是“全公司能用什么”，不是只在员工电脑上手�
 - 不能承诺当前有对话正文/工具审计；属于 M4。
 - 不能承诺当前有审批、step-up、break-glass、Webhook/SIEM/工单；属于 M2-E/M5。
 - 不能承诺当前是高可用、多副本、多地域；属于 M6。
-- 不能把 18/31/15 项本地/Mock 测试等同于真实 IdP、Docker、Windows、代理和生产验收。
+- 不能把 21/34/15 项本地/Mock 测试等同于真实 IdP、Docker、Windows、代理和生产验收。
 
 ## 17. 建议的管理决策
 
 1. 先批准“真实环境验收”窗口，不继续堆新页面。
-2. 将 C4-03c、C4-03d、C4-04、C5 作为下一组连续交付门禁。
+2. 将 C4-03c 真实环境验收、C4-03d 剩余页面、C4-04、C5 作为下一组连续交付门禁。
 3. 在 M2-D 之前完成 APR-01/NOTIFY-01 后端，避免生成可伪造的审批 UI。
 4. M3 单独立项，明确 MCP 目录、工具权限、资源签名和同步回滚负责人。
 5. 在数据分级和安全/法务批准前，不启用 L2/L3 正文采集。

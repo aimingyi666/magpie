@@ -10,6 +10,7 @@
 - 保存不含 Key 明文的凭证元数据，供管理服务做用户/设备/凭证治理。
 - 提供仅限服务间调用的内部写接口，支持停用/启用用户、吊销设备和轮换当前凭证。
 - 保存用户级模型与额度策略，提供首次初始化、乐观锁、失败关闭和逐凭证回读确认。
+- 通过签发 journal、幂等签发、自动 apply/独立回读和启动补偿，保证同步完成前不交付 Key。
 
 这个服务不修改 Magpie 上游核心，员工机上的 Magpie 仍然负责 Provider 写入和 Agent 一键配置。
 
@@ -33,6 +34,7 @@ AUTH_COOKIE_SECRET
 AUTH_ADMIN_TOKEN
 AUTH_INTERNAL_ADMIN_TOKEN
 MAGPIE_ISSUER_KEY
+GATEWAY_CONTROL_TOKEN
 ```
 
 不要把 `MAGPIE_ISSUER_KEY` 当成员工 Key，也不要把它放进 Git、日志或员工电脑。
@@ -61,6 +63,10 @@ MAGPIE_GATEWAY_PUBLIC_URL=https://ai.corp.example
 MAGPIE_ISSUER_KEY=<网关 issuer Key>
 MAGPIE_KEY_TTL=8h
 MAGPIE_KEY_MODELS=deepseek/deepseek-chat
+
+GATEWAY_CONTROL_URL=http://gateway-control:3446
+GATEWAY_CONTROL_TOKEN=<与 gateway-control 共享的独立服务令牌>
+GATEWAY_CONTROL_TIMEOUT_MS=10000
 ```
 
 `MAGPIE_GATEWAY_URL` 是认证服务访问 Magpie 的内部地址；
@@ -75,6 +81,8 @@ $env:AUTH_COOKIE_SECRET = "..."
 $env:AUTH_ADMIN_TOKEN = "..."
 $env:AUTH_INTERNAL_ADMIN_TOKEN = "..."
 $env:MAGPIE_ISSUER_KEY = "..."
+$env:GATEWAY_CONTROL_URL = "http://127.0.0.1:3446"
+$env:GATEWAY_CONTROL_TOKEN = "..."
 $env:OIDC_ISSUER = "https://idp.example"
 $env:OIDC_CLIENT_ID = "magpie-enterprise"
 $env:OIDC_CLIENT_SECRET = "..."
@@ -151,14 +159,17 @@ curl http://127.0.0.1:${AUTH_HOST_PORT:-3444}/healthz
 `admin-service` 实现；auth-service 内部接口本身不承担管理会话、RBAC、幂等或管理审计，
 这些能力统一由 `admin-service` 的 C2/C3 入口提供。C4-01 的网关机器协议已在 Magpie
 工作分支实现并通过本地测试；C4-02 `gateway-control` 已实现并通过 15 项 Mock/故障测试，
-但 Docker/真实共享卷、admin-service 接入和 mTLS 尚未验收。C4-03a 正式只读模型目录已在
-`admin-service` 实现，并通过管理服务 31/31 测试，但 auth-service 尚未接入。C4-03b
+但 Docker/真实共享卷和 mTLS 尚未验收。C4-03a 正式只读模型目录已在 `admin-service`
+实现，并通过管理服务 34 项测试；admin-service 负责展开选择器，auth-service 只接收稳定
+模型 ID。C4-03b
 已实现 auth-service 内的用户级策略状态机、M1 `unknown` 迁移、首次分步设置、版本冲突、
-失败关闭和回读确认接口；C4-03c 的自动 apply、issuance journal 和同步后交付仍未实现。
-C4-03d/C4-04、M2-C5 和 M2-D 仍未实现。完整契约见
+失败关闭和回读确认接口；C4-03c 的额度/模型管理 API、自动 apply、issuance journal、
+同步后交付、失败补偿和启动恢复已实现并通过 Mock/故障测试。C4-03d 部分实现，管理页可看
+同步状态，但尚无写按钮、完整员工门户、operation/audit 查询和人工对账；C4-04、M2-C5
+和 M2-D 仍未实现。完整契约见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第 12.8.1 节。
 
-## M2-C4 策略状态（C4-03b 已实现核心状态机，C4-03c/C4-03d/C4-04 未实现）
+## M2-C4 策略状态（C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 未实现）
 
 auth-service 中的用户级 `gatewayPolicy` 是策略意图的唯一事实来源，不是
 `caller-keys.json`：
@@ -198,41 +209,48 @@ lastPolicySyncedAt
   完全一致；不泄露 Key、token、Cookie 或服务令牌。
 - 任一活跃凭证与当前策略版本不一致时，策略保持 `pending`，不得把管理写成功当作网关已
   生效。
+- 自动写入按用户串行执行，并同步所有活跃凭证；全部回读一致才进入 `known`。部分凭证
+  失败返回 `partial_success`，部分或不确定结果不会被显示为已生效。
 
-仍待 C4-03c 完成：
+C4-03c 的签发与同步顺序已经实现：
 
-- auth-service 尚未自动调用 `gateway-control`。当前 `confirm-credential` 是受控的服务间
-  确认入口，不能替代真实的 apply/readback 编排。
-- `known` 才允许正常签发；`pending` 时 join、refresh、rotate 返回
-  `409 policy_sync_in_progress`。
-- 当前实现可以安全支持“有模型、`limits=[]`（明确无额度窗口）且没有存量活跃凭证”的
-  首次签发；非空额度窗口必须先经过 C4-03c 的 apply/readback 才能交付，因此现在会被
-  `policy_sync_in_progress` 拒绝。
-- 尚无 issuance journal、崩溃恢复、同步完成前禁止交付和孤儿 Key 对账。
+- join/refresh/rotate 先确认策略完整且为 `known`，再持久化 `preparing` journal，并用
+  稳定的 `enterpriseIssuanceId` 幂等签发 Gateway Key。
+- 签发后依次记录 `issued`、`syncing`，调用 `gateway-control` apply 并执行独立
+  `describe` 回读；apply、回读和策略内容一致后才记录 `synced`。
+- 最后在存储锁内复核策略版本未变化，原子写入设备/凭证和 `committed` journal，之后才把
+  Key 返回客户端。任何一步失败都不会交付未同步 Key。
+- 失败补偿会撤销可确认的新 Key；撤销不确定时保留 `unknown` 和撤销错误，供启动重试。
+  启动扫描所有非 `committed` journal，对已确认的孤儿 Key 幂等撤销，不能删除不确定记录。
+- `pending` 时 join、refresh、rotate 返回 `409 policy_sync_in_progress`，继续失败关闭。
 - auth-service 不能直接读写 `caller-keys.json`。C4 通过独立 `gateway-control` 服务调用
   `magpie gateway-key describe <id> --json` 和原子
   `magpie gateway-key policy apply <id> --json`；服务间使用独立服务令牌或 mTLS，
   不复用 `AUTH_INTERNAL_ADMIN_TOKEN`、管理员 Cookie、issuer Key 或设备令牌。
 - 适配器写入后必须再独立 `describe` 回读。全部活跃凭证回读一致才能提升为 `known`；
   部分失败返回 `partial_success` 并保持 `pending`，不能返回虚假成功。
+- `confirm-credential` 保留为受控的运维确认入口，不再承担自动 apply 的替代路径。
 
 C4-03 的具体门禁：
 
 - **C4-03a（已完成管理服务部分）**：模型目录由只读 `ADMIN_MODEL_CATALOG_PATH` 提供，
-  admin-service 已加载并安全投影；auth-service 尚未接入。接入后 auth-service 不接收
-  group 表达式给网关，必须先按目录展开为稳定模型 ID。坏目录、未知引用或超 2 MiB 失败关闭。
+  admin-service 已加载、安全投影，并在写入前展开为稳定模型 ID。auth-service 和
+  gateway-control 不加载目录，也不接收 group 表达式。坏目录、未知引用或超 2 MiB 失败关闭。
 - **C4-03b（已实现核心状态机与内部接口）**：旧 M1 凭证只迁移为 `quotaStatus=unknown`、
   `modelStatus=unknown`、
   `policyVersion=0`、`initializationSource=m1_unknown`，不得反推全局默认值。quota/models
   可任意顺序首次设置；缺项返回 `policy_setup_required`，两项完整且逐凭证回读后才 `known`。
-- **C4-03c（未实现）**：join/refresh/rotate 的顺序固定为确认 `known` -> issuance journal -> 签发
-  Key -> apply -> 独立 describe -> 原子持久化 -> 交付。同步完成前不能把 Key 返回客户端；
-  任一步失败撤销新 Key，撤销失败保留 `pendingRevocations`，重启扫描不得留下孤儿 Key。
-- **C4-03d（未实现）**：员工页和运营页消费上述真实状态；`unknown` 不显示 0/无限，`pending` 和
-  `partial_success` 显示待同步凭证，`dependency_invoked` 禁止自动重试。员工网页不能直接
-  修改设备上的 Agent 文件。
+- **C4-03c（核心已实现并通过 Mock/故障测试）**：join/refresh/rotate 的顺序固定为确认
+  `known` -> journal -> 幂等签发 Key -> apply -> 独立 describe -> 原子持久化 -> 交付。
+  同步完成前不能把 Key 返回客户端；签发、同步或提交失败会补偿撤销可确认的新 Key，
+  撤销不确定时保留 `unknown` 供启动或人工重试。真实 Magpie 行为 E2E 和生产验收仍属于
+  C4-04 及部署验收。
+- **C4-03d（部分实现）**：管理页已展示策略版本、凭证同步状态、最后同步时间和错误码；
+  `unknown` 不显示为 0/无限，`pending` 和 `partial_success` 不能显示为已生效。仍缺员工
+  门户、调额/模型写按钮、operation/audit 查询和人工对账。员工网页不能直接修改设备上的
+  Agent 文件。
 
-为接入 C4-03c，当前配置草案冻结新增：
+C4-03c 使用以下配置：
 
 ```text
 GATEWAY_CONTROL_URL
@@ -240,11 +258,10 @@ GATEWAY_CONTROL_TOKEN
 GATEWAY_CONTROL_TIMEOUT_MS
 ```
 
-当前 auth-service 已有用户级 `gatewayPolicy`、内部额度/模型写接口、M1 迁移和回读确认；
-但仍没有 `gateway-control` 客户端调用、issuance journal、同步后交付、崩溃恢复扫描和
-孤儿 Key 证明。启动只 drain 撤销队列，没有策略恢复。C4-01 的 `describe --json` 与原子
-`policy apply --json` 已在 Magpie 工作分支实现；auth-service 到适配器的自动编排和真实
-E2E 尚未实现。详细 schema、状态机和错误码见
+当前 auth-service 已具备用户级 `gatewayPolicy`、内部额度/模型写接口、M1 迁移、回读确认、
+自动调用 `gateway-control`、issuance journal、同步后交付、失败补偿和启动恢复。启动时
+同时 drain 撤销队列并扫描非 `committed` journal。仍未完成的是真实 Magpie 限额/模型拒绝/
+多凭证行为 E2E、Docker/Compose 实机、mTLS 和人工对账。详细 schema、状态机和错误码见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md) 第
 12.8.1.1 至 12.8.1.6 节。
 
@@ -252,8 +269,10 @@ E2E 尚未实现。详细 schema、状态机和错误码见
 
 - OIDC 使用 Authorization Code + PKCE，并校验 `iss`、`aud`、`exp`、`nonce` 和 JWT 签名。
 - 设备令牌和网关 Key 在存储中只保留 SHA-256 哈希。
-- 刷新采用“先签发新 Key，再原子更新设备，再把旧 Key 放入撤销队列”。
-- 新 Key 未成功持久化时会立即撤销，避免留下孤儿 Key。
+- 刷新采用“journal -> 幂等签发新 Key -> apply/独立回读 -> 原子更新设备 -> 旧 Key 入撤销
+  队列”的顺序；新 Key 在策略回读完成前不会交付。
+- 新 Key 未成功同步或持久化时会立即尝试撤销；撤销不确定时保留 `unknown` journal，
+  不把“已补偿”当成已证明。
 - 同一设备的刷新请求按 `device.id` 串行化；进入临界区后会重新读取并复核设备、用户、令牌
   和当前 Key 状态，避免并发请求产生多个活跃 Key。
 - 如果员工或设备在刷新签发过程中被停用，持久化前复核会阻止提交，并立即撤销刚签发的新 Key。
@@ -275,13 +294,15 @@ E2E 尚未实现。详细 schema、状态机和错误码见
 
 测试使用临时目录和 Mock IdP/Mock Magpie，不会触碰真实网关数据。
 
-当前结果：`18 passed, 0 failed`。覆盖 OIDC/JWT、PKCE、加入、心跳、刷新撤销、停用、
+当前结果：`21 passed, 0 failed`。覆盖 OIDC/JWT、PKCE、加入、心跳、刷新撤销、停用、
 过期令牌、持久化回滚、同设备并发刷新、“刷新签发过程中停用员工”的交错场景、内部读写
 接口的缺失令牌/错误令牌/正确服务令牌、停用后设备和凭证失效、启用不恢复旧凭据、设备吊销
 隔离目标、凭证轮换旧 Key 撤销和持久化失败清理孤儿 Key、同设备并发轮换与刷新，以及旧
 M1 store 的兼容加载。策略测试还覆盖 quota/models 两种首次设置顺序、缺项和
 `magpie.issue()` 零调用、stale/`If-Match` 冲突、非对象 JSON、模型与额度边界、M1 迁移
-幂等、`unknown/pending` 失败关闭及回读内容/字段/时间/版本校验。
+幂等、`unknown/pending` 失败关闭、回读内容/字段/时间/版本校验、幂等
+`enterpriseIssuanceId`、journal 状态转换、自动 apply/独立回读、失败补偿、撤销不确定时
+保留 `unknown`、部分凭证同步状态和启动恢复。
 
 真实 Magpie issuer 端到端测试（需要 Magpie 可执行文件）：
 

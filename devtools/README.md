@@ -24,21 +24,23 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 
 ## 企业版当前实施基线
 
-截至 2026-11-01，M0、M1、M2-A、M2-B、M2-C1、M2-C2 和 M2-C3 已有实现和测试证据。
+截至 2026-11-02，M0、M1、M2-A、M2-B、M2-C1、M2-C2 和 M2-C3 已有实现和测试证据。
 当前工作分支还实现了 **C4-01** 的 `gateway-key describe --json` 和原子
 `gateway-key policy apply --json` 机器协议，并通过 Go 单测、CLI 回归和隔离真实二进制的
 冒烟测试。**C4-02** `gateway-control` 受控适配器也已实现，并通过 `15/15` Mock/故障
 测试：只允许 describe/apply/健康检查、独立 Bearer 服务令牌、固定 argv、10 秒超时、
 64 KiB 上限、写入后独立回读和 `pending` 保守状态。C4-02 的 Docker/Compose 尚未实机
-验收，admin-service 也尚未接入。**C4-03a** 正式只读模型目录已实现，并通过 7 项目录专项
-和 24 项管理服务集成测试，管理服务合计 `31/31`；`GET /api/v1/admin/models` 已使用正式
-目录，`ADMIN_MODELS` 仅保留兼容显示。C4-03a 仍待真实 Compose/只读挂载/digest 验收，且
-auth-service 尚未自动接入。**C4-03b** 的用户级策略核心已实现：版本化 `gatewayPolicy`、
+验收，admin-service 经 auth-service 间接调用，尚未直接接入。**C4-03a** 正式只读模型目录已实现，并通过 7 项目录专项
+和 27 项管理服务集成测试，管理服务合计 `34/34`；`GET /api/v1/admin/models` 已使用正式
+目录，`ADMIN_MODELS` 仅保留兼容显示。C4-03a 仍待真实 Compose/只读挂载/digest 验收；
+auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b** 的用户级策略核心已实现：版本化 `gatewayPolicy`、
 旧 M1 `unknown` 迁移、quota/models 分步首次设置、缺项失败关闭、版本冲突和逐凭证回读确认
-均通过 auth-service `18/18`；这仍不等于管理端调额/模型授权已贯通。C4-03c 管理 API 与
-同步后交付、C4-03d 页面与运营状态仍只有冻结契约；C4-04 真实 Magpie 请求行为 E2E、
-M2-C5、M2-D 和 M3-M6 也仍未实现。C4-01/C4-02/C4-03a/C4-03b 尚未合入 `main`，不能据此
-宣称管理员已经可以自助调额或授予模型。
+均通过 auth-service `21/21`。C4-03c 的额度/模型管理 API、幂等签发、issuance journal、
+apply/独立回读、同步后交付、失败补偿和启动恢复核心已实现并通过 Mock/故障测试；
+C4-03d 仅完成管理页同步状态展示，写按钮、员工门户、operation/audit 查询和人工对账仍未
+实现；C4-04 真实 Magpie 请求行为 E2E、M2-C5、M2-D 和 M3-M6 也仍未实现。
+C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
+宣称管理员已经可以在生产自助调额或授予模型。
 `APR-01` 审批/step-up/职责分离和 `NOTIFY-01` outbox/邮件/IM/Webhook/SIEM/工单目前只有
 完整设计，没有实现或验收证据。现有 `approvalId` 只是预留字段；业务请求也不得同步等待外部
 通知渠道。管理页在 M2-E1 和 M2-E2 完成前不能展示或声称具备审批、重新认证和可靠投递能力。
@@ -49,10 +51,10 @@ M2-C5、M2-D 和 M3-M6 也仍未实现。C4-01/C4-02/C4-03a/C4-03b 尚未合入 
 真实环境验收
   -> C4-01：机器可读 describe/原子 policy apply
   -> C4-02：gateway-control 受控适配器（已完成本地 Mock/故障测试；待 Docker/真实卷验收）
-  -> C4-03a：只读正式模型目录、稳定模型 ID、Provider 通配符和 group 展开（已完成本地测试；待真实部署验收和 auth-service 接入）
+  -> C4-03a：只读正式模型目录、稳定模型 ID、Provider 通配符和 group 展开（已完成本地测试；待真实部署验收）
   -> C4-03b：用户级 gatewayPolicy、旧 M1 unknown、首次初始化和逐凭证 known（核心已完成）
-  -> C4-03c：额度/模型管理 API、issuance journal、同步后交付和无孤儿补偿（下一个切片）
-  -> C4-03d：页面/运营真实状态、失败凭证和对账入口
+  -> C4-03c：额度/模型管理 API、issuance journal、同步后交付和无孤儿补偿（核心已完成；待真实环境验收）
+  -> C4-03d：页面/运营真实状态、失败凭证和对账入口（部分完成）
   -> C4-04：真实 Magpie E2E、部分成功和对账证据
   -> C5：operations/audit-logs/reconcile
   -> APR-01a/b/c：审批绑定/一次性消费、外部审批、step-up

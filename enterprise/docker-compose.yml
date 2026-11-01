@@ -34,7 +34,7 @@ services:
   # intentionally not published on a host port and does not receive OIDC,
   # admin-session or issuer secrets.
   gateway-control:
-    profiles: ["gateway-control"]
+    profiles: ["gateway-control", "auth", "admin"]
     build:
       context: ..
       dockerfile: enterprise/gateway-control/Dockerfile
@@ -79,6 +79,8 @@ services:
     depends_on:
       gateway:
         condition: service_healthy
+      gateway-control:
+        condition: service_healthy
     ports:
       - "${AUTH_BIND:-0.0.0.0}:${AUTH_HOST_PORT:-3444}:3444"
     environment:
@@ -110,6 +112,9 @@ services:
       MAGPIE_KEY_MODELS: ${MAGPIE_KEY_MODELS:-}
       MAGPIE_KEY_TOKENS: ${MAGPIE_KEY_TOKENS:-0}
       MAGPIE_KEY_COST: ${MAGPIE_KEY_COST:-0}
+      GATEWAY_CONTROL_URL: ${GATEWAY_CONTROL_URL:-http://gateway-control:3446}
+      GATEWAY_CONTROL_TOKEN: ${GATEWAY_CONTROL_TOKEN:-}
+      GATEWAY_CONTROL_TIMEOUT_MS: ${GATEWAY_CONTROL_TIMEOUT_MS:-10000}
     volumes:
       - auth-data:/data
     healthcheck:

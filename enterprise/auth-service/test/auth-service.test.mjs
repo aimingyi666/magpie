@@ -22,7 +22,14 @@ function listen(server, host = "127.0.0.1") {
 }
 
 function close(server) {
-  return new Promise((resolve) => server.close(resolve));
+  return new Promise((resolve) => {
+    if (!server.listening) {
+      resolve();
+      return;
+    }
+    server.close(resolve);
+    server.closeAllConnections?.();
+  });
 }
 
 async function jsonBody(response) {
@@ -153,6 +160,8 @@ function createMockOidc() {
 function createMockMagpie(issuerKey) {
   const issued = new Map();
   const revoked = [];
+  const issuances = new Map();
+  let issueAttempts = 0;
   let sequence = 0;
   const server = http.createServer(async (req, res) => {
     if (req.headers.authorization !== `Bearer ${issuerKey}`) {
@@ -165,6 +174,19 @@ function createMockMagpie(issuerKey) {
       let raw = "";
       for await (const chunk of req) raw += chunk;
       const body = JSON.parse(raw);
+      issueAttempts += 1;
+      const fingerprint = JSON.stringify(body);
+      const existing = issuances.get(body.enterpriseIssuanceId);
+      if (existing) {
+        if (existing.fingerprint !== fingerprint) {
+          res.writeHead(409, { "content-type": "application/json" });
+          res.end(JSON.stringify({ error: { message: "enterpriseIssuanceId conflict" } }));
+          return;
+        }
+        res.writeHead(201, { "content-type": "application/json" });
+        res.end(JSON.stringify(existing.record));
+        return;
+      }
       sequence += 1;
       const id = `key-${sequence}`;
       const record = {
@@ -175,6 +197,9 @@ function createMockMagpie(issuerKey) {
         models: body.models,
       };
       issued.set(id, record);
+      if (body.enterpriseIssuanceId) {
+        issuances.set(body.enterpriseIssuanceId, { fingerprint, record: structuredClone(record) });
+      }
       res.writeHead(201, { "content-type": "application/json" });
       res.end(JSON.stringify(record));
       return;
@@ -199,8 +224,145 @@ function createMockMagpie(issuerKey) {
     server,
     issued,
     revoked,
+    issuances,
+    get issueAttempts() { return issueAttempts; },
     setBase(value) { this.base = value; },
     base: "",
+  };
+}
+
+function createMockGatewayControl(expectedToken) {
+  const keys = new Map();
+  const applyCalls = [];
+  const failures = {
+    timeoutOnce: false,
+    mismatchOnce: false,
+    rejectApplyOnce: false,
+  };
+  let requestSequence = 0;
+
+  function revision() {
+    return `sha256:${crypto.createHash("sha256").update(crypto.randomUUID()).digest("hex")}`;
+  }
+
+  function keyState(id) {
+    if (!keys.has(id)) {
+      keys.set(id, {
+        name: `Gateway key ${id}`,
+        state: "enabled",
+        readOnly: false,
+        policyRevision: revision(),
+        models: ["deepseek/deepseek-chat"],
+        limits: [],
+        observedAt: new Date().toISOString(),
+      });
+    }
+    return keys.get(id);
+  }
+
+  function describe(id) {
+    const state = keyState(id);
+    state.observedAt = new Date().toISOString();
+    return {
+      schemaVersion: 1,
+      ok: true,
+      key: {
+        id,
+        name: state.name,
+        state: state.state,
+        readOnly: state.readOnly,
+      },
+      models: { mode: "restricted", patterns: [...state.models] },
+      limits: structuredClone(state.limits),
+      accounts: { restricted: false },
+      policyRevision: state.policyRevision,
+      observedAt: state.observedAt,
+    };
+  }
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    if (req.headers.authorization !== `Bearer ${expectedToken}`) {
+      res.writeHead(401, { "content-type": "application/json" });
+      res.end(JSON.stringify({ error: { code: "invalid_gateway_control_token" } }));
+      return;
+    }
+    const getMatch = /^\/api\/v1\/gateway-keys\/([^/]+)$/.exec(url.pathname);
+    if (req.method === "GET" && getMatch) {
+      const payload = describe(decodeURIComponent(getMatch[1]));
+      if (failures.mismatchOnce) {
+        failures.mismatchOnce = false;
+        payload.models.patterns = ["wrong/model"];
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(payload));
+      return;
+    }
+    const applyMatch = /^\/api\/v1\/gateway-keys\/([^/]+)\/policy$/.exec(url.pathname);
+    if (req.method === "POST" && applyMatch) {
+      let raw = "";
+      for await (const chunk of req) raw += chunk;
+      const body = JSON.parse(raw);
+      const id = decodeURIComponent(applyMatch[1]);
+      applyCalls.push({ id, body: structuredClone(body) });
+      if (failures.timeoutOnce) {
+        failures.timeoutOnce = false;
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        res.writeHead(504, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          state: "pending",
+          error: { code: "apply_unknown", message: "apply timed out" },
+        }));
+        return;
+      }
+      if (failures.rejectApplyOnce) {
+        failures.rejectApplyOnce = false;
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          state: "failed",
+          error: { code: "revision_conflict", message: "policy revision changed" },
+        }));
+        return;
+      }
+      const state = keyState(id);
+      if (body.schemaVersion !== 1 || body.expectedPolicyRevision !== state.policyRevision) {
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          state: "failed",
+          error: { code: "revision_conflict", message: "policy revision changed" },
+        }));
+        return;
+      }
+      state.models = body.models.map(String);
+      state.limits = structuredClone(body.limits);
+      state.policyRevision = revision();
+      state.observedAt = new Date().toISOString();
+      requestSequence += 1;
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        schemaVersion: 1,
+        ok: true,
+        state: "applied",
+        requestId: `req_${requestSequence}`,
+        readback: {
+          verified: true,
+          observedAt: state.observedAt,
+          policyRevision: state.policyRevision,
+        },
+      }));
+      return;
+    }
+    res.writeHead(404, { "content-type": "application/json" });
+    res.end(JSON.stringify({ error: { code: "not_found" } }));
+  });
+
+  return {
+    server,
+    keys,
+    applyCalls,
+    failures,
+    get base() { return this._base || ""; },
+    set base(value) { this._base = value; },
   };
 }
 
@@ -211,6 +373,9 @@ async function fixture() {
   const issuerKey = "issuer-key-abcdefghijklmnopqrstuvwxyz-123456";
   const magpie = createMockMagpie(issuerKey);
   magpie.base = await listen(magpie.server);
+  const gatewayControlToken = "gateway-control-service-token-for-tests-0001";
+  const gatewayControl = createMockGatewayControl(gatewayControlToken);
+  gatewayControl.base = await listen(gatewayControl.server);
   const cookieSecret = "test-cookie-secret-0123456789abcdef";
   const adminToken = "test-admin-token-0123456789abcdef";
   const internalAdminToken = "{{SECRET_internal_admin_service_token}}";
@@ -231,11 +396,15 @@ async function fixture() {
     MAGPIE_GATEWAY_URL: magpie.base,
     MAGPIE_GATEWAY_PUBLIC_URL: "https://ai.corp.example",
     MAGPIE_ISSUER_KEY: issuerKey,
+    GATEWAY_CONTROL_URL: gatewayControl.base,
+    GATEWAY_CONTROL_TOKEN: gatewayControlToken,
+    GATEWAY_CONTROL_TIMEOUT_MS: "500",
     MAGPIE_KEY_TTL: "8h",
     MAGPIE_KEY_MODELS: "deepseek/deepseek-chat",
     AUTH_DEVICE_TOKEN_TTL_DAYS: "30",
   });
   const auth = await createEnterpriseAuthServer(config);
+  await auth.startupRecovery;
   const authBase = await listen(auth.server);
   const authPort = new URL(authBase).port;
   config.publicUrl = authBase;
@@ -245,14 +414,16 @@ async function fixture() {
     temp,
     oidc,
     magpie,
+    gatewayControl,
     auth,
     config,
     authBase,
-    issues: { adminToken, internalAdminToken, issuerKey },
+    issues: { adminToken, internalAdminToken, issuerKey, gatewayControlToken },
     async close() {
       await close(auth.server);
       await close(oidc.server);
       await close(magpie.server);
+      await close(gatewayControl.server);
       await fs.rm(temp, { recursive: true, force: true });
     },
   };
@@ -519,8 +690,6 @@ test("OIDC join, device lifecycle, revocation and session", { timeout: 30000 }, 
   });
   assert.equal(failedRefresh.status, 500);
   assert.equal(f.magpie.issued.size, refreshCount);
-  const failedKeyId = `key-${refreshCount + 1}`;
-  assert.ok(f.magpie.revoked.includes(failedKeyId));
 
   const refreshed = await fetch(`${f.authBase}/api/v1/devices/refresh`, {
     method: "POST",
@@ -623,7 +792,22 @@ test("internal admin status requires its own service token", { timeout: 30000 },
     devices: 0,
     credentials: 0,
     pendingRevocations: 0,
+    activeCredentials: 0,
+    pendingPolicyCredentials: 0,
+    failedPolicyCredentials: 0,
+    unknownPolicyCredentials: 0,
     unknownPolicyUsers: 0,
+    pendingPolicyUsers: 0,
+    knownPolicyUsers: 0,
+    issuanceJournal: {
+      preparing: 0,
+      issued: 0,
+      syncing: 0,
+      synced: 0,
+      committed: 0,
+      failed: 0,
+      unknown: 0,
+    },
   });
 
   for (const collection of ["users", "devices", "credentials"]) {
@@ -816,6 +1000,9 @@ test("new users need quota and models before joining, in either write order", { 
     total: 0,
     succeeded: 0,
     failed: 0,
+    pending: 0,
+    unknown: 0,
+    failedOnly: 0,
     failedItems: [],
   });
   assertNoPrivateValues(modelsWrite.body, f);
@@ -896,6 +1083,142 @@ test("new users need quota and models before joining, in either write order", { 
   assert.equal(thenModels.body.data.policy.quotaStatus, "known");
   assert.equal(thenModels.body.data.policy.modelStatus, "known");
   assert.deepEqual(thenModels.body.data.policy.missing, []);
+});
+
+test("issuance journal commits only after gateway apply and readback", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  const joined = await joinDevice(f, "Journal Commit PC");
+  assert.equal(joined.gateway.keyId, "key-1");
+  assert.equal(f.gatewayControl.applyCalls.length, 1);
+  assert.deepEqual(f.gatewayControl.applyCalls[0].body.models, ["deepseek/deepseek-chat"]);
+  assert.deepEqual(f.gatewayControl.applyCalls[0].body.limits, []);
+
+  const stored = await f.auth.store.read((data) => structuredClone({
+    journal: data.issuanceJournal,
+    credential: data.credentials[joined.gateway.keyId],
+  }));
+  assert.equal(stored.journal.length, 1);
+  assert.equal(stored.journal[0].state, "committed");
+  assert.equal(stored.journal[0].keyId, joined.gateway.keyId);
+  assert.equal(stored.journal[0].policyVersion, joined.policyVersion);
+  assert.match(stored.journal[0].enterpriseIssuanceId, /^eiss_/);
+  assert.match(stored.journal[0].policyRevision, /^sha256:[0-9a-f]{64}$/);
+  assert.ok(stored.journal[0].committedAt);
+  assert.equal(stored.credential.policySyncState, "synced");
+  assert.equal(stored.credential.policyVersion, joined.policyVersion);
+  assert.equal(stored.credential.lastPolicyRevision, stored.journal[0].policyRevision);
+  assertNoPrivateValues(stored, f);
+});
+
+test("gateway apply failure revokes the issued key and never returns it", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  const jar = new CookieJar();
+  const login = await oidcLogin(f.authBase, jar);
+  const user = await userByEmail(f);
+  await initializePolicy(f, user.id);
+  f.gatewayControl.failures.rejectApplyOnce = true;
+
+  const failed = await exchangeJoin(f, login, "Journal Failure PC");
+  assert.equal(failed.response.status, 409);
+  assert.equal(failed.body.error.code, "revision_conflict");
+  assert.equal(failed.body.gateway, undefined);
+
+  const stored = await f.auth.store.read((data) => structuredClone({
+    journal: data.issuanceJournal,
+    credentials: data.credentials,
+    devices: data.devices,
+  }));
+  assert.equal(stored.journal.length, 1);
+  assert.equal(stored.journal[0].state, "failed");
+  assert.equal(stored.journal[0].errorCode, "revision_conflict");
+  assert.equal(stored.journal[0].revocationResult, "revoked");
+  assert.ok(stored.journal[0].revokedAt);
+  assert.ok(f.magpie.revoked.includes(stored.journal[0].keyId));
+  assert.equal(Object.values(stored.credentials).filter((item) => item.status === "active").length, 0);
+  assert.equal(Object.values(stored.devices).filter((item) => item.status === "active").length, 0);
+  assertNoPrivateValues(stored, f);
+});
+
+test("uncertain revocation stays unknown and startup recovery revokes a preparing orphan", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  const jar = new CookieJar();
+  const login = await oidcLogin(f.authBase, jar);
+  const user = await userByEmail(f);
+  await initializePolicy(f, user.id);
+  f.gatewayControl.failures.rejectApplyOnce = true;
+  const originalRevoke = f.auth.magpie.revoke.bind(f.auth.magpie);
+  f.auth.magpie.revoke = async () => {
+    throw new Error("injected revoke uncertainty");
+  };
+
+  const failed = await exchangeJoin(f, login, "Journal Unknown PC");
+  assert.equal(failed.response.status, 409);
+  const unknown = await f.auth.store.read(
+    (data) => structuredClone(data.issuanceJournal[0]),
+  );
+  assert.equal(unknown.state, "unknown");
+  assert.equal(unknown.revocationResult, "unknown");
+  assert.ok(unknown.revocationErrorCode);
+
+  f.auth.magpie.revoke = originalRevoke;
+  const orphan = {
+    id: "eij_recovery_test",
+    enterpriseIssuanceId: "eiss_recovery_test",
+    userId: user.id,
+    purpose: "join",
+    deviceId: "",
+    credentialId: "",
+    policyVersion: 2,
+    policyOperationId: "",
+    request: {
+      name: "Recovery orphan",
+      models: ["deepseek/deepseek-chat"],
+      limits: [],
+    },
+    state: "preparing",
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  };
+  await f.auth.store.mutate((data) => {
+    data.issuanceJournal.push(orphan);
+  });
+
+  const recovery = await f.auth.recoverIssuanceJournal();
+  assert.ok(recovery.recovered >= 1);
+  const recovered = await f.auth.store.read(
+    (data) => structuredClone(data.issuanceJournal.find((entry) => entry.id === orphan.id)),
+  );
+  assert.equal(recovered.state, "failed");
+  assert.equal(recovered.errorCode, "recovered_orphan_revoked");
+  assert.equal(recovered.revocationResult, "revoked");
+  assert.ok(f.magpie.revoked.includes(recovered.keyId));
+
+  const originalFetch = f.auth.magpie.fetch;
+  f.auth.magpie.fetch = async () => {
+    throw new TypeError("injected issue transport failure");
+  };
+  let ambiguous;
+  try {
+    const secondLogin = await oidcLogin(f.authBase, new CookieJar());
+    ambiguous = await exchangeJoin(f, secondLogin, "Network Unknown PC");
+  } finally {
+    f.auth.magpie.fetch = originalFetch;
+  }
+  assert.notEqual(ambiguous.response.status, 201);
+  const transportUnknown = await f.auth.store.read(
+    (data) => structuredClone(data.issuanceJournal.find(
+      (entry) => entry.id !== orphan.id && entry.id !== unknown.id,
+    )),
+  );
+  assert.equal(transportUnknown.state, "unknown");
+  assert.equal(transportUnknown.errorCode, "magpie_issuance_unknown");
+  assert.equal(transportUnknown.keyId, undefined);
 });
 
 test("policy writes reject invalid payloads, stale versions and non-object JSON", { timeout: 30000 }, async (t) => {
@@ -1147,7 +1470,7 @@ test("M1 policy migration is idempotent and preserves known and pending state", 
 
     await first.mutate(() => {});
     const stored = JSON.parse(await fs.readFile(file, "utf8"));
-    assert.equal(stored.version, 2);
+    assert.equal(stored.version, 3);
     assert.equal(stored.policyMigrationVersion, 1);
 
     const second = new JsonStore(file);
@@ -1199,20 +1522,17 @@ test("unknown and pending policies fail closed before any gateway key is issued"
     },
   );
   assert.equal(changed.response.status, 200, JSON.stringify(changed.body));
-  assert.equal(changed.body.data.state, "pending_sync");
-  assert.equal(changed.body.data.credentials.failed, 1);
+  assert.equal(changed.body.data.state, "succeeded");
+  assert.equal(changed.body.data.credentials.failed, 0);
 
-  for (const response of [
-    await fetch(`${f.authBase}/api/v1/devices/refresh`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${joined.deviceToken}` },
-    }),
-    await internalAction(f, `/api/v1/internal/admin/credentials/${joined.gateway.keyId}/rotate`),
-  ]) {
-    assert.equal(response.status, 409);
-    assert.equal((await jsonBody(response)).error.code, "policy_sync_in_progress");
-  }
-  assert.equal(issueCalls, 1);
+  const refreshed = await fetch(`${f.authBase}/api/v1/devices/refresh`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${joined.deviceToken}` },
+  });
+  assert.equal(refreshed.status, 200);
+  const refreshedBody = await jsonBody(refreshed);
+  assert.deepEqual(refreshedBody.gateway.models, ["deepseek/deepseek-reasoner"]);
+  assert.equal(issueCalls, 2);
 
   await f.auth.store.mutate((data) => {
     const current = data.users[user.id].gatewayPolicy;
@@ -1232,14 +1552,17 @@ test("unknown and pending policies fail closed before any gateway key is issued"
       method: "POST",
       headers: { authorization: `Bearer ${joined.deviceToken}` },
     }),
-    await internalAction(f, `/api/v1/internal/admin/credentials/${joined.gateway.keyId}/rotate`),
+    await internalAction(
+      f,
+      `/api/v1/internal/admin/credentials/${refreshedBody.gateway.keyId}/rotate`,
+    ),
   ]) {
     assert.equal(response.status, 409);
     const error = await jsonBody(response);
     assert.equal(error.error.code, "policy_setup_required");
     assert.deepEqual(error.error.missing, ["quota", "models"]);
   }
-  assert.equal(issueCalls, 1);
+  assert.equal(issueCalls, 2);
 
   const unknownAgain = await exchangeJoin(
     f,
@@ -1248,7 +1571,7 @@ test("unknown and pending policies fail closed before any gateway key is issued"
   );
   assert.equal(unknownAgain.response.status, 409);
   assert.equal(unknownAgain.body.error.code, "policy_setup_required");
-  assert.equal(issueCalls, 1);
+  assert.equal(issueCalls, 2);
   assert.equal(f.magpie.issued.size, 1);
 });
 
@@ -1333,6 +1656,9 @@ test("credential policy confirmation requires an exact, safe gateway readback", 
     total: 1,
     succeeded: 1,
     failed: 0,
+    pending: 0,
+    unknown: 0,
+    failedOnly: 0,
     failedItems: [],
   });
   assert.equal(result.body.data.credential.credentialId, credentialId);
@@ -1748,9 +2074,14 @@ test("failed internal rotation revokes the orphan key", { timeout: 30000 }, asyn
   };
 
   const originalMutate = f.auth.store.mutate.bind(f.auth.store);
-  f.auth.store.mutate = async () => {
-    f.auth.store.mutate = originalMutate;
-    throw new Error("injected rotation store failure");
+  let mutateCalls = 0;
+  f.auth.store.mutate = async (...args) => {
+    mutateCalls += 1;
+    if (mutateCalls === 5) {
+      f.auth.store.mutate = originalMutate;
+      throw new Error("injected rotation commit failure");
+    }
+    return originalMutate(...args);
   };
 
   const rotated = await internalAction(

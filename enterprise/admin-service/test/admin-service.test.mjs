@@ -166,6 +166,18 @@ function createMockAuthService(expectedToken) {
       status: "active",
       createdAt: "2026-10-01T00:00:00.000Z",
       lastLoginAt: "2026-10-31T08:00:00.000Z",
+      policy: {
+        version: 2,
+        models: ["deepseek/deepseek-chat"],
+        limits: [],
+        quotaStatus: "known",
+        modelStatus: "known",
+        including: ["quota", "models"],
+        missing: [],
+        updatedAt: "2026-10-31T08:00:00.000Z",
+        confirmedAt: "2026-10-31T08:01:00.000Z",
+        operationId: "op_mock_policy_ready",
+      },
     },
     {
       id: "usr_bob",
@@ -174,6 +186,18 @@ function createMockAuthService(expectedToken) {
       status: "active",
       createdAt: "2026-10-02T00:00:00.000Z",
       lastLoginAt: "2026-10-31T09:00:00.000Z",
+      policy: {
+        version: 1,
+        models: null,
+        limits: [],
+        quotaStatus: "known",
+        modelStatus: "unknown",
+        including: ["quota"],
+        missing: ["models"],
+        updatedAt: "2026-10-31T09:00:00.000Z",
+        confirmedAt: "",
+        operationId: "op_mock_policy_pending",
+      },
     },
     {
       id: "usr_carol",
@@ -182,6 +206,18 @@ function createMockAuthService(expectedToken) {
       status: "active",
       createdAt: "2026-10-03T00:00:00.000Z",
       lastLoginAt: "2026-10-31T10:00:00.000Z",
+      policy: {
+        version: 0,
+        models: null,
+        limits: null,
+        quotaStatus: "unknown",
+        modelStatus: "unknown",
+        including: [],
+        missing: ["quota", "models"],
+        updatedAt: "",
+        confirmedAt: "",
+        operationId: "",
+      },
     },
     {
       id: "usr_unmapped",
@@ -190,6 +226,18 @@ function createMockAuthService(expectedToken) {
       status: "active",
       createdAt: "2026-10-04T00:00:00.000Z",
       lastLoginAt: "2026-10-31T11:00:00.000Z",
+      policy: {
+        version: 0,
+        models: null,
+        limits: null,
+        quotaStatus: "unknown",
+        modelStatus: "unknown",
+        including: [],
+        missing: ["quota", "models"],
+        updatedAt: "",
+        confirmedAt: "",
+        operationId: "",
+      },
     },
   ];
   const devices = [
@@ -244,6 +292,13 @@ function createMockAuthService(expectedToken) {
       lastSeenAt: "2026-10-31T08:00:00.000Z",
       publicKeySha256: "alice-public-key-sha256",
       models: ["deepseek/deepseek-chat"],
+      policyVersion: 2,
+      policySyncState: "synced",
+      lastPolicyResult: "synced",
+      lastPolicySyncedAt: "2026-10-31T08:01:00.000Z",
+      lastPolicyOperationId: "op_mock_policy_ready",
+      lastPolicyGatewayRequestId: "gwreq_mock_alice",
+      lastPolicyRevision: "policy:mock:2",
     },
     {
       id: "key-alice-old",
@@ -259,6 +314,10 @@ function createMockAuthService(expectedToken) {
       lastSeenAt: "2026-10-31T08:00:00.000Z",
       publicKeySha256: "alice-public-key-sha256",
       models: ["deepseek/deepseek-chat"],
+      policyVersion: 1,
+      policySyncState: "synced",
+      lastPolicyResult: "synced",
+      lastPolicySyncedAt: "2026-10-30T00:01:00.000Z",
     },
     {
       id: "key-bob",
@@ -273,6 +332,11 @@ function createMockAuthService(expectedToken) {
       lastSeenAt: "2026-10-31T09:00:00.000Z",
       publicKeySha256: "bob-public-key-sha256",
       models: ["openai/gpt-test"],
+      policyVersion: 1,
+      policySyncState: "pending",
+      lastPolicyResult: "pending",
+      lastPolicyErrorCode: "policy_sync_in_progress",
+      lastPolicyAttemptedAt: "2026-10-31T09:01:00.000Z",
     },
     {
       id: "key-carol",
@@ -287,6 +351,10 @@ function createMockAuthService(expectedToken) {
       lastSeenAt: "2026-10-31T10:00:00.000Z",
       publicKeySha256: "carol-public-key-sha256",
       models: ["deepseek/deepseek-chat"],
+      policyVersion: 0,
+      policySyncState: "unknown",
+      lastPolicyResult: "unknown",
+      lastPolicyErrorCode: "policy_unknown",
     },
   ];
   async function delayWrite() {
@@ -315,11 +383,97 @@ function createMockAuthService(expectedToken) {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify(value));
     }
+    let parsedBody = null;
+    async function requestBody() {
+      if (parsedBody !== null) return parsedBody;
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      const text = Buffer.concat(chunks).toString("utf8");
+      parsedBody = text ? JSON.parse(text) : {};
+      return parsedBody;
+    }
+    const policyWrite = /^\/api\/v1\/internal\/admin\/users\/([A-Za-z0-9_-]+)\/policy\/(quota|models)$/.exec(
+      url.pathname,
+    );
+    if (policyWrite
+        && ((policyWrite[2] === "quota" && req.method === "PUT")
+          || (policyWrite[2] === "models" && req.method === "PATCH"))) {
+      const body = await requestBody();
+      writeCalls.push({ method: req.method, pathname: url.pathname, body });
+      if (writeFailing) {
+        res.writeHead(503, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "write_unavailable" } }));
+        return;
+      }
+      await delayWrite();
+      const user = users.find((candidate) => candidate.id === policyWrite[1]);
+      if (!user) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "user_not_found" } }));
+        return;
+      }
+      if (body.expectedVersion !== user.policy.version) {
+        res.writeHead(409, { "content-type": "application/json" });
+        res.end(JSON.stringify({
+          error: {
+            code: "policy_version_conflict",
+            message: "The user policy changed; reload it and retry",
+            currentVersion: user.policy.version,
+            expectedVersion: body.expectedVersion,
+          },
+        }));
+        return;
+      }
+      if (policyWrite[2] === "quota") user.policy.limits = body.limits;
+      else user.policy.models = body.models;
+      user.policy.version += 1;
+      user.policy.quotaStatus = Array.isArray(user.policy.limits) ? "known" : "unknown";
+      user.policy.modelStatus = Array.isArray(user.policy.models) ? "known" : "unknown";
+      user.policy.including = [
+        ...(Array.isArray(user.policy.limits) ? ["quota"] : []),
+        ...(Array.isArray(user.policy.models) ? ["models"] : []),
+      ];
+      user.policy.missing = [
+        ...(Array.isArray(user.policy.limits) ? [] : ["quota"]),
+        ...(Array.isArray(user.policy.models) ? [] : ["models"]),
+      ];
+      user.policy.updatedAt = "2026-10-31T12:00:00.000Z";
+      user.policy.confirmedAt = user.policy.missing.length === 0
+        ? "2026-10-31T12:00:01.000Z"
+        : "";
+      user.policy.operationId = body.operationId;
+      ok({
+        ok: true,
+        data: {
+          operationId: body.operationId,
+          state: user.policy.missing.length === 0 ? "succeeded" : "pending_sync",
+          policy: { ...user.policy },
+          credentials: {
+            total: 1,
+            succeeded: user.policy.missing.length === 0 ? 1 : 0,
+            failed: user.policy.missing.length === 0 ? 0 : 1,
+            pending: user.policy.missing.length === 0 ? 0 : 1,
+            unknown: 0,
+            failedOnly: 0,
+            failedItems: user.policy.missing.length === 0 ? [] : [{
+              credentialId: `key-${user.id}`,
+              deviceId: `dev-${user.id}`,
+              errorCode: "policy_sync_in_progress",
+            }],
+          },
+          requiresReconciliation: user.policy.missing.length !== 0,
+          gatewayKey: "should-not-leak-gateway-key",
+          tokenHash: "should-not-leak-token-hash",
+        },
+      });
+      return;
+    }
     const userWrite = /^\/api\/v1\/internal\/admin\/users\/([A-Za-z0-9_-]+)\/(disable|enable)$/.exec(
       url.pathname,
     );
     if (req.method === "POST" && userWrite) {
-      writeCalls.push({ method: req.method, pathname: url.pathname });
+      const body = await requestBody();
+      writeCalls.push({ method: req.method, pathname: url.pathname, body });
       if (writeFailing) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: "write_unavailable" } }));
@@ -355,7 +509,8 @@ function createMockAuthService(expectedToken) {
       url.pathname,
     );
     if (req.method === "POST" && deviceWrite) {
-      writeCalls.push({ method: req.method, pathname: url.pathname });
+      const body = await requestBody();
+      writeCalls.push({ method: req.method, pathname: url.pathname, body });
       if (writeFailing) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: "write_unavailable" } }));
@@ -388,7 +543,8 @@ function createMockAuthService(expectedToken) {
       url.pathname,
     );
     if (req.method === "POST" && credentialWrite) {
-      writeCalls.push({ method: req.method, pathname: url.pathname });
+      const body = await requestBody();
+      writeCalls.push({ method: req.method, pathname: url.pathname, body });
       if (writeFailing) {
         res.writeHead(503, { "content-type": "application/json" });
         res.end(JSON.stringify({ error: { code: "write_unavailable" } }));
@@ -720,7 +876,7 @@ async function adminGet(f, jar, pathname) {
   return { response, body: await response.json() };
 }
 
-async function adminPost(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
+async function adminRequest(f, jar, method, pathname, body, csrfToken = "", extraHeaders = {}) {
   const headers = {
     cookie: jar.header(),
     origin: f.base,
@@ -729,11 +885,23 @@ async function adminPost(f, jar, pathname, body, csrfToken = "", extraHeaders = 
   };
   if (csrfToken) headers["x-csrf-token"] = csrfToken;
   const response = await fetch(`${f.base}${pathname}`, {
-    method: "POST",
+    method,
     headers,
     body: JSON.stringify(body),
   });
   return { response, body: await response.json() };
+}
+
+function adminPost(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
+  return adminRequest(f, jar, "POST", pathname, body, csrfToken, extraHeaders);
+}
+
+function adminPut(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
+  return adminRequest(f, jar, "PUT", pathname, body, csrfToken, extraHeaders);
+}
+
+function adminPatch(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
+  return adminRequest(f, jar, "PATCH", pathname, body, csrfToken, extraHeaders);
 }
 
 function assertNoWriteSecrets(value, f, jar) {
@@ -1151,6 +1319,210 @@ test("C4-03a loads a pinned read-only model catalog and exposes only safe status
   assert.ok(!JSON.stringify(audits[0]).includes(f.catalogPath));
 });
 
+test("policy management expands catalog selectors and reports credential sync state", { timeout: 30000 }, async (t) => {
+  const catalogContent = modelCatalogContent();
+  const catalogDigest = `sha256:${crypto.createHash("sha256").update(catalogContent).digest("hex")}`;
+  const f = await fixture({ catalogContent, catalogDigest });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  assert.ok(current.body.permissions.includes("quota.write"));
+  assert.ok(current.body.permissions.includes("models.write"));
+
+  const quota = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/policy/quota",
+    {
+      reason: "Apply the engineering monthly allowance",
+      expectedVersion: 1,
+      limits: [{ period: "month", tokens: 100000, cost: 25 }],
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "policy-quota-push-1" },
+  );
+  assert.equal(quota.response.status, 200, JSON.stringify(quota.body));
+  assert.match(quota.body.operationId, /^op_/);
+  assert.equal(quota.body.result.operationId, quota.body.operationId);
+  assert.equal(quota.body.result.state, "pending_sync");
+  assert.equal(quota.body.result.policy.version, 2);
+  assert.equal(quota.body.result.policy.quotaStatus, "known");
+  assert.equal(quota.body.result.policy.modelStatus, "unknown");
+  assert.deepEqual(quota.body.result.policy.missing, ["models"]);
+  assert.equal(quota.body.result.requiresReconciliation, true);
+  assert.equal(quota.body.result.credentials.pending, 1);
+
+  const models = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/policy/models",
+    {
+      reason: "Grant the approved engineering model group",
+      expectedVersion: 2,
+      models: ["group/engineering-approved", "company-model/*"],
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "policy-models-push-1" },
+  );
+  assert.equal(models.response.status, 200, JSON.stringify(models.body));
+  assert.equal(models.body.result.operationId, models.body.operationId);
+  assert.equal(models.body.result.state, "succeeded");
+  assert.equal(models.body.result.policy.version, 3);
+  assert.equal(models.body.result.policy.quotaStatus, "known");
+  assert.equal(models.body.result.policy.modelStatus, "known");
+  assert.deepEqual(models.body.result.policy.including, ["quota", "models"]);
+  assert.deepEqual(models.body.result.policy.missing, []);
+  assert.equal(models.body.result.requiresReconciliation, false);
+  assert.equal(models.body.result.credentials.succeeded, 1);
+  assert.deepEqual(models.body.result.policy.models, [
+    "openai/gpt-5.2",
+    "anthropic/claude-sonnet-5",
+    "company-model/*",
+  ]);
+
+  assert.equal(f.auth.writeCalls.length, 2);
+  assert.equal(f.auth.writeCalls[0].method, "PUT");
+  assert.equal(
+    f.auth.writeCalls[0].pathname,
+    "/api/v1/internal/admin/users/usr_bob/policy/quota",
+  );
+  assert.deepEqual(f.auth.writeCalls[0].body, {
+    expectedVersion: 1,
+    limits: [{ period: "month", tokens: 100000, cost: 25 }],
+    operationId: quota.body.operationId,
+  });
+  assert.equal(f.auth.writeCalls[1].method, "PATCH");
+  assert.equal(
+    f.auth.writeCalls[1].pathname,
+    "/api/v1/internal/admin/users/usr_bob/policy/models",
+  );
+  assert.deepEqual(f.auth.writeCalls[1].body, {
+    expectedVersion: 2,
+    models: [
+      "openai/gpt-5.2",
+      "anthropic/claude-sonnet-5",
+      "company-model/*",
+    ],
+    operationId: models.body.operationId,
+  });
+
+  const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  for (const expected of [
+    "Policy",
+    "Quota",
+    "Models",
+    "Sync",
+    "Policy sync",
+    "known",
+    "synced",
+    "pending",
+    "policy_unknown",
+    "ready",
+  ]) {
+    assert.ok(html.includes(expected), `page should include ${expected}`);
+  }
+  assertNoWriteSecrets([quota.body, models.body], f, jar);
+  assertNoWriteSecrets(await fs.readFile(f.config.storePath, "utf8"), f, jar);
+});
+
+test("policy writes replay by payload and reject conflicting idempotency reuse", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const pathname = "/api/v1/admin/users/usr_alice/policy/quota";
+  const body = {
+    reason: "Replay-safe quota update",
+    expectedVersion: 2,
+    limits: [{ period: "month", tokens: 50000, cost: 10 }],
+  };
+  const headers = { "idempotency-key": "policy-idempotency-1" };
+
+  const first = await adminPut(f, jar, pathname, body, current.body.csrfToken, headers);
+  assert.equal(first.response.status, 200, JSON.stringify(first.body));
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const replay = await adminPut(f, jar, pathname, body, current.body.csrfToken, headers);
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.operationId, first.body.operationId);
+  assert.equal(replay.body.result.operationId, first.body.result.operationId);
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const conflict = await adminPut(
+    f,
+    jar,
+    pathname,
+    {
+      ...body,
+      limits: [{ period: "month", tokens: 99999, cost: 10 }],
+    },
+    current.body.csrfToken,
+    headers,
+  );
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.error.code, "idempotency_conflict");
+  assert.equal(conflict.body.error.operationId, first.body.operationId);
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  await bindRole(f, current.body.user.id, "auditor", "org-root");
+  const auditor = await me(f, jar);
+  const forbidden = await adminPut(
+    f,
+    jar,
+    pathname,
+    {
+      reason: "Auditors cannot change quotas",
+      expectedVersion: 3,
+      limits: [],
+    },
+    auditor.body.csrfToken,
+  );
+  assert.equal(forbidden.response.status, 403);
+  assert.equal(forbidden.body.error.code, "forbidden_role");
+  assert.equal(f.auth.writeCalls.length, 1);
+});
+
+test("policy version conflicts stay 409 and are result-audited by the admin service", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const response = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/policy/models",
+    {
+      reason: "Stale policy update must fail closed",
+      expectedVersion: 0,
+      models: ["openai/gpt-test"],
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "policy-stale-1" },
+  );
+  assert.equal(response.response.status, 409, JSON.stringify(response.body));
+  assert.equal(response.body.error.code, "policy_version_conflict");
+  assert.match(response.body.error.operationId, /^op_/);
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const data = await readAdminData(f);
+  const operation = data.adminOperations[response.body.error.operationId];
+  assert.equal(operation.status, "failed");
+  assert.equal(operation.responseStatus, 409);
+  assert.equal(operation.errorCode, "policy_version_conflict");
+  const audits = data.adminAuditLogs.filter((audit) => audit.operationId === operation.id);
+  assert.deepEqual(audits.map((audit) => audit.phase), ["intent", "result"]);
+  assert.equal(audits[1].errorCode, "policy_version_conflict");
+  assertNoWriteSecrets([response.body, data], f, jar);
+});
+
 test("C4-03a fails closed before serving when the catalog is invalid or has a bad digest", { timeout: 30000 }, async () => {
   await assert.rejects(
     () => fixture({ catalogContent: "{\"schemaVersion\":1}" }),
@@ -1278,10 +1650,26 @@ test("M2-C2 global admin write routes call auth-service and return only safe fie
   assert.equal(rotated.body.result.status, "awaiting_device_refresh");
 
   assert.deepEqual(f.auth.writeCalls, [
-    { method: "POST", pathname: "/api/v1/internal/admin/users/usr_alice/disable" },
-    { method: "POST", pathname: "/api/v1/internal/admin/users/usr_alice/enable" },
-    { method: "POST", pathname: "/api/v1/internal/admin/devices/dev_alice/revoke" },
-    { method: "POST", pathname: "/api/v1/internal/admin/credentials/key-alice-new/rotate" },
+    {
+      method: "POST",
+      pathname: "/api/v1/internal/admin/users/usr_alice/disable",
+      body: {},
+    },
+    {
+      method: "POST",
+      pathname: "/api/v1/internal/admin/users/usr_alice/enable",
+      body: {},
+    },
+    {
+      method: "POST",
+      pathname: "/api/v1/internal/admin/devices/dev_alice/revoke",
+      body: {},
+    },
+    {
+      method: "POST",
+      pathname: "/api/v1/internal/admin/credentials/key-alice-new/rotate",
+      body: {},
+    },
   ]);
   assertNoWriteSecrets(
     [disabled.body, enabled.body, revoked.body, rotated.body],

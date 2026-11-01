@@ -1,7 +1,8 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import { OidcClient, normalizeIdentity } from "./oidc.js";
-import { MagpieKeyClient } from "./magpie.js";
+import { MagpieKeyClient, MagpieKeyClientError } from "./magpie.js";
+import { GatewayControlClient, GatewayControlError } from "./gateway-control.js";
 import {
   parseCookies,
   pkceChallenge,
@@ -28,6 +29,7 @@ import {
 
 const MAX_BODY = 64 * 1024;
 const HANDOFF_TTL_MS = 2 * 60 * 1000;
+const POLICY_SYNC_STATES = new Set(["pending", "synced", "failed", "partial", "unknown"]);
 
 class HttpError extends Error {
   constructor(statusCode, code, message, details = {}) {
@@ -159,11 +161,16 @@ function publicCredential(credential, devices) {
     publicKeySha256: device?.publicKeySha256 || "",
     models: Array.isArray(credential.models) ? credential.models : [],
     policyVersion: Number.isSafeInteger(credential.policyVersion) ? credential.policyVersion : 0,
-    policySyncState: ["pending", "synced", "failed"].includes(credential.policySyncState)
+    policySyncState: POLICY_SYNC_STATES.has(credential.policySyncState)
       ? credential.policySyncState
       : "pending",
+    lastPolicyResult: credential.lastPolicyResult || credential.policySyncState || "pending",
     lastPolicyErrorCode: credential.lastPolicyErrorCode || "",
+    lastPolicyAttemptedAt: credential.lastPolicyAttemptedAt || "",
     lastPolicySyncedAt: credential.lastPolicySyncedAt || "",
+    lastPolicyOperationId: credential.lastPolicyOperationId || "",
+    lastPolicyGatewayRequestId: credential.lastPolicyGatewayRequestId || "",
+    lastPolicyRevision: credential.lastPolicyRevision || "",
   };
 }
 
@@ -182,18 +189,10 @@ function policyGateError(policy) {
       { ...sections, policyVersion: Number.isSafeInteger(policy?.version) ? policy.version : 0 },
     );
   }
-  if (!policyIsKnown(policy)) {
-    return new HttpError(
-      409,
-      "policy_sync_in_progress",
-      "The gateway policy has not been confirmed on every active credential",
-      { ...sections, policyVersion: Number.isSafeInteger(policy?.version) ? policy.version : 0 },
-    );
-  }
   return null;
 }
 
-function requireKnownPolicy(user) {
+function requireCompletePolicy(user) {
   const error = policyGateError(user.gatewayPolicy);
   if (error) throw error;
 }
@@ -278,15 +277,11 @@ function markActiveCredentialsPending(userId, data, operationId, now) {
 function refreshPolicyKnownState(user, data, now) {
   const policy = user.gatewayPolicy;
   const credentials = activeCredentialsForUser(data, user.id);
-  const allSynced = credentials.length > 0 && credentials.every(
+  const allSynced = credentials.every(
     (credential) => credential.policyVersion === policy.version
       && credential.policySyncState === "synced",
   );
-  // C4-03b can safely bootstrap a first device when there is no existing
-  // gateway state to reconcile and the policy explicitly has no quota window.
-  // Multi-window policies still require the C4-03c apply/readback path.
-  const emptyPolicyCanBootstrap = policy.limits?.length === 0 && credentials.length === 0;
-  if (policyIsComplete(policy) && (allSynced || emptyPolicyCanBootstrap)) {
+  if (policyIsComplete(policy) && allSynced) {
     policy.quotaStatus = "known";
     policy.modelStatus = "known";
     policy.confirmedAt = now;
@@ -303,6 +298,17 @@ function refreshPolicyKnownState(user, data, now) {
 
 function credentialsSummary(data, user, policyVersion) {
   const credentials = activeCredentialsForUser(data, user.id);
+  const pending = credentials.filter(
+    (credential) => credential.policyVersion !== policyVersion
+      || credential.policySyncState === "pending"
+      || credential.policySyncState === "partial",
+  ).length;
+  const unknown = credentials.filter(
+    (credential) => credential.policySyncState === "unknown",
+  ).length;
+  const failedOnly = credentials.filter(
+    (credential) => credential.policySyncState === "failed",
+  ).length;
   const failedItems = credentials.filter(
     (credential) => !(credential.policyVersion === policyVersion
       && credential.policySyncState === "synced"),
@@ -319,15 +325,55 @@ function credentialsSummary(data, user, policyVersion) {
     total: credentials.length,
     succeeded,
     failed: credentials.length - succeeded,
+    pending,
+    unknown,
+    failedOnly,
     failedItems,
   };
 }
 
-function policyWriteResult(operationId, user, data) {
+function statusSummary(data) {
+  const credentials = Object.values(data.credentials);
+  const active = credentials.filter((credential) => credential.status === "active");
+  const issuanceJournal = Object.fromEntries(
+    ["preparing", "issued", "syncing", "synced", "committed", "failed", "unknown"]
+      .map((state) => [
+        state,
+        data.issuanceJournal.filter((entry) => entry.state === state).length,
+      ]),
+  );
+  const users = Object.values(data.users);
+  return {
+    activeCredentials: active.length,
+    pendingPolicyCredentials: active.filter(
+      (credential) => credential.policySyncState === "pending"
+        || credential.policySyncState === "partial",
+    ).length,
+    failedPolicyCredentials: active.filter(
+      (credential) => credential.policySyncState === "failed",
+    ).length,
+    unknownPolicyCredentials: active.filter(
+      (credential) => credential.policySyncState === "unknown",
+    ).length,
+    unknownPolicyUsers: users.filter(
+      (user) => user.gatewayPolicy?.quotaStatus === "unknown"
+        || user.gatewayPolicy?.modelStatus === "unknown",
+    ).length,
+    pendingPolicyUsers: users.filter(
+      (user) => user.gatewayPolicy?.quotaStatus === "pending"
+        || user.gatewayPolicy?.modelStatus === "pending",
+    ).length,
+    knownPolicyUsers: users.filter((user) => policyIsKnown(user.gatewayPolicy)).length,
+    issuanceJournal,
+  };
+}
+
+function policyWriteResult(operationId, user, data, state = "") {
   const policy = user.gatewayPolicy;
+  const resolvedState = state || (policyIsKnown(policy) ? "succeeded" : "pending_sync");
   return {
     operationId,
-    state: policyIsKnown(policy) ? "succeeded" : "pending_sync",
+    state: resolvedState,
     policy: {
       ...publicPolicy(policy),
       ...policyStatusView(policy),
@@ -412,7 +458,7 @@ function updatePolicyPart(user, part, value, operationId, now) {
 
 function assertIssuancePolicyCurrent(data, userId, policyVersion) {
   const user = policyUser(data, userId);
-  requireKnownPolicy(user);
+  requireCompletePolicy(user);
   if (user.gatewayPolicy.version !== policyVersion) {
     throw new HttpError(
       409,
@@ -421,23 +467,27 @@ function assertIssuancePolicyCurrent(data, userId, policyVersion) {
       { currentVersion: user.gatewayPolicy.version, expectedVersion: policyVersion },
     );
   }
-  if (user.gatewayPolicy.limits.length !== 0) {
-    throw new HttpError(
-      409,
-      "policy_sync_in_progress",
-      "Multi-window quota policies require gateway-control apply/readback",
-      { policyVersion, policySyncState: "pending" },
-    );
-  }
   return user;
 }
 
-function credentialPolicyMetadata(policy, now) {
+function issuancePolicySnapshot(policy) {
+  return {
+    models: structuredClone(policy.models),
+    limits: structuredClone(policy.limits),
+  };
+}
+
+function credentialPolicyMetadata(policy, now, readback = null) {
   return {
     models: structuredClone(policy.models),
     policyVersion: policy.version,
     policySyncState: "synced",
-    lastPolicySyncedAt: now,
+    lastPolicyResult: "synced",
+    lastPolicySyncedAt: readback?.observedAt || now,
+    ...(readback?.gatewayControlRequestId
+      ? { lastPolicyGatewayRequestId: readback.gatewayControlRequestId }
+      : {}),
+    ...(readback?.policyRevision ? { lastPolicyRevision: readback.policyRevision } : {}),
     ...(policy.operationId ? { lastPolicyOperationId: policy.operationId } : {}),
   };
 }
@@ -494,9 +544,11 @@ export async function createEnterpriseAuthServer(config, options = {}) {
   await store.load();
   const oidc = options.oidc || new OidcClient(config.oidc);
   const magpie = options.magpie || new MagpieKeyClient(config.magpie);
+  const gatewayControl = options.gatewayControl || new GatewayControlClient(config.gatewayControl);
   const handoffs = new Map();
   const rate = new Map();
   const deviceRefreshes = new Map();
+  const policyWrites = new Map();
 
   function serializeByDevice(deviceId, operation) {
     const previous = deviceRefreshes.get(deviceId) || Promise.resolve();
@@ -504,6 +556,15 @@ export async function createEnterpriseAuthServer(config, options = {}) {
     deviceRefreshes.set(deviceId, current);
     return current.finally(() => {
       if (deviceRefreshes.get(deviceId) === current) deviceRefreshes.delete(deviceId);
+    });
+  }
+
+  function serializePolicyWrite(userId, operation) {
+    const previous = policyWrites.get(userId) || Promise.resolve();
+    const current = previous.then(operation, operation);
+    policyWrites.set(userId, current);
+    return current.finally(() => {
+      if (policyWrites.get(userId) === current) policyWrites.delete(userId);
     });
   }
 
@@ -555,41 +616,258 @@ export async function createEnterpriseAuthServer(config, options = {}) {
     return store.read((data) => deviceFromToken(data, token));
   }
 
-  async function issueDeviceCredential(user, deviceName) {
-    requireKnownPolicy(user);
-    const policy = user.gatewayPolicy;
-    if (policy.limits.length !== 0) {
-      throw new HttpError(
-        409,
-        "policy_sync_in_progress",
-        "Multi-window quota policies require gateway-control apply/readback",
-        { policyVersion: policy.version, policySyncState: "pending" },
-      );
-    }
-    const issued = await magpie.issue({
-      name: keyName(user, deviceName),
-      models: structuredClone(policy.models),
-      tokens: 0,
-      cost: 0,
+  function issuanceStateForError(error) {
+    if (error instanceof GatewayControlError && error.state === "pending") return "unknown";
+    if (error instanceof MagpieKeyClientError && error.statusCode >= 500) return "unknown";
+    return "failed";
+  }
+
+  async function recordIssuanceState(journalId, patch) {
+    return store.mutate((data) => {
+      const entry = data.issuanceJournal.find((candidate) => candidate.id === journalId);
+      if (!entry) throw new Error(`issuance journal ${journalId} disappeared`);
+      Object.assign(entry, structuredClone(patch), { updatedAt: new Date().toISOString() });
+      return structuredClone(entry);
     });
-    if (!Array.isArray(issued.models)
-      || JSON.stringify(issued.models) !== JSON.stringify(policy.models)) {
-      try {
-        await magpie.revoke(issued.id);
-      } catch (error) {
-        console.error(`unconfirmed gateway key ${issued.id} could not be revoked: ${error.message}`);
-      }
+  }
+
+  function validateIssuedKey(issued, expectedModels) {
+    if (!issued || typeof issued !== "object"
+      || typeof issued.id !== "string" || !/^[A-Za-z0-9_-]{1,256}$/.test(issued.id)
+      || typeof issued.key !== "string" || issued.key.length < 8
+      || typeof issued.expires !== "string" || !Number.isFinite(Date.parse(issued.expires))
+      || !Array.isArray(issued.models)
+      || JSON.stringify(issued.models) !== JSON.stringify(expectedModels)) {
       throw new HttpError(
         502,
         "gateway_policy_unconfirmed",
-        "The gateway did not echo the exact user policy model list",
+        "The gateway did not return a usable key with the exact requested model policy",
       );
     }
-    return {
-      issued,
-      policyVersion: policy.version,
-      policyOperationId: policy.operationId || "",
-    };
+  }
+
+  async function compensateIssuance(journalId, keyId, error) {
+    const state = issuanceStateForError(error);
+    try {
+      await recordIssuanceState(journalId, {
+        state,
+        errorCode: String(error?.code || "issuance_failed").slice(0, 128),
+        failedAt: new Date().toISOString(),
+      });
+    } catch (journalError) {
+      console.error(`issuance journal ${journalId} could not record failure: ${journalError.message}`);
+    }
+    if (!keyId) return;
+    try {
+      await magpie.revoke(keyId);
+      await recordIssuanceState(journalId, {
+        revokedAt: new Date().toISOString(),
+        revocationResult: "revoked",
+      });
+    } catch (revokeError) {
+      console.error(`orphaned gateway key ${keyId} could not be revoked: ${revokeError.message}`);
+      try {
+        await recordIssuanceState(journalId, {
+          state: "unknown",
+          revocationResult: "unknown",
+          revocationErrorCode: String(revokeError.code || "revocation_failed").slice(0, 128),
+        });
+      } catch {
+        // The original issuance error is the actionable failure.
+      }
+    }
+  }
+
+  async function issueDeviceCredential({ user, deviceId = "", credentialId = "", purpose, deviceName, commit }) {
+    const journal = await store.mutate((data) => {
+      const currentUser = data.users[user.id];
+      if (!currentUser || currentUser.status !== "active") {
+        throw new HttpError(403, "user_disabled", "This employee account is not active");
+      }
+      requireCompletePolicy(currentUser);
+      const policy = currentUser.gatewayPolicy;
+      const now = new Date().toISOString();
+      const entry = {
+        id: `eij_${crypto.randomUUID()}`,
+        enterpriseIssuanceId: `eiss_${randomToken(24)}`,
+        userId: currentUser.id,
+        purpose,
+        deviceId,
+        credentialId,
+        policyVersion: policy.version,
+        policyOperationId: policy.operationId || "",
+        request: {
+          name: keyName(currentUser, deviceName),
+          models: structuredClone(policy.models),
+          limits: structuredClone(policy.limits),
+        },
+        state: "preparing",
+        createdAt: now,
+        updatedAt: now,
+      };
+      data.issuanceJournal.push(entry);
+      return structuredClone(entry);
+    });
+
+    let issued = null;
+    try {
+      issued = await magpie.issue({
+        name: journal.request.name,
+        models: journal.request.models,
+        tokens: 0,
+        cost: 0,
+        enterpriseIssuanceId: journal.enterpriseIssuanceId,
+      });
+      validateIssuedKey(issued, journal.request.models);
+      await recordIssuanceState(journal.id, {
+        state: "issued",
+        keyId: issued.id,
+        keyExpiresAt: issued.expires,
+        issuedAt: new Date().toISOString(),
+      });
+      await recordIssuanceState(journal.id, {
+        state: "syncing",
+        syncingAt: new Date().toISOString(),
+      });
+      const readback = await gatewayControl.apply(issued.id, {
+        models: journal.request.models,
+        limits: journal.request.limits,
+      });
+      await recordIssuanceState(journal.id, {
+        state: "synced",
+        gatewayControlRequestId: readback.gatewayControlRequestId,
+        policyRevision: readback.policyRevision,
+        observedAt: readback.observedAt,
+        syncedAt: new Date().toISOString(),
+      });
+
+      let committed;
+      try {
+        committed = await store.mutate((data) => {
+          const currentUser = assertIssuancePolicyCurrent(data, user.id, journal.policyVersion);
+          if (!samePolicyContent(
+            currentUser.gatewayPolicy,
+            journal.request.models,
+            journal.request.limits,
+          )) {
+            throw new HttpError(
+              409,
+              "policy_version_conflict",
+              "The user policy changed while the gateway key was being issued",
+              {
+                currentVersion: currentUser.gatewayPolicy.version,
+                expectedVersion: journal.policyVersion,
+              },
+            );
+          }
+          const now = new Date().toISOString();
+          const result = commit(data, {
+            issued: structuredClone(issued),
+            journal,
+            policy: currentUser.gatewayPolicy,
+            readback,
+            now,
+          });
+          const entry = data.issuanceJournal.find((candidate) => candidate.id === journal.id);
+          if (!entry) throw new Error(`issuance journal ${journal.id} disappeared`);
+          Object.assign(entry, {
+            state: "committed",
+            committedAt: now,
+            updatedAt: now,
+          });
+          return structuredClone(result);
+        });
+      } catch (error) {
+        throw error;
+      }
+      return {
+        ...committed,
+        issued,
+        policyVersion: journal.policyVersion,
+        policyOperationId: journal.policyOperationId,
+        readback,
+        issuanceId: journal.enterpriseIssuanceId,
+      };
+    } catch (error) {
+      await compensateIssuance(journal.id, issued?.id || "", error);
+      throw error;
+    }
+  }
+
+  async function recoverIssuanceJournal() {
+    const pending = await store.read((data) => data.issuanceJournal
+      .filter((entry) => entry.state !== "committed")
+      .map((entry) => structuredClone(entry)));
+    let recovered = 0;
+    let failed = 0;
+    for (const entry of pending) {
+      let keyId = entry.keyId || "";
+      let keyExpiresAt = entry.keyExpiresAt || "";
+      if (entry.state === "preparing" || (entry.state === "unknown" && !keyId)) {
+        try {
+          const issued = await magpie.issue({
+            name: entry.request.name,
+            models: entry.request.models,
+            tokens: 0,
+            cost: 0,
+            enterpriseIssuanceId: entry.enterpriseIssuanceId,
+          });
+          validateIssuedKey(issued, entry.request.models);
+          keyId = issued.id;
+          keyExpiresAt = issued.expires;
+          await recordIssuanceState(entry.id, {
+            state: "issued",
+            keyId,
+            keyExpiresAt,
+            recoveredIssuedAt: new Date().toISOString(),
+          });
+        } catch (error) {
+          failed += 1;
+          try {
+            await recordIssuanceState(entry.id, {
+              state: "unknown",
+              errorCode: String(error?.code || "recovery_issue_unknown").slice(0, 128),
+              recoveryFailedAt: new Date().toISOString(),
+            });
+          } catch {
+            // Leave the durable journal unchanged when it cannot be updated.
+          }
+          continue;
+        }
+      }
+      if (!keyId) {
+        failed += 1;
+        continue;
+      }
+      try {
+        await magpie.revoke(keyId);
+        await recordIssuanceState(entry.id, {
+          state: "failed",
+          keyId,
+          keyExpiresAt,
+          errorCode: "recovered_orphan_revoked",
+          revokedAt: new Date().toISOString(),
+          revocationResult: "revoked",
+          recoveredAt: new Date().toISOString(),
+        });
+        recovered += 1;
+      } catch (error) {
+        failed += 1;
+        try {
+          await recordIssuanceState(entry.id, {
+            state: "unknown",
+            keyId,
+            keyExpiresAt,
+            errorCode: String(error?.code || "recovery_revoke_unknown").slice(0, 128),
+            revocationResult: "unknown",
+            recoveredAt: new Date().toISOString(),
+          });
+        } catch {
+          // A later startup retries the same idempotent revocation.
+        }
+      }
+    }
+    return { recovered, failed };
   }
 
   async function enqueueRevocations(ids) {
@@ -691,28 +969,126 @@ export async function createEnterpriseAuthServer(config, options = {}) {
     });
   }
 
-  async function updateQuotaPolicy(userId, expected, limits, operationId) {
+  async function recordCredentialPolicyResult(userId, credentialId, policyVersion, result) {
     return store.mutate((data) => {
       const user = policyUser(data, userId);
-      assertPolicyVersion(user.gatewayPolicy, expected);
+      if (user.gatewayPolicy.version !== policyVersion) return { superseded: true };
+      const credential = data.credentials[credentialId];
+      if (!credential || credential.userId !== userId || credential.status !== "active") {
+        return { skipped: true };
+      }
       const now = new Date().toISOString();
-      const policy = updatePolicyPart(user, "limits", limits, operationId, now);
-      markActiveCredentialsPending(user.id, data, operationId, now);
+      credential.policyVersion = policyVersion;
+      credential.lastPolicyOperationId = user.gatewayPolicy.operationId || "";
+      credential.lastPolicyAttemptedAt = now;
+      if (result.ok) {
+        credential.models = structuredClone(user.gatewayPolicy.models);
+        credential.policySyncState = "synced";
+        credential.lastPolicyResult = "synced";
+        credential.lastPolicySyncedAt = result.observedAt || now;
+        credential.lastPolicyGatewayRequestId = result.gatewayControlRequestId;
+        credential.lastPolicyRevision = result.policyRevision;
+        delete credential.lastPolicyErrorCode;
+      } else {
+        credential.policySyncState = result.state;
+        credential.lastPolicyResult = result.state;
+        credential.lastPolicyErrorCode = result.errorCode;
+      }
       refreshPolicyKnownState(user, data, now);
-      return policyWriteResult(operationId, user, data);
+      return { ok: result.ok === true };
     });
   }
 
-  async function updateModelsPolicy(userId, expected, models, operationId) {
+  async function syncPolicyToCredentials(userId, policyVersion, operationId) {
+    const snapshot = await store.read((data) => {
+      const user = policyUser(data, userId);
+      if (user.gatewayPolicy.version !== policyVersion) return { superseded: true };
+      return {
+        policy: structuredClone(user.gatewayPolicy),
+        credentials: activeCredentialsForUser(data, userId).map((credential) => credential.id),
+      };
+    });
+    if (snapshot.superseded) {
+      return store.read((data) => {
+        const user = policyUser(data, userId);
+        const result = policyWriteResult(operationId, user, data, "pending_sync");
+        result.superseded = true;
+        return result;
+      });
+    }
+
+    for (const credentialId of snapshot.credentials) {
+      let result;
+      try {
+        const readback = await gatewayControl.apply(credentialId, {
+          models: snapshot.policy.models,
+          limits: snapshot.policy.limits,
+        });
+        result = {
+          ok: true,
+          gatewayControlRequestId: readback.gatewayControlRequestId,
+          observedAt: readback.observedAt,
+          policyRevision: readback.policyRevision,
+        };
+      } catch (error) {
+        const state = error instanceof GatewayControlError && error.state === "pending"
+          ? "unknown"
+          : "failed";
+        result = {
+          ok: false,
+          state,
+          errorCode: String(error?.code || "gateway_control_failed").slice(0, 128),
+        };
+      }
+      const recorded = await recordCredentialPolicyResult(
+        userId,
+        credentialId,
+        policyVersion,
+        result,
+      );
+      if (recorded.superseded) break;
+    }
+
     return store.mutate((data) => {
       const user = policyUser(data, userId);
-      assertPolicyVersion(user.gatewayPolicy, expected);
       const now = new Date().toISOString();
-      const policy = updatePolicyPart(user, "models", models, operationId, now);
-      markActiveCredentialsPending(user.id, data, operationId, now);
       refreshPolicyKnownState(user, data, now);
-      return policyWriteResult(operationId, user, data);
+      const summary = credentialsSummary(data, user, policyVersion);
+      let state = "pending_sync";
+      if (user.gatewayPolicy.version !== policyVersion) state = "pending_sync";
+      else if (policyIsKnown(user.gatewayPolicy)) state = "succeeded";
+      else if (summary.succeeded > 0) state = "partial_success";
+      else if (summary.unknown > 0) state = "unknown";
+      const result = policyWriteResult(operationId, user, data, state);
+      if (user.gatewayPolicy.version !== policyVersion) result.superseded = true;
+      return result;
     });
+  }
+
+  async function updatePolicy(userId, expected, part, value, operationId) {
+    return serializePolicyWrite(userId, async () => {
+      const updated = await store.mutate((data) => {
+        const user = policyUser(data, userId);
+        assertPolicyVersion(user.gatewayPolicy, expected);
+        const now = new Date().toISOString();
+        const policy = updatePolicyPart(user, part, value, operationId, now);
+        markActiveCredentialsPending(user.id, data, operationId, now);
+        refreshPolicyKnownState(user, data, now);
+        return {
+          policyVersion: policy.version,
+          policy: structuredClone(policy),
+        };
+      });
+      return syncPolicyToCredentials(userId, updated.policyVersion, operationId);
+    });
+  }
+
+  async function updateQuotaPolicy(userId, expected, limits, operationId) {
+    return updatePolicy(userId, expected, "limits", limits, operationId);
+  }
+
+  async function updateModelsPolicy(userId, expected, models, operationId) {
+    return updatePolicy(userId, expected, "models", models, operationId);
   }
 
   async function confirmCredentialPolicy(userId, credentialId, expected, operationId, readback) {
@@ -734,6 +1110,8 @@ export async function createEnterpriseAuthServer(config, options = {}) {
       const now = new Date().toISOString();
       credential.policyVersion = policy.version;
       credential.policySyncState = "synced";
+      credential.lastPolicyAttemptedAt = now;
+      credential.lastPolicyResult = "synced";
       credential.lastPolicySyncedAt = validatedReadback.observedAt;
       credential.lastPolicyOperationId = operationId;
       credential.lastPolicyGatewayRequestId = validatedReadback.gatewayControlRequestId;
@@ -822,13 +1200,14 @@ export async function createEnterpriseAuthServer(config, options = {}) {
       // Re-read after taking the device lock so a queued refresh, revoke or
       // rotate cannot make this decision from stale state.
       const current = await store.read((data) => rotationState(data, credentialId));
-      const issuedEnvelope = await issueDeviceCredential(current.user, current.device.name);
-      const issued = issuedEnvelope.issued;
-      try {
-        await store.mutate((data) => {
+      const issuedEnvelope = await issueDeviceCredential({
+        user: current.user,
+        deviceId: current.device.id,
+        credentialId,
+        purpose: "rotate",
+        deviceName: current.device.name,
+        commit: (data, { issued, policy, readback, now }) => {
           const latest = rotationState(data, credentialId);
-          assertIssuancePolicyCurrent(data, latest.user.id, issuedEnvelope.policyVersion);
-          const now = new Date().toISOString();
           latest.credential.status = "revoked";
           latest.credential.revokedAt = now;
           latest.device.gatewayKeyId = issued.id;
@@ -841,31 +1220,25 @@ export async function createEnterpriseAuthServer(config, options = {}) {
             status: "active",
             createdAt: now,
             expiresAt: issued.expires,
-            ...credentialPolicyMetadata(latest.user.gatewayPolicy, now),
+            ...credentialPolicyMetadata(policy, now, readback),
           };
           if (!data.pendingRevocations.some((entry) => entry.id === credentialId)) {
             data.pendingRevocations.push({ id: credentialId, queuedAt: now });
           }
-        });
-      } catch (error) {
-        // The new key never reached durable storage. Revoke it immediately so
-        // an administrative conflict cannot leave a usable orphan behind.
-        try {
-          await magpie.revoke(issued.id);
-        } catch (revokeError) {
-          console.error(`orphaned gateway key ${issued.id} could not be revoked: ${revokeError.message}`);
-        }
-        throw error;
-      }
+          return {
+            credentialId,
+            newCredentialId: issued.id,
+            userId: latest.user.id,
+            deviceId: latest.device.id,
+            status: "awaiting_device_refresh",
+            expiresAt: issued.expires,
+          };
+        },
+      });
 
       const drained = await drainRevocations();
       return {
-        credentialId,
-        newCredentialId: issued.id,
-        userId: current.user.id,
-        deviceId: current.device.id,
-        status: "awaiting_device_refresh",
-        expiresAt: issued.expires,
+        ...issuedEnvelope,
         policyVersion: issuedEnvelope.policyVersion,
         policyOperationId: issuedEnvelope.policyOperationId,
         revocations: drained,
@@ -908,7 +1281,9 @@ export async function createEnterpriseAuthServer(config, options = {}) {
         service: "auth",
         users: Object.keys(data.users).length,
         devices: Object.keys(data.devices).length,
+        credentials: Object.keys(data.credentials).length,
         pendingRevocations: data.pendingRevocations.length,
+        ...statusSummary(data),
       }));
       json(res, 200, status);
       return;
@@ -917,21 +1292,15 @@ export async function createEnterpriseAuthServer(config, options = {}) {
     if (url.pathname.startsWith("/api/v1/internal/admin/")) {
       requireInternalAdmin(req);
       if (req.method === "GET" && url.pathname === "/api/v1/internal/admin/status") {
-        const status = await store.read((data) => {
-          const unknownPolicyUsers = Object.values(data.users).filter(
-            (user) => user.gatewayPolicy?.quotaStatus === "unknown"
-              || user.gatewayPolicy?.modelStatus === "unknown",
-          ).length;
-          return {
-            ok: true,
-            service: "auth",
-            users: Object.keys(data.users).length,
-            devices: Object.keys(data.devices).length,
-            credentials: Object.keys(data.credentials).length,
-            pendingRevocations: data.pendingRevocations.length,
-            unknownPolicyUsers,
-          };
-        });
+        const status = await store.read((data) => ({
+          ok: true,
+          service: "auth",
+          users: Object.keys(data.users).length,
+          devices: Object.keys(data.devices).length,
+          credentials: Object.keys(data.credentials).length,
+          pendingRevocations: data.pendingRevocations.length,
+          ...statusSummary(data),
+        }));
         json(res, 200, status);
         return;
       }
@@ -1179,14 +1548,24 @@ export async function createEnterpriseAuthServer(config, options = {}) {
         }
       }
 
-      const issuedEnvelope = await issueDeviceCredential(user, deviceName);
-      const issued = issuedEnvelope.issued;
       const deviceId = `dev_${randomToken(15)}`;
       const deviceToken = `mdev_${randomToken(32)}`;
       const now = new Date();
       const tokenExpiresAt = new Date(now.getTime() + config.deviceTokenTtlSeconds * 1000);
-      try {
-        await store.mutate((data) => {
+      const issuedEnvelope = await issueDeviceCredential({
+        user,
+        deviceId,
+        purpose: "join",
+        deviceName,
+        commit: (data, { issued, policy, readback, now: committedAt }) => {
+          const currentUser = assertIssuancePolicyCurrent(
+            data,
+            user.id,
+            policy.version,
+          );
+          if (currentUser.status !== "active") {
+            throw new HttpError(403, "user_disabled", "This employee account is not active");
+          }
           data.devices[deviceId] = {
             id: deviceId,
             userId: user.id,
@@ -1200,29 +1579,22 @@ export async function createEnterpriseAuthServer(config, options = {}) {
             gatewayKeyId: issued.id,
             gatewayKeyExpiresAt: issued.expires,
             status: "active",
-            createdAt: now.toISOString(),
-            lastSeenAt: now.toISOString(),
+            createdAt: committedAt,
+            lastSeenAt: committedAt,
           };
-          const currentUser = assertIssuancePolicyCurrent(
-            data,
-            user.id,
-            issuedEnvelope.policyVersion,
-          );
           data.credentials[issued.id] = {
             id: issued.id,
             userId: user.id,
             deviceId,
             status: "active",
-            createdAt: now.toISOString(),
+            createdAt: committedAt,
             expiresAt: issued.expires,
-            ...credentialPolicyMetadata(currentUser.gatewayPolicy, now.toISOString()),
+            ...credentialPolicyMetadata(policy, committedAt, readback),
           };
-        });
-      } catch (error) {
-        await enqueueRevocations([issued.id]);
-        await drainRevocations();
-        throw error;
-      }
+          return { deviceId };
+        },
+      });
+      const issued = issuedEnvelope.issued;
       json(res, 201, {
         user: publicUser(user),
         device: {
@@ -1271,11 +1643,14 @@ export async function createEnterpriseAuthServer(config, options = {}) {
         // Re-read inside the per-device lock. A queued refresh must not use the
         // device or user state that was current when its HTTP request arrived.
         const { device, user } = await requireDevice(req);
-        const issuedEnvelope = await issueDeviceCredential(user, device.name);
-        const issued = issuedEnvelope.issued;
         const oldKeyId = device.gatewayKeyId;
-        try {
-          await store.mutate((data) => {
+        const issuedEnvelope = await issueDeviceCredential({
+          user,
+          deviceId: device.id,
+          credentialId: oldKeyId,
+          purpose: "refresh",
+          deviceName: device.name,
+          commit: (data, { issued, policy, readback, now }) => {
             const current = data.devices[device.id];
             if (!current || current.tokenHash !== device.tokenHash) {
               throw new HttpError(401, "invalid_device_token", "Device token is not valid");
@@ -1286,49 +1661,44 @@ export async function createEnterpriseAuthServer(config, options = {}) {
             if (Date.parse(current.tokenExpiresAt) <= Date.now()) {
               throw new HttpError(401, "device_token_expired", "Device token has expired");
             }
-            const currentUser = data.users[current.userId];
-            if (!currentUser || currentUser.status !== "active") {
+            const currentUser = assertIssuancePolicyCurrent(
+              data,
+              current.userId,
+              policy.version,
+            );
+            if (currentUser.status !== "active") {
               throw new HttpError(403, "user_disabled", "This employee account is not active");
             }
             if (current.gatewayKeyId !== oldKeyId) {
               throw new HttpError(409, "device_key_changed", "The device key changed during refresh; retry");
             }
-            const policyUserState = assertIssuancePolicyCurrent(
-              data,
-              current.userId,
-              issuedEnvelope.policyVersion,
-            );
-
-            if (oldKeyId && data.credentials[oldKeyId]) {
-              data.credentials[oldKeyId].status = "revoked";
-              data.credentials[oldKeyId].revokedAt = new Date().toISOString();
+            if (oldKeyId) {
+              const oldCredential = data.credentials[oldKeyId];
+              if (!oldCredential || oldCredential.status !== "active") {
+                throw new HttpError(409, "credential_not_active", "Credential is not active");
+              }
+              oldCredential.status = "revoked";
+              oldCredential.revokedAt = now;
             }
             current.gatewayKeyId = issued.id;
             current.gatewayKeyExpiresAt = issued.expires;
-            current.lastSeenAt = new Date().toISOString();
+            current.lastSeenAt = now;
             data.credentials[issued.id] = {
               id: issued.id,
               userId: current.userId,
               deviceId: current.id,
               status: "active",
-              createdAt: new Date().toISOString(),
+              createdAt: now,
               expiresAt: issued.expires,
-              ...credentialPolicyMetadata(policyUserState.gatewayPolicy, new Date().toISOString()),
+              ...credentialPolicyMetadata(policy, now, readback),
             };
             if (oldKeyId && !data.pendingRevocations.some((entry) => entry.id === oldKeyId)) {
-              data.pendingRevocations.push({ id: oldKeyId, queuedAt: new Date().toISOString() });
+              data.pendingRevocations.push({ id: oldKeyId, queuedAt: now });
             }
-          });
-        } catch (error) {
-          // The freshly issued key never reached durable storage. Revoke it now
-          // instead of leaving an orphaned credential usable until expiry.
-          try {
-            await magpie.revoke(issued.id);
-          } catch (revokeError) {
-            console.error(`orphaned gateway key ${issued.id} could not be revoked: ${revokeError.message}`);
-          }
-          throw error;
-        }
+            return { deviceId: current.id };
+          },
+        });
+        const issued = issuedEnvelope.issued;
         const drained = await drainRevocations();
         return {
           gateway: {
@@ -1447,5 +1817,20 @@ export async function createEnterpriseAuthServer(config, options = {}) {
   server.on("listening", () => {
     drainRevocations().catch((error) => console.error(`startup revocation drain failed: ${error.message}`));
   });
-  return { server, store, oidc, magpie, handoffs, drainRevocations };
+  const startupRecovery = recoverIssuanceJournal()
+    .catch((error) => {
+      console.error(`startup issuance recovery failed: ${error.message}`);
+      return { recovered: 0, failed: 1 };
+    });
+  return {
+    server,
+    store,
+    oidc,
+    magpie,
+    gatewayControl,
+    handoffs,
+    drainRevocations,
+    recoverIssuanceJournal,
+    startupRecovery,
+  };
 }

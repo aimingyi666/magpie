@@ -149,6 +149,10 @@ type Key struct {
 	// Issues lets the key issue short-lived keys under itself
 	// (POST /v1/magpie/keys); an issued key never can.
 	Issues bool `json:"issues,omitempty"`
+	// EnterpriseIssuanceID and its digest make the issuing HTTP endpoint
+	// idempotent. They are opaque control-plane metadata, never credentials.
+	EnterpriseIssuanceID     string `json:"enterpriseIssuanceId,omitempty"`
+	EnterpriseIssuanceDigest string `json:"enterpriseIssuanceDigest,omitempty"`
 }
 
 // Identity is the gateway key a request came with, its budget, the

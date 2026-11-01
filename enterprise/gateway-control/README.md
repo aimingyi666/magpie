@@ -3,13 +3,15 @@
 `gateway-control` 是管理服务与 Magpie 网关 Key 存储之间的最小特权适配器。
 它不解析人类可读 CLI 文本，不直接读写 `caller-keys.json`，也不暴露任意命令执行能力。
 
-当前实现对应 M2-C4-02。它已完成代码和 Mock 集成测试，但尚未完成真实管理 API
-接入、真实 Magpie 请求行为 E2E、Docker 构建或企业生产验收。
+当前实现对应 M2-C4-02，并已由 admin-service -> auth-service 的 C4-03c 管理链路自动调用。
+它已完成代码和 Mock/故障测试，但尚未完成真实 Magpie 请求行为 E2E、Docker 构建或企业
+生产验收。
 
 ## 调用链
 
 ```text
-admin-service（尚未接入）
+admin-service
+  -> auth-service
   -> 独立服务令牌
   -> gateway-control
   -> magpie gateway-key describe <id> --json
@@ -123,7 +125,9 @@ docker compose --profile gateway-control up -d
   `no-new-privileges`、只读根目录外的 `/tmp` tmpfs；
 - 设置请求、Keep-Alive 和服务自身超时。
 
-当前机器没有 Docker CLI，因此 **Dockerfile 构建、Compose 启动和健康检查尚未实际运行**。
+`--profile auth` 或 `--profile admin` 会自动启动本服务；单独调试时可用
+`--profile gateway-control`。当前机器没有 Docker CLI，因此 **Dockerfile 构建、Compose
+启动和健康检查尚未实际运行**。
 真实企业环境还需验证共享卷文件锁、SELinux/AppArmor、公司反向代理、服务令牌轮换和
 告警接入。
 
@@ -141,12 +145,11 @@ docker compose --profile gateway-control up -d
 
 以下事项必须继续保持为“未完成/未验收”：
 
-- admin-service 尚未调用本适配器；C4-03a 正式模型目录已由 admin-service 独立实现，本服务
-  不拥有、不加载也不修改目录。C4-03b 的策略核心和内部确认接口已在 auth-service 实现，
-  但尚未由 admin-service 编排到本适配器。C4-03c 管理 API 与同步后交付、C4-03d 页面与
-  运营状态仍未实现。
+- C4-03c 已由 admin-service -> auth-service 自动调用本适配器，并完成 issuance journal、
+  apply/readback 后交付、失败补偿和启动恢复的 Mock/故障测试；C4-03d 只完成管理页同步状态
+  展示，仍缺写按钮、完整员工门户、operation/audit 查询和人工对账。
 - 未证明真实 Magpie 的多凭证更新、零额度/低额度实际拒绝和模型白名单行为，属于 C4-04。
-- 未实现部分成功汇总、管理审计串联、人工对账、策略继承和旧凭证迁移。
+- 部分成功汇总已进入 C4-03c 核心测试；人工对账仍未实现，真实网关下的策略继承和旧凭证迁移端到端证据也尚未完成。
 - 未接入 mTLS、公司 CA、反向代理、Docker/Compose 实机和企业 IdP。
 
 因此当前状态是“受控适配器代码已实现并通过 Mock/故障测试”，不是
@@ -155,7 +158,7 @@ docker compose --profile gateway-control up -d
 C4-03b/c 的生产接入还必须遵守：
 
 - `cost` 超过 4 位小数直接返回 `400 invalid_quota`，不得静默四舍五入。
-- `group/<name>` 只由 auth-service 在控制面展开为稳定模型 ID；本适配器和 Magpie 不接收
-  group 表达式。
+- `group/<name>` 只由 admin-service 在控制面展开为稳定模型 ID；auth-service、本适配器和
+  Magpie 都不接收 group 表达式。
 - 本适配器只执行 apply 和独立 describe，不拥有模型目录、策略首次初始化、Key 签发或
   客户端交付顺序；模型目录属于已实现的 C4-03a，其余分别属于 C4-03b/c。
