@@ -1,4 +1,5 @@
 const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || "";
+const stepUpStartUrl = document.querySelector('meta[name="step-up-start-url"]')?.content || "";
 
 function resultText(result) {
   if (!result || typeof result !== "object") return "No operation result was returned.";
@@ -32,6 +33,16 @@ function setResult(form, message, tone = "") {
   if (!output) return;
   output.textContent = message;
   output.dataset.tone = tone;
+}
+
+function offerStepUp(form, errorCode) {
+  if (!stepUpStartUrl || !String(errorCode || "").startsWith("step_up_")) return;
+  const output = form.querySelector(".write-result");
+  if (!output) return;
+  const link = document.createElement("a");
+  link.href = stepUpStartUrl;
+  link.textContent = "Re-authenticate";
+  output.append(" ", link, " to continue.");
 }
 
 function requestBody(form) {
@@ -108,6 +119,7 @@ document.addEventListener("submit", async (event) => {
           + "Reload and inspect the latest operation before trying again.",
         "error",
       );
+      offerStepUp(form, error.code);
       return;
     }
     const result = payload.result || {};

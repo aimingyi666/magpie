@@ -87,6 +87,47 @@ export function loadConfig(env = process.env) {
     60,
     604800,
   );
+  const stepUpClientId = String(env.ADMIN_STEP_UP_OIDC_CLIENT_ID || "").trim();
+  const stepUpClientSecret = String(env.ADMIN_STEP_UP_OIDC_CLIENT_SECRET || "").trim();
+  const stepUpRedirectUri = String(env.ADMIN_STEP_UP_REDIRECT_URI || "").trim();
+  const stepUpConfigured = Boolean(stepUpClientId || stepUpClientSecret || stepUpRedirectUri);
+  const stepUpTtlSeconds = integer(
+    env,
+    "ADMIN_STEP_UP_TTL_SECONDS",
+    600,
+    60,
+    3600,
+  );
+  const stepUpCriticalTtlSeconds = integer(
+    env,
+    "ADMIN_STEP_UP_CRITICAL_TTL_SECONDS",
+    300,
+    30,
+    3600,
+  );
+  const stepUpAuthTimeMaxAgeSeconds = integer(
+    env,
+    "ADMIN_STEP_UP_AUTH_TIME_MAX_AGE_SECONDS",
+    120,
+    30,
+    900,
+  );
+  if (stepUpCriticalTtlSeconds > stepUpTtlSeconds) {
+    throw new Error(
+      "ADMIN_STEP_UP_CRITICAL_TTL_SECONDS must not exceed ADMIN_STEP_UP_TTL_SECONDS",
+    );
+  }
+  if (stepUpConfigured && (!stepUpClientId || !stepUpClientSecret)) {
+    throw new Error(
+      "ADMIN_STEP_UP_OIDC_CLIENT_ID and ADMIN_STEP_UP_OIDC_CLIENT_SECRET "
+      + "are required when step-up authentication is configured",
+    );
+  }
+  if (stepUpClientSecret && stepUpClientSecret.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `ADMIN_STEP_UP_OIDC_CLIENT_SECRET must be at least ${MIN_SECRET_LENGTH} characters`,
+    );
+  }
   if (!approvalCallbackSecret
       && (approvalCallbackIssuer || approvalCallbackAudience)) {
     throw new Error(
@@ -106,6 +147,60 @@ export function loadConfig(env = process.env) {
     );
   }
 
+  const oidc = {
+    issuer: url(env, "ADMIN_OIDC_ISSUER"),
+    clientId: required(env, "ADMIN_OIDC_CLIENT_ID"),
+    clientSecret: secret(env, "ADMIN_OIDC_CLIENT_SECRET"),
+    redirectUri: url(env, "ADMIN_OIDC_REDIRECT_URI", `${publicUrl}/admin/oauth/callback`),
+    scopes: list(env, "ADMIN_OIDC_SCOPES").length
+      ? list(env, "ADMIN_OIDC_SCOPES")
+      : ["openid", "profile", "email"],
+    tokenAuthMethod: String(env.ADMIN_OIDC_TOKEN_AUTH_METHOD || "client_secret_basic").trim(),
+    allowedEmailDomains: list(env, "ADMIN_ALLOWED_EMAIL_DOMAINS").map((value) => value.toLowerCase()),
+    emailClaim: String(env.ADMIN_EMAIL_CLAIM || "email").trim(),
+    nameClaim: String(env.ADMIN_NAME_CLAIM || "name").trim(),
+    requireMfa: bool(env, "ADMIN_REQUIRE_MFA", true),
+    requireVerifiedEmail: bool(env, "ADMIN_REQUIRE_VERIFIED_EMAIL", true),
+    allowedAcrValues: list(env, "ADMIN_ALLOWED_ACR_VALUES"),
+  };
+  let stepUpOidc = null;
+  if (stepUpConfigured) {
+    const redirectUri = url(
+      env,
+      "ADMIN_STEP_UP_REDIRECT_URI",
+      `${publicUrl}/admin/oauth/step-up/callback`,
+    );
+    const scopes = list(env, "ADMIN_STEP_UP_OIDC_SCOPES").length
+      ? list(env, "ADMIN_STEP_UP_OIDC_SCOPES")
+      : oidc.scopes;
+    if (!scopes.includes("openid")) {
+      throw new Error("ADMIN_STEP_UP_OIDC_SCOPES must include openid");
+    }
+    if (stepUpClientId === oidc.clientId) {
+      throw new Error("ADMIN_STEP_UP_OIDC_CLIENT_ID must differ from ADMIN_OIDC_CLIENT_ID");
+    }
+    if (redirectUri === oidc.redirectUri) {
+      throw new Error("ADMIN_STEP_UP_REDIRECT_URI must differ from ADMIN_OIDC_REDIRECT_URI");
+    }
+    stepUpOidc = {
+      issuer: oidc.issuer,
+      clientId: stepUpClientId,
+      clientSecret: stepUpClientSecret,
+      redirectUri,
+      scopes,
+      tokenAuthMethod: oidc.tokenAuthMethod,
+      allowedEmailDomains: oidc.allowedEmailDomains,
+      emailClaim: oidc.emailClaim,
+      nameClaim: oidc.nameClaim,
+      requireMfa: true,
+      requireVerifiedEmail: oidc.requireVerifiedEmail,
+      allowedAcrValues: list(env, "ADMIN_STEP_UP_ALLOWED_ACR_VALUES"),
+      authTimeMaxAgeSeconds: stepUpAuthTimeMaxAgeSeconds,
+      ttlSeconds: stepUpTtlSeconds,
+      criticalTtlSeconds: stepUpCriticalTtlSeconds,
+    };
+  }
+
   const config = {
     bind: String(env.ADMIN_BIND || "0.0.0.0").trim(),
     port,
@@ -115,6 +210,7 @@ export function loadConfig(env = process.env) {
     sessionCookieName: "magpie_enterprise_admin_session",
     csrfCookieName: "magpie_enterprise_admin_csrf",
     loginCookieName: "magpie_enterprise_admin_login",
+    stepUpCookieName: "magpie_enterprise_admin_step_up",
     secureCookie: bool(env, "ADMIN_SECURE_COOKIE", publicUrl.startsWith("https://")),
     sessionTtlSeconds: integer(env, "ADMIN_SESSION_TTL_HOURS", 8, 1, 8) * 3600,
     idleTimeoutSeconds: integer(env, "ADMIN_IDLE_TIMEOUT_MINUTES", 30, 5, 120) * 60,
@@ -125,22 +221,8 @@ export function loadConfig(env = process.env) {
       emails: list(env, "ADMIN_BOOTSTRAP_EMAILS").map((value) => value.toLowerCase()),
       validHours: integer(env, "ADMIN_BOOTSTRAP_VALID_HOURS", 24, 1, 168),
     },
-    oidc: {
-      issuer: url(env, "ADMIN_OIDC_ISSUER"),
-      clientId: required(env, "ADMIN_OIDC_CLIENT_ID"),
-      clientSecret: secret(env, "ADMIN_OIDC_CLIENT_SECRET"),
-      redirectUri: url(env, "ADMIN_OIDC_REDIRECT_URI", `${publicUrl}/admin/oauth/callback`),
-      scopes: list(env, "ADMIN_OIDC_SCOPES").length
-        ? list(env, "ADMIN_OIDC_SCOPES")
-        : ["openid", "profile", "email"],
-      tokenAuthMethod: String(env.ADMIN_OIDC_TOKEN_AUTH_METHOD || "client_secret_basic").trim(),
-      allowedEmailDomains: list(env, "ADMIN_ALLOWED_EMAIL_DOMAINS").map((value) => value.toLowerCase()),
-      emailClaim: String(env.ADMIN_EMAIL_CLAIM || "email").trim(),
-      nameClaim: String(env.ADMIN_NAME_CLAIM || "name").trim(),
-      requireMfa: bool(env, "ADMIN_REQUIRE_MFA", true),
-      requireVerifiedEmail: bool(env, "ADMIN_REQUIRE_VERIFIED_EMAIL", true),
-      allowedAcrValues: list(env, "ADMIN_ALLOWED_ACR_VALUES"),
-    },
+    oidc,
+    stepUpOidc,
     authService: {
       url: url(env, "ADMIN_AUTH_SERVICE_URL"),
       token: secret(env, "ADMIN_AUTH_SERVICE_TOKEN"),

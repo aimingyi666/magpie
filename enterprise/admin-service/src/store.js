@@ -18,6 +18,7 @@ function emptyStore() {
     approvalConsumptions: {},
     approvalCallbackEvents: {},
     approvalCallbackNonces: {},
+    stepUpAssertions: {},
   };
 }
 
@@ -54,6 +55,7 @@ function validateLoaded(value) {
     "approvalConsumptions",
     "approvalCallbackEvents",
     "approvalCallbackNonces",
+    "stepUpAssertions",
   ]) {
     if (!value[key] || typeof value[key] !== "object" || Array.isArray(value[key])) {
       throw new Error(`admin store ${key} must be an object`);
@@ -164,6 +166,41 @@ function validateLoaded(value) {
         || !Number.isFinite(Date.parse(nonce.receivedAt))
         || !Number.isFinite(Date.parse(nonce.expiresAt))) {
       throw new Error("admin store approvalCallbackNonces contains an invalid nonce");
+    }
+  }
+  for (const [sessionHash, assertion] of Object.entries(value.stepUpAssertions)) {
+    if (!/^[a-f0-9]{64}$/.test(sessionHash)
+        || !assertion
+        || typeof assertion !== "object"
+        || Array.isArray(assertion)
+        || assertion.sessionHash !== sessionHash
+        || typeof assertion.subjectId !== "string"
+        || !assertion.subjectId) {
+      throw new Error("admin store stepUpAssertions contains an invalid assertion");
+    }
+    for (const key of [
+      "acr",
+      "ip",
+      "userAgentHash",
+      "accessDigest",
+      "verifiedAt",
+      "expiresAt",
+      "criticalExpiresAt",
+    ]) {
+      if (typeof assertion[key] !== "string") {
+        throw new Error(`admin store step-up assertion ${key} is invalid`);
+      }
+    }
+    if (!Array.isArray(assertion.amr)
+        || assertion.amr.some((method) => typeof method !== "string")
+        || !Number.isSafeInteger(assertion.authTime)
+        || assertion.authTime <= 0
+        || !/^[a-f0-9]{64}$/.test(assertion.userAgentHash)
+        || !/^[a-f0-9]{64}$/.test(assertion.accessDigest)
+        || !Number.isFinite(Date.parse(assertion.verifiedAt))
+        || !Number.isFinite(Date.parse(assertion.expiresAt))
+        || !Number.isFinite(Date.parse(assertion.criticalExpiresAt))) {
+      throw new Error("admin store step-up assertion has invalid fields");
     }
   }
   return value;

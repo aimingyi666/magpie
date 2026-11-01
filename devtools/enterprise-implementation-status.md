@@ -6,14 +6,16 @@
 [`enterprise-master-plan.md`](enterprise-master-plan.md) 和
 [`enterprise-roadmap.md`](enterprise-roadmap.md)。
 
-2026-11-02 方案基线更新到 v3.11。M2-C1 的 auth-service 内部写接口、M2-C2 的四个管理写
+2026-11-02 方案基线更新到 v3.12。M2-C1 的 auth-service 内部写接口、M2-C2 的四个管理写
 接口和 M2-C3 的幂等/管理审计状态机已实现并通过 Mock 测试。当前
-`feat/apr-01b-external-approval` 分支实现了 **M2-C5** 的 operation 详情、脱敏审计分页和
+`feat/apr-01c-step-up` 分支实现了 **M2-C5** 的 operation 详情、脱敏审计分页和
 四种人工对账动作，**M2-E1/APR-01a** 的服务端审批、绑定摘要、职责分离、一次性消费和
-审批系统审计，以及 **APR-01b** 的 HMAC 外部审批回调适配器；对账生成子 operation，不修改
-原 intent/result。admin-service 当前通过 **53 passed, 0 failed**（46 项管理服务集成测试 +
+审批系统审计，**APR-01b** 的 HMAC 外部审批回调适配器，以及 **APR-01c** 的独立 OIDC
+step-up；对账生成子 operation，不修改原 intent/result。APR-01c 覆盖独立 OIDC Client、
+`prompt=login`、`max_age`、`auth_time`、ACR/MFA、会话/IP/User-Agent/角色范围摘要绑定，
+未配置 step-up 时高风险操作返回 `503 step_up_unavailable` 并失败关闭。admin-service 当前通过 **61 passed, 0 failed**（54 项管理服务集成测试 +
 7 项目录专项测试），auth-service 当前通过 **25 passed, 0 failed**，gateway-control 通过
-**15 passed, 0 failed**，合计 **93 passed, 0 failed**。**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
+**15 passed, 0 failed**，合计 **101 passed, 0 failed**。**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
 冒烟；**C4-02** `gateway-control` 受控适配器已通过 15 项 Mock/故障测试；**C4-03a**
 正式只读模型目录、**C4-03b/C4-03c** 用户级策略、幂等签发、issuance journal、自动
 apply/独立回读、失败补偿、启动恢复和同步后交付均已实现，并通过 Mock/故障测试。
@@ -25,8 +27,9 @@ M2-D。**C4-04 完整管理到真实 Magpie 策略流 E2E** 已实现并通过�
 `unknown/pending_sync`、Journal/孤儿 Key 撤销和恢复同步；完整链路覆盖
 `admin-service -> auth-service -> gateway-control -> Magpie -> Mock 上游`。Docker/Compose、
 真实共享卷、真实企业 IdP、反向代理、浏览器自动化 E2E 和生产验收仍未完成。APR-01b 已
-实现 HMAC/Mock 回调协议，但真实 OA/飞书/ServiceNow/Jira 连接器未验证；APR-01c-e 的
-step-up、审批箱和 break-glass，以及 NOTIFY-01 的通知 outbox/渠道仍未实现；
+实现 HMAC/Mock 回调协议，但真实 OA/飞书/ServiceNow/Jira 连接器未验证；APR-01c 的
+step-up 已完成代码和 Mock IdP 集成测试，APR-01d/e 的审批箱和 break-glass 仍未实现；
+NOTIFY-01 的通知 outbox/渠道也未实现；
 M2-D 和 M3-M6 仍未实现；当前仍没有员工对话正文审计。本状态只描述仓库中已经存在并有测试
 证据的能力。
 
@@ -52,8 +55,9 @@ schema v1 的 `gateway-key describe <id> --json` 和原子
 失败补偿、启动恢复和同步后交付。C4-03d 已补管理页额度/模型写表单和员工只读状态门户；
 M2-C5 已补 operation/audit 查询和人工对账后端；M2-E1/APR-01a 已补审批 API、L/M/H/C
 风险、payload/binding SHA-256、非自审批、过期/撤销校验和原子一次性消费。完整管理到真实
-Magpie 策略流 E2E 已经通过。APR-01b 的 HMAC/Mock 外部回调协议已实现，但审批管理 UI、
-真实 OA 连接器、step-up、审批箱、break-glass、通知投递、失败恢复入口、停用/吊销/轮换
+Magpie 策略流 E2E 已经通过。APR-01b 的 HMAC/Mock 外部回调协议和 APR-01c 的独立 OIDC
+step-up 已实现；但审批管理 UI、真实 OA 连接器、真实 IdP/MFA、审批箱、break-glass、
+通知投递、失败恢复入口、停用/吊销/轮换
 页面、完整管理写 UI 和真实身份管理链路仍未实现/未验收。
 M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3/C4-02/C4-03c 尚未完成真实企业
 IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷和 Windows 计划任务的
@@ -64,7 +68,7 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | 使用者 | 当前真实可用 | 当前不可用/不能承诺 |
 | --- | --- | --- |
 | 员工 | 浏览器 OIDC 登录、本人额度/模型/凭证/设备/同步状态只读门户、Mock/本地真实 issuer 加入、设备注册、短期 Key、通过本地 Magpie 调用企业网关、自动刷新脚本、停用后失效 | 不能只靠网页修改本机 Agent；真实企业 IdP、公司反向代理、Windows 计划任务实机、MDM 安装未验收 |
-| 管理员 | 独立管理 OIDC + MFA/ACR、会话/CSRF/IP、RBAC、组织范围，用户/部门/设备/凭证/模型/用量只读视图，正式只读模型目录，四个受控管理写 API，以及额度/模型策略写表单；策略写入会经 auth-service 自动 apply/readback，同步完成前不交付 Key，并返回 `known/pending/partial_success/unknown`；写操作已有幂等重放/冲突、`operationId`、intent/result 审计、operation/audit 查询和受控人工对账；APR-01a 已提供审批申请/决策/撤销 API、审批权限、组织范围校验和一次性消费，APR-01b 已提供 HMAC 外部审批回调适配器 | 审批管理 UI、真实 OA 连接器、step-up、审批箱和 break-glass 未实现/未验收；停用/吊销/轮换尚无页面写表单；查询/对账尚未接入完整页面，失败目标恢复入口、筛选/导出和看板未实现；真实 Magpie/共享卷/IdP/浏览器 E2E 未验收；不能管理 MCP/资源库 |
+| 管理员 | 独立管理 OIDC + MFA/ACR、会话/CSRF/IP、RBAC、组织范围，用户/部门/设备/凭证/模型/用量只读视图，正式只读模型目录，四个受控管理写 API，以及额度/模型策略写表单；策略写入会经 auth-service 自动 apply/readback，同步完成前不交付 Key，并返回 `known/pending/partial_success/unknown`；写操作已有幂等重放/冲突、`operationId`、intent/result 审计、operation/audit 查询和受控人工对账；APR-01a 已提供审批申请/决策/撤销 API、审批权限、组织范围校验和一次性消费，APR-01b 已提供 HMAC 外部审批回调适配器，APR-01c 已提供独立 step-up 和 H/C 写操作门禁 | 审批管理 UI、真实 OA 连接器、真实管理 IdP/MFA、审批箱和 break-glass 未实现/未验收；停用/吊销/轮换尚无页面写表单；查询/对账尚未接入完整页面，失败目标恢复入口、筛选/导出和看板未实现；真实 Magpie/共享卷/IdP/浏览器 E2E 未验收；不能管理 MCP/资源库 |
 | 管理员能看到的员工信息 | 姓名/邮箱/稳定 ID/部门/状态、设备/版本/心跳、凭证元数据、模型、Token/费用/错误/时间 | 不能看对话正文；当前只有 L0 用量元数据；L1/L2/L3 属于 M4 |
 | 安全/审计人员 | 只读用量和授权元数据，角色撤销在下一请求生效 | 没有正文查看、导出审批、告警阻断、SIEM、二次授权 |
 | 全公司配置 | 管理服务从只读 `ADMIN_MODEL_CATALOG_PATH` 加载正式目录并把 group/provider 选择器展开为稳定模型 ID；auth-service 保存和同步用户级策略，gateway-control 执行原子 apply/独立回读；网关提供模型白名单、额度和 IP 白名单 | 当前没有中央 MCP 服务器、资源库、Skills/Instructions/Subagents 下发；M3 才实现；真实共享卷和企业环境未验收 |
@@ -91,8 +95,9 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | M2-C4-03d 页面与运营状态 | 部分实现 | 管理页有额度/模型写表单和完整证据链状态；员工页有本人额度、模型、凭证、设备、同步和恢复提示只读视图；页面 E2E、恢复入口和完整管理写页面未完成 |
 | M2-C4-04 真实 Magpie 行为 E2E | 完整管理到真实策略流已通过 | 管理 OIDC/CSRF、quota/models 分步设置、双设备 Key、真实模型拒绝和 Token 限额、`partial_success`、refresh/rotate 策略继承、故障后 `unknown/pending_sync`、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描均已验证 |
 | M2-C5 操作/审计查询与对账 | 已实现并通过 Mock/故障测试 | operation 详情、脱敏审计分页、签名 cursor、组织范围过滤和四种人工对账动作；原 operation/审计不可改写；真实审计存储和生产运维演练待验收 |
-| M2-E1 APR-01a 服务端审批 | 已实现并通过 Mock/故障测试 | 24 小时有效期、L/M/H/C 风险、规范化 payload/binding SHA-256、申请/批准/拒绝/过期/撤销/预留/消费状态机、禁止自审批、一次性消费、启动恢复失败关闭和系统审计；真实 OA 连接器、step-up、审批箱和 break-glass 未实现/未验收 |
+| M2-E1 APR-01a 服务端审批 | 已实现并通过 Mock/故障测试 | 24 小时有效期、L/M/H/C 风险、规范化 payload/binding SHA-256、申请/批准/拒绝/过期/撤销/预留/消费状态机、禁止自审批、一次性消费、启动恢复失败关闭和系统审计；APR-01c 的独立 step-up 已完成代码和 Mock IdP 集成测试；真实 OA 连接器、真实 IdP/MFA、审批箱和 break-glass 未实现/未验收 |
 | APR-01b 外部审批回调适配器 | 已实现 HMAC/Mock 协议并通过测试 | 原始 body HMAC-SHA256、时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离、审批状态迁移和系统审计；回调不直接执行管理动作；真实飞书/OA/ServiceNow/Jira 连接器和生产回调演练未验证 |
+| APR-01c 独立 OIDC step-up | 已实现并通过 Mock IdP 集成测试 | 独立 OIDC Client/secret/redirect/scopes；`prompt=login`、`max_age`、essential `auth_time`；ACR/MFA、IdP `sub`/email、会话/IP/User-Agent/角色权限/组织范围摘要绑定；H/C 风险写操作和审批门禁；未配置失败关闭；logout/会话过期清理断言；真实 IdP、MFA、反向代理、浏览器和生产验收未完成 |
 | M2-D 看板与运营 | 已冻结契约，未实现 | 无看板、报表、导出和完整运营写 UI；员工只读状态门户已在 C4-03d 部分交付 |
 | M3 中央 MCP/资源库 | 未实现 | 只有产品/架构设计 |
 | M4 会话内容审计 | 未实现 | 目前只有请求元数据和用量 |
@@ -153,8 +158,12 @@ admin-service
 - 审批申请、决策和撤销都要求管理会话、CSRF、理由和对应权限，并写系统审计。审批存储使用
   `approvalRequests`、`approvalDecisions`、`approvalConsumptions`、
   `approvalCallbackEvents` 和 `approvalCallbackNonces` 五个集合；APR-01b 使用独立
-  HMAC 回调端点，验签和 nonce 校验通过后只改变审批状态，不直接执行管理动作。审批管理 UI、
-  真实 OA 连接器、step-up、审批箱、break-glass 和通知 outbox/渠道尚未实现/未验收。
+  HMAC 回调端点，验签和 nonce 校验通过后只改变审批状态，不直接执行管理动作。
+  APR-01c 使用独立 step-up OIDC Client，要求 `prompt=login`、`max_age`、新鲜
+  `auth_time` 和允许的 ACR；断言绑定管理会话哈希、管理员 subject、客户端 IP、
+  User-Agent 哈希及角色/权限/组织范围摘要。H/C 风险写入、审批创建和审批决策必须通过
+  step-up；未配置 step-up 时失败关闭。审批管理 UI、真实 OA 连接器、真实 IdP/MFA、
+  审批箱、break-glass 和通知 outbox/渠道尚未实现/未验收。
 - auth-service 的 policy reconcile 内部接口在同一版本事务中原子更新 models 和 limits，版本
   只增加一次，并为每张活跃凭证各调用一次 gateway-control；旧快照不完整时拒绝回滚。
 
@@ -385,9 +394,26 @@ admin-service
   同一审批被并发复用返回 `409 approval_consumed`，幂等重放发生在审批消费检查之前。
 - 启动恢复把遗留 `reserved` 审批保守地标记为 `consumed`，防止进程重启后重复授权；审批
   申请、决策、撤销、消费和恢复均写系统审计。
-- APR-01b 已实现 HMAC/Mock 外部审批回调协议并通过测试；尚未实现/未验收：审批管理 UI、
-  真实飞书/OA/ServiceNow/Jira 连接器、独立 OIDC step-up/MFA/ACR、串并行多级审批箱、
-  转交、break-glass 和审批通知；这些能力仍按 APR-01c-e 和 NOTIFY-01 的设计边界验收。
+- APR-01b 已实现 HMAC/Mock 外部审批回调协议并通过测试；APR-01c 的独立 OIDC step-up
+  已完成代码和 Mock IdP 集成测试；尚未实现/未验收：审批管理 UI、真实飞书/OA/
+  ServiceNow/Jira 连接器、真实 IdP/MFA、串并行多级审批箱、转交、break-glass 和审批通知。
+
+### APR-01c 独立 OIDC step-up
+
+- `config.js` 增加独立 step-up OIDC Client、Secret、redirect URI、scopes、允许的 ACR
+  值和 TTL；未配置时高风险操作失败关闭。
+- `/admin/oauth/step-up/start` 发起独立授权码 + PKCE 流程，强制 `prompt=login` 和
+  `max_age`；callback 校验 state、nonce、`auth_time` 新鲜度、`acr`/MFA、IdP `sub` 和
+  email 一致性。
+- `stepUpAssertions` 不保存 access token、refresh token、cookie 或 client secret；断言
+  绑定管理会话哈希、管理员 subject、客户端 IP、User-Agent 哈希及角色/权限/组织范围摘要。
+- H/C 风险写入、审批创建和审批决策强制 step-up；TTL 默认 600 秒，关键动作默认 300 秒。
+  logout 和会话过期会清理对应断言。
+- `/api/v1/admin/me` 返回 `stepUp.state`、`startUrl` 和有效期信息；管理页显示近期认证
+  状态，并在 `step_up_*` 错误时提供重新认证入口。
+- 修复了状态读取 bug：`requireStepUp()`、`stepUpState()` 和 `mePayload()` 现接收完整
+  `current` 对象，避免成功认证后仍错误显示 `"state":"required"`。
+- 真实企业 IdP、真实 MFA/条件访问、反向代理、浏览器流程和生产验收仍未执行。
 
 ## 4. 已通过的测试
 
@@ -437,7 +463,7 @@ admin-service
 - C5 策略对账测试覆盖 models+limits 原子更新、version 恰好增加一次、每张活跃凭证各
   apply 一次、stale version 冲突、并发对账只成功一次，以及响应和持久化状态不泄露秘密。
 
-### 4.2 管理服务 M2-A/M2-B/M2-C2/M2-C3/M2-C5/M2-E1/APR-01b/C4-03c
+### 4.2 管理服务 M2-A/M2-B/M2-C2/M2-C3/M2-C5/M2-E1/APR-01b/APR-01c/C4-03c
 
 ```powershell
 $node = 'D:\Environment\node-v26.12.1\node.exe'
@@ -448,7 +474,7 @@ Get-ChildItem enterprise\admin-service\src\*.js | ForEach-Object {
 & $node --test enterprise\admin-service\test\admin-service.test.mjs enterprise\admin-service\test\model-catalog.test.mjs
 ```
 
-结果：`53 passed, 0 failed`（7 项目录专项测试 + 46 项管理服务集成测试）。覆盖：
+结果：`61 passed, 0 failed`（7 项目录专项测试 + 54 项管理服务集成测试）。覆盖：
 
 - 未登录拒绝、管理 OIDC 登录、MFA 拒绝和 `email_verified` 拒绝。
 - 配置 ACR 时向 IdP 发送 `acr_values` 和 essential 的 `acr` claim 请求。
@@ -498,6 +524,10 @@ Get-ChildItem enterprise\admin-service\src\*.js | ForEach-Object {
   组织范围、自审批拒绝和稳定错误码。
 - 审批与动作、目标、理由、payload、策略版本和环境绑定；跨动作、跨目标、修改额度/模型、
   修改理由或策略版本均失败关闭。
+- APR-01c 覆盖独立 OIDC Client/PKCE、`prompt=login`、`max_age`、新鲜 `auth_time`、
+  ACR/MFA、IdP `sub`/email、会话/IP/User-Agent/角色权限/组织范围绑定、H/C 写操作和
+  审批门禁、未配置失败关闭、logout/会话过期清理，以及成功认证后
+  `/api/v1/admin/me` 不再误报 `"state":"required"`。
 - 过期和撤销审批不能授权写操作；并发操作只有一个可消费审批，其他请求返回
   `409 approval_consumed`；启动恢复把遗留 `reserved` 审批失败关闭为 `consumed`。
 - 审批状态迁移、决策和消费记录不包含 Gateway Key、设备令牌、Cookie、token hash、
@@ -670,8 +700,9 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 D 仍不�
 8. 多实例、共享存储、限流分布式化和高可用未实现。
 9. APR-01a 已完成审批 API、状态机、绑定校验、职责分离、一次性消费和系统审计的
    Mock/故障测试；APR-01b 的 HMAC 回调适配器已覆盖原始 body 验签、时间窗、nonce
-   防重放、issuer/audience、eventId 幂等、职责分离和系统审计。审批管理 UI、真实管理 IdP
-   step-up、真实 OA 连接器、串并行审批箱、break-glass 和生产审批演练未实现/未验收。
+  防重放、issuer/audience、eventId 幂等、职责分离和系统审计。APR-01c 的独立 OIDC
+  step-up 已完成代码和 Mock IdP 集成测试；审批管理 UI、真实管理 IdP/MFA、真实 OA
+  连接器、串并行审批箱、break-glass 和生产审批演练未实现/未验收。
    NOTIFY-01 的 outbox、dispatcher、邮件、企业 IM、Webhook、SIEM、工单和死信运营均未实现。
 
 ## 6. M1 验收门槛
@@ -721,15 +752,16 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 D 仍不�
 6. M2-C3 已完成 Mock 验证：幂等重放/冲突、`operationId`、intent/result 审计和审计失败阻断
    均已覆盖；下一步把同一流程接入真实存储和真实管理请求链路。
 7. C4-02 受控适配器已通过 15 项 Mock/故障测试；C4-03b/C4-03c 的 auth-service 核心链路
-   已通过 25 项 auth 回归、53 项 admin 测试和 15 项 gateway-control 测试。下一步在
+   已通过 25 项 auth 回归、61 项 admin 测试和 15 项 gateway-control 测试。下一步在
    Docker 可用环境验证镜像、Compose、
    健康检查和真实共享卷故障恢复；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。
 8. M2-C5 的 `audit-logs`、`operations/{id}`、人工对账和补偿后端已通过 Mock/故障测试；
    下一步在真实审计存储和运维流程中验收，再按 `feat/m2-d-admin-operations` 补齐完整管理
    写 UI、查询/对账页面、看板、导出和运营历史。
-9. APR-01a 已实现服务端审批和一次性消费，APR-01b 已实现 HMAC/Mock 外部审批回调适配器；
-   下一步按 APR-01c-e 接 step-up、审批箱、break-glass 和真实 OA 连接器，再按 NOTIFY-01
-   实现与业务状态同事务的 outbox 和渠道投递。
+9. APR-01a 已实现服务端审批和一次性消费，APR-01b 已实现 HMAC/Mock 外部审批回调适配器，
+   APR-01c 已实现独立 OIDC step-up 和 H/C 门禁并通过 Mock IdP 测试；下一步完成真实
+   IdP/MFA/反向代理验收，再按 APR-01d/e 接审批箱和 break-glass、接入真实 OA 连接器，
+   并按 NOTIFY-01 实现与业务状态同事务的 outbox 和渠道投递。
 10. 每个阶段完成后更新第 9 节，记录实际分支、commit、命令、结果、未覆盖项和秘密扫描；
    没有原始证据时继续保持“未实现/未验收”。
 
@@ -743,19 +775,20 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 D 仍不�
 | M0 企业网关基线 | `feat/enterprise-plan` / `enterprise/` | 企业网关 Compose、员工 Key 开通、客户端加入、验收脚本、Mock 上游 E2E | `enterprise/test/e2e.ps1` | 真实 Magpie 客户端 → 企业网关 → Mock 上游通过；用量按员工 Key 归属 | 正式 TLS、公司 OTLP/SIEM、MDM 分发 |
 | M1 身份与设备 | `feat/enterprise-plan` / `enterprise/auth-service/` | OIDC+PKCE、加入码、设备注册/心跳/刷新/吊销、短期 Key、管理停用接口、并发刷新串行化、凭证元数据 | `node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `25 passed, 0 failed` | 真实企业 IdP、Docker、Windows 计划任务 |
 | M1 真实链路 | `feat/enterprise-plan` / `enterprise/test/auth-e2e.ps1` | 真实 issuer Key、Mock OIDC、真实网关、Mock 上游、刷新、停用、重启和脱敏检查 | `enterprise/test/auth-e2e.ps1 -Magpie ... -Node ...` | 全部 PASS | 真实 IdP、Compose 健康检查、计划任务实机 |
-| M2-A 管理身份底座 | `feat/enterprise-plan` / `enterprise/admin-service/` | 独立管理 OIDC、MFA/ACR、已验证邮箱、会话/CSRF/IP、RBAC、组织范围、服务间独立令牌、最小页面、Compose `admin` profile | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `53 passed, 0 failed`；auth `25 passed, 0 failed` | 真实 IdP、Docker/浏览器/反向代理；C4-03d 剩余能力、C5 生产验收和 D 未完成 |
-| M2-B 只读治理 | `feat/enterprise-plan` / `enterprise/auth-service/`、`enterprise/admin-service/` | 用户/部门/设备/凭证/模型/用量只读 API、凭证元数据、用户组织映射、服务端子树过滤、只读 usage 读取和管理页摘要 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `53 passed, 0 failed`；auth `25 passed, 0 failed` | 真实 `usage.jsonl` 数据卷、真实 IdP、Docker/浏览器/代理、C4-03d 剩余能力、C5 生产验收、D |
+| M2-A 管理身份底座 | `feat/enterprise-plan` / `enterprise/admin-service/` | 独立管理 OIDC、MFA/ACR、已验证邮箱、会话/CSRF/IP、RBAC、组织范围、服务间独立令牌、最小页面、Compose `admin` profile | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `61 passed, 0 failed`；auth `25 passed, 0 failed` | 真实 IdP、Docker/浏览器/反向代理；C4-03d 剩余能力、C5 生产验收和 D 未完成 |
+| M2-B 只读治理 | `feat/enterprise-plan` / `enterprise/auth-service/`、`enterprise/admin-service/` | 用户/部门/设备/凭证/模型/用量只读 API、凭证元数据、用户组织映射、服务端子树过滤、只读 usage 读取和管理页摘要 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `61 passed, 0 failed`；auth `25 passed, 0 failed` | 真实 `usage.jsonl` 数据卷、真实 IdP、Docker/浏览器/代理、C4-03d 剩余能力、C5 生产验收、D |
 | M2-C1 Auth 内部写接口 | `feat/enterprise-plan` / `enterprise/auth-service/` | 内部停用/启用、设备吊销、当前凭证轮换；停用撤销设备/会话/凭证，启用不恢复旧凭据，轮换按设备串行化并清理孤儿 Key | `node --check`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | 当前回归 `25 passed, 0 failed` | admin-service 对外写 API、RBAC/CSRF/幂等/理由/审计、真实 IdP 和真实网关验收 |
-| M2-C2 管理写接口 | `feat/enterprise-plan` / `enterprise/admin-service/` | 四个管理写 API；会话/CSRF/RBAC/组织子树/理由校验；目标预检和响应白名单；依赖故障映射 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | 当前回归 `53 passed, 0 failed`（C2 新增 3 组测试） | 停用/吊销/轮换页面按钮、真实 IdP/代理/网关验收 |
-| M2-C3 幂等与管理审计 | `feat/enterprise-plan` / `enterprise/admin-service/` | `adminOperations`/`adminIdempotency` 集合；键哈希和请求指纹；同键重放/冲突/执行中；intent/result 审计；审计失败阻断；operationId 返回和失败重放 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | `53 passed, 0 failed`（含 7 项目录测试；C3 新增 5 组测试） | 页面 E2E、真实 IdP/代理/网关验收；查询与对账由 C5 提供 |
+| M2-C2 管理写接口 | `feat/enterprise-plan` / `enterprise/admin-service/` | 四个管理写 API；会话/CSRF/RBAC/组织子树/理由校验；目标预检和响应白名单；依赖故障映射 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | 当前回归 `61 passed, 0 failed`（C2 新增 3 组测试） | 停用/吊销/轮换页面按钮、真实 IdP/代理/网关验收 |
+| M2-C3 幂等与管理审计 | `feat/enterprise-plan` / `enterprise/admin-service/` | `adminOperations`/`adminIdempotency` 集合；键哈希和请求指纹；同键重放/冲突/执行中；intent/result 审计；审计失败阻断；operationId 返回和失败重放 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | `61 passed, 0 failed`（含 7 项目录测试；C3 新增 5 组测试） | 页面 E2E、真实 IdP/代理/网关验收；查询与对账由 C5 提供 |
 | C4-01 网关机器协议 | `feat/m2-c4-gateway-policy` 工作区 | `describe --json`、原子 `policy apply --json`、schema v1、64 KiB 输入输出上限、`expectedPolicyRevision`、稳定错误码、无秘密输出 | `go vet ./internal/access ./internal/cli`；`go test -count=1 -timeout=90s ./internal/access`；`go test -count=1 -timeout=120s ./internal/cli -run '^TestGatewayKey'`；`go build ./...`；隔离 `XDG_CONFIG_HOME` 真实二进制冒烟 | 全部通过；schema/模型/额度/冲突/回读/脱敏冒烟通过 | 尚未合入 `main`；无管理 API、真实请求行为 E2E 或生产环境证据 |
 | C4-02 受控网关适配器 | `feat/m2-c4-gateway-control` 工作区 / `enterprise/gateway-control/` | 固定路由、独立 Bearer 服务令牌、固定 argv/`shell: false`、Key ID 白名单、10 秒超时、64 KiB 上限、独立回读、`pending` 保守状态、Dockerfile 和 Compose profile | `node --check enterprise/gateway-control/src/service.js`；`node --check enterprise/gateway-control/test/gateway-control.test.mjs`；`node --test enterprise/gateway-control/test/gateway-control.test.mjs` | `15 passed, 0 failed`；Mock/故障测试通过 | Docker/Compose、真实共享卷、真实 Magpie、mTLS 和生产环境未验收 |
-| C4-03a 正式只读模型目录 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/admin-service/` | 只读 `ADMIN_MODEL_CATALOG_PATH`、严格 JSON、schema v1、稳定模型 ID、显式 Provider 通配符、group 展开、2 MiB 上限、SHA-256 digest、安全状态摘要、启动审计和 `GET /api/v1/admin/models` 正式目录 | `Get-ChildItem enterprise/admin-service/src/*.js \| ForEach-Object { node --check $_.FullName }`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | `53 passed, 0 failed`（7 项目录专项 + 46 项管理集成） | auth-service 不加载目录，只接收稳定 ID；真实 Docker/共享卷、真实 IdP、浏览器、反向代理和生产环境未验收 |
+| C4-03a 正式只读模型目录 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/admin-service/` | 只读 `ADMIN_MODEL_CATALOG_PATH`、严格 JSON、schema v1、稳定模型 ID、显式 Provider 通配符、group 展开、2 MiB 上限、SHA-256 digest、安全状态摘要、启动审计和 `GET /api/v1/admin/models` 正式目录 | `Get-ChildItem enterprise/admin-service/src/*.js \| ForEach-Object { node --check $_.FullName }`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | `61 passed, 0 failed`（7 项目录专项 + 54 项管理集成） | auth-service 不加载目录，只接收稳定 ID；真实 Docker/共享卷、真实 IdP、浏览器、反向代理和生产环境未验收 |
 | C4-03b 用户级策略核心 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/auth-service/` | 版本化 `gatewayPolicy`、0-5 额度窗口、稳定模型、M1 `unknown` 迁移、quota/models 分步设置、缺项失败关闭、`expectedVersion`/`If-Match`、join/refresh/rotate 前置门禁和凭证回读确认 | `node --check enterprise/auth-service/src/service.js`；`node --check enterprise/auth-service/test/auth-service.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | `25 passed, 0 failed` | 真实 E2E、页面剩余能力和生产验收未完成 |
-| C4-03c 管理 API 与同步后交付 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/admin-service/`、`enterprise/auth-service/` | 额度/模型 API、模型选择器展开、payload 幂等、issuance journal、`enterpriseIssuanceId` 幂等签发、apply/readback、同步后交付、失败补偿、启动恢复和 `partial_success` | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | admin `53 passed, 0 failed`；auth `25 passed, 0 failed` | Docker/共享卷、真实 Magpie、真实 IdP、mTLS、生产对账和生产验收未完成 |
+| C4-03c 管理 API 与同步后交付 | `feat/m2-c4-gateway-policy` 工作区 / `enterprise/admin-service/`、`enterprise/auth-service/` | 额度/模型 API、模型选择器展开、payload 幂等、issuance journal、`enterpriseIssuanceId` 幂等签发、apply/readback、同步后交付、失败补偿、启动恢复和 `partial_success` | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | admin `61 passed, 0 failed`；auth `25 passed, 0 failed` | Docker/共享卷、真实 Magpie、真实 IdP、mTLS、生产对账和生产验收未完成 |
 | C4-04 完整管理到真实 Magpie 策略流 E2E | `feat/m2-c4-gateway-policy-e2e` / `enterprise/test/c4-enterprise-policy-e2e.ps1` | 管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、真实模型拒绝和 Token 限额、部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描 | `enterprise/test/c4-enterprise-policy-e2e.ps1 -Magpie <magpie.exe> -Node <node.exe>` | 全部 `PASS`；18 个阶段覆盖真实管理到网关链路 | Docker/共享卷、真实企业 IdP、反向代理、浏览器自动化、C5 生产验收、D 和生产验收未覆盖 |
 | C4-03d | 计划 `feat/m2-d-admin-operations` | C4-03d 已实现管理页额度/模型写表单和员工只读状态门户；页面 E2E、失败设备恢复入口、停用/吊销/轮换页面和查询/对账页面未实现 | 页面/API 静态路径由 Node 测试覆盖 | C4-03d 部分实现 | C4-03d 剩余项 |
-| M2-C5 操作/审计查询与对账 | `feat/m2-c5-operations-audit` / `enterprise/admin-service/`、`enterprise/auth-service/` | operation 详情、脱敏审计分页、签名 cursor、四种人工对账动作、父子 operation、原子 models+limits 更新和逐活跃凭证 apply | `node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | admin `53 passed, 0 failed`；auth `25 passed, 0 failed`；C5 Mock/故障测试通过 | 真实审计存储、生产 IdP/代理、完整查询/对账页面和生产运维演练未验收 |
-| M2-E1 APR-01a 服务端审批 | `feat/m2-e-approval-step-up` / `enterprise/admin-service/` | 四个审批 API、24 小时有效期、L/M/H/C、规范化 payload/binding SHA-256、审批状态机、自审批拒绝、组织范围、一次性消费、启动恢复失败关闭和审批系统审计 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | admin `53 passed, 0 failed`；审批 Mock/故障测试通过 | 审批管理 UI、step-up、审批箱、break-glass、通知 outbox/渠道和生产审批演练未实现/未验收 |
-| APR-01b 外部审批回调适配器 | `feat/apr-01b-external-approval` / `enterprise/admin-service/` | HMAC-SHA256 原始 body 验签、300 秒时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离、审批状态迁移和系统审计；回调不直接执行管理动作 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；变异测试：临时关闭 HMAC 比较后目标测试失败为 `200 !== 401` | admin `53 passed, 0 failed`；HMAC/Mock 回调测试通过 | 真实飞书/OA/ServiceNow/Jira 连接器、生产回调演练、审批管理 UI、step-up、审批箱、break-glass 和通知 outbox/渠道未实现/未验收 |
+| M2-C5 操作/审计查询与对账 | `feat/m2-c5-operations-audit` / `enterprise/admin-service/`、`enterprise/auth-service/` | operation 详情、脱敏审计分页、签名 cursor、四种人工对账动作、父子 operation、原子 models+limits 更新和逐活跃凭证 apply | `node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；`node --test enterprise/auth-service/test/auth-service.test.mjs` | admin `61 passed, 0 failed`；auth `25 passed, 0 failed`；C5 Mock/故障测试通过 | 真实审计存储、生产 IdP/代理、完整查询/对账页面和生产运维演练未验收 |
+| M2-E1 APR-01a 服务端审批 | `feat/m2-e-approval-step-up` / `enterprise/admin-service/` | 四个审批 API、24 小时有效期、L/M/H/C、规范化 payload/binding SHA-256、审批状态机、自审批拒绝、组织范围、一次性消费、启动恢复失败关闭和审批系统审计 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs` | admin `61 passed, 0 failed`；审批 Mock/故障测试通过 | 审批管理 UI、真实 IdP/MFA、审批箱、break-glass、通知 outbox/渠道和生产审批演练未实现/未验收 |
+| APR-01b 外部审批回调适配器 | `feat/apr-01b-external-approval` / `enterprise/admin-service/` | HMAC-SHA256 原始 body 验签、300 秒时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离、审批状态迁移和系统审计；回调不直接执行管理动作 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；变异测试：临时关闭 HMAC 比较后目标测试失败为 `200 !== 401` | admin `61 passed, 0 failed`；HMAC/Mock 回调测试通过 | 真实飞书/OA/ServiceNow/Jira 连接器、生产回调演练、审批管理 UI、真实 IdP/MFA、审批箱、break-glass 和通知 outbox/渠道未实现/未验收 |
+| APR-01c 独立 OIDC step-up | `feat/apr-01c-step-up` / `enterprise/admin-service/` | 独立 OIDC Client、PKCE、`prompt=login`、`max_age`、`auth_time`、ACR/MFA、IdP `sub`/email、会话/IP/User-Agent/角色权限/组织范围绑定、H/C 门禁、未配置失败关闭、logout/会话过期清理和管理页重新认证入口 | `Get-ChildItem src\*.js \| ForEach-Object { node --check $_.FullName }`；`node --test test\admin-service.test.mjs test\model-catalog.test.mjs` | admin `61 passed, 0 failed` | 真实 IdP、真实 MFA/条件访问、反向代理、浏览器流程和 CI 生产验收未执行 |
 | M2-D 管理运营 | 计划 `feat/m2-d-admin-operations` | 仅有完整设计；尚无完整写 UI、看板、导出和运营历史；员工只读状态页已在 C4-03d 部分交付 | 未执行 | 未测试、不可用 | 所有 M2-D 项 |

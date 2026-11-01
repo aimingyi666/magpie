@@ -41,7 +41,7 @@ export class OidcClient {
     return this.jwks;
   }
 
-  async begin() {
+  async begin(options = {}) {
     const discovery = await this.loadDiscovery();
     const nonce = randomToken(24);
     const state = randomToken(24);
@@ -55,16 +55,23 @@ export class OidcClient {
     url.searchParams.set("nonce", nonce);
     url.searchParams.set("code_challenge", pkceChallenge(verifier));
     url.searchParams.set("code_challenge_method", "S256");
+    if (options.promptLogin) url.searchParams.set("prompt", "login");
+    if (options.maxAgeSeconds != null) {
+      url.searchParams.set("max_age", String(options.maxAgeSeconds));
+    }
+    const requestedClaims = {};
     if (this.config.allowedAcrValues?.length) {
       url.searchParams.set("acr_values", this.config.allowedAcrValues.join(" "));
-      url.searchParams.set("claims", JSON.stringify({
-        id_token: {
-          acr: {
-            essential: true,
-            values: this.config.allowedAcrValues,
-          },
-        },
-      }));
+      requestedClaims.acr = {
+        essential: true,
+        values: this.config.allowedAcrValues,
+      };
+    }
+    if (options.requireAuthTime) {
+      requestedClaims.auth_time = { essential: true };
+    }
+    if (Object.keys(requestedClaims).length > 0) {
+      url.searchParams.set("claims", JSON.stringify({ id_token: requestedClaims }));
     }
     return {
       url: url.toString(),
@@ -127,11 +134,45 @@ export class OidcClient {
   }
 }
 
-function authenticationMethods(claims) {
+export function authenticationMethods(claims) {
   const raw = claims.amr;
   if (Array.isArray(raw)) return raw.map((value) => String(value).toLowerCase());
   if (typeof raw === "string") return raw.split(/[\s,]+/).filter(Boolean).map((value) => value.toLowerCase());
   return [];
+}
+
+function strongAuthentication(claims) {
+  const methods = authenticationMethods(claims);
+  const acr = String(claims.acr || "");
+  return methods.some((method) => ["mfa", "otp", "hwk", "swk"].includes(method))
+    || acr.toLowerCase().includes("mfa");
+}
+
+export function validateStepUpAuthentication(claims, config, now = Date.now()) {
+  const authTime = Number(claims?.auth_time);
+  const nowSeconds = Math.floor(now / 1000);
+  if (!Number.isSafeInteger(authTime) || authTime <= 0) {
+    throw new Error("step-up authentication has no valid auth_time");
+  }
+  if (authTime > nowSeconds + 30) {
+    throw new Error("step-up auth_time is in the future");
+  }
+  if (nowSeconds - authTime > config.authTimeMaxAgeSeconds) {
+    throw new Error("step-up authentication is not fresh");
+  }
+  const acr = String(claims.acr || "");
+  if (config.allowedAcrValues?.length) {
+    if (!config.allowedAcrValues.includes(acr)) {
+      throw new Error("step-up authentication context is not allowed");
+    }
+  } else if (!strongAuthentication(claims)) {
+    throw new Error("step-up authentication did not use multi-factor authentication");
+  }
+  return {
+    acr,
+    amr: authenticationMethods(claims),
+    authTime,
+  };
 }
 
 export function normalizeAdminIdentity(claims, config) {
@@ -167,10 +208,7 @@ export function normalizeAdminIdentity(claims, config) {
       throw error;
     }
   } else if (config.requireMfa) {
-    const methods = authenticationMethods(claims);
-    const strong = methods.some((method) => ["mfa", "otp", "hwk", "swk"].includes(method))
-      || String(claims.acr || "").toLowerCase().includes("mfa");
-    if (!strong) {
+    if (!strongAuthentication(claims)) {
       const error = new Error("The management console requires multi-factor authentication");
       error.statusCode = 403;
       error.code = "mfa_required";

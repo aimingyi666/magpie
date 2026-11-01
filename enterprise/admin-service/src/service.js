@@ -2,7 +2,11 @@ import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { AuthServiceClient } from "./auth-client.js";
-import { normalizeAdminIdentity, OidcClient } from "./oidc.js";
+import {
+  normalizeAdminIdentity,
+  OidcClient,
+  validateStepUpAuthentication,
+} from "./oidc.js";
 import {
   adminSubjectId,
   authorize,
@@ -16,8 +20,10 @@ import {
   requestAllowed,
   sessionCookie,
   sessionState,
+  userAgentHash,
   validCsrf,
 } from "./session.js";
+import { clientIp } from "./ip.js";
 import {
   legacyModelCatalog,
   loadModelCatalog,
@@ -120,6 +126,10 @@ const NON_RETRYABLE_OPERATION_ERRORS = new Set([
   "invalid_request",
   "target_org_required",
   "target_not_found",
+  "step_up_required",
+  "step_up_expired",
+  "step_up_binding_mismatch",
+  "step_up_unavailable",
 ]);
 
 class HttpError extends Error {
@@ -168,6 +178,33 @@ function publicIdentity(session) {
     email: session.email,
     name: session.name,
   };
+}
+
+function accessDigest(access) {
+  return sha256(JSON.stringify({
+    roles: [...new Set((access.roles || []).map(String))].sort(),
+    permissions: [...new Set((access.permissions || []).map(String))].sort(),
+    scopeOrgUnitIds: [...new Set((access.scopeOrgUnitIds || []).map(String))].sort(),
+  }));
+}
+
+function stepUpReturnPath(value) {
+  const candidate = String(value || "/admin/").trim();
+  if (!candidate.startsWith("/admin/")
+      || candidate.startsWith("//")
+      || candidate.includes("\\")
+      || candidate.includes("\r")
+      || candidate.includes("\n")) {
+    throw new HttpError(400, "invalid_return_path", "Step-up return path is not allowed");
+  }
+  const parsed = new URL(candidate, "http://localhost");
+  if (parsed.origin !== "http://localhost"
+      || !parsed.pathname.startsWith("/admin/")
+      || parsed.pathname.startsWith("/admin/step-up")
+      || parsed.pathname.startsWith("/admin/oauth/")) {
+    throw new HttpError(400, "invalid_return_path", "Step-up return path is not allowed");
+  }
+  return `${parsed.pathname}${parsed.search}`;
 }
 
 function bootstrapBinding(identity, config) {
@@ -876,7 +913,7 @@ function policyEditor(user, evidence, operation, access) {
   </details>`;
 }
 
-function adminPage(session, access, orgUnits, csrfToken, overview) {
+function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
   const roles = access.roles.length > 0 ? access.roles.join(", ") : "No active role";
   const scopes = access.scopeOrgUnitIds.length > 0 ? access.scopeOrgUnitIds.join(", ") : "None";
   const orgRows = orgUnits.length > 0
@@ -897,12 +934,27 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
       </div>
       <p>Window: ${escapeHtml(usage.window.from)} to ${escapeHtml(usage.window.to)} (UTC).</p>`
     : `<p class="notice">${escapeHtml(overview.usageError || "Usage is not available.")}</p>`;
+  const stepUpLabel = stepUp.authenticated
+    ? (stepUp.criticalAuthenticated
+      ? `verified until ${stepUp.criticalExpiresAt} for critical actions`
+      : `valid for high-risk actions until ${stepUp.expiresAt}; critical actions require re-authentication`)
+    : ({
+      expired: "expired; re-authenticate before the next high-risk action",
+      critical_expired: "expired for critical actions; re-authenticate before continuing",
+      binding_mismatch: "no longer matches this session, role, scope, IP, or browser",
+      unavailable: "not configured; high-risk writes fail closed",
+    }[stepUp.state] || "required before high-risk actions");
+  const stepUpAction = stepUp.startUrl
+    ? ` <a href="${escapeHtml(stepUp.startUrl)}">Re-authenticate</a>.`
+    : "";
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="${escapeHtml(csrfToken)}">
+  <meta name="step-up-state" content="${escapeHtml(stepUp.state)}">
+  <meta name="step-up-start-url" content="${escapeHtml(stepUp.startUrl)}">
   <title>Magpie Enterprise Admin</title>
   <style>
     :root{--ink:#172018;--paper:#f4f0e4;--card:#fffdf6;--line:#d7cfb9;--accent:#b93c2b;--ok:#17643a;--warn:#9a5b00;--danger:#9e2518}
@@ -999,6 +1051,7 @@ function adminPage(session, access, orgUnits, csrfToken, overview) {
   <h2>Visible organization units</h2><ul>${orgRows}</ul>
   <h2>Session</h2>
   <p>Expires at ${escapeHtml(session.expiresAt)}. Every request recalculates roles from the store.</p>
+  <p class="step-up-state">Recent authentication: <strong>${escapeHtml(stepUpLabel)}</strong>.${stepUpAction}</p>
   <form method="post" action="/api/v1/admin/logout">
     <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">
     <button type="submit">Sign out</button>
@@ -1010,6 +1063,7 @@ function clearedSessionCookies(config) {
   return [
     cookieHeader(config, config.sessionCookieName, "", 0),
     cookieHeader(config, config.csrfCookieName, "", 0, { httpOnly: false }),
+    cookieHeader(config, config.stepUpCookieName, "", 0),
   ];
 }
 
@@ -1028,6 +1082,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     data.adminSystemAuditLogs.push(modelCatalogStartupAudit(modelCatalog));
   });
   const oidc = options.oidc || new OidcClient(config.oidc);
+  const stepUpOidc = config.stepUpOidc
+    ? (options.stepUpOidc || new OidcClient(config.stepUpOidc))
+    : null;
   const authService = options.authService || new AuthServiceClient(config.authService);
   const rate = new Map();
   const approvalEnvironmentId = `env_${sha256(new URL(config.publicUrl).origin).slice(0, 24)}`;
@@ -1557,6 +1614,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     const reason = cleanReason(body.reason);
     const payload = approvalBusinessPayload(action, body);
     const target = await resolveApprovalTarget(current.session, action, targetId, payload);
+    await requireStepUp(current, req, action);
     const expected = approvalExpectedBinding({
       requesterSubjectId: current.session.subjectId,
       action,
@@ -1666,6 +1724,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         "The requester cannot decide their own approval",
       );
     }
+    await requireStepUp(current, req, storedApproval.action);
 
     const outcome = await store.mutate((data) => {
       const approval = data.approvalRequests[approvalId];
@@ -1884,7 +1943,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       const session = data.adminSessions[sidHash];
       const state = sessionState(session, req, config);
       if (!state.ok) {
-        if (session) delete data.adminSessions[sidHash];
+        if (session) {
+          delete data.adminSessions[sidHash];
+          delete data.stepUpAssertions[sidHash];
+        }
         return { error: state.code };
       }
       session.lastSeenAt = new Date().toISOString();
@@ -1894,6 +1956,105 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       throw new HttpError(401, result.error, "The management session is no longer valid");
     }
     return result;
+  }
+
+  async function stepUpState(current, req) {
+    const { sidHash, session } = current;
+    if (!config.stepUpOidc || !stepUpOidc) {
+      return {
+        configured: false,
+        state: "unavailable",
+        authenticated: false,
+        criticalAuthenticated: false,
+      };
+    }
+    return store.read((data) => {
+      const assertion = data.stepUpAssertions[sidHash];
+      const access = effectiveAccess(data, session.subjectId);
+      const now = Date.now();
+      const base = {
+        configured: true,
+        authenticated: false,
+        criticalAuthenticated: false,
+        state: "required",
+      };
+      if (!assertion) return base;
+      const publicFields = {
+        verifiedAt: assertion.verifiedAt,
+        expiresAt: assertion.expiresAt,
+        criticalExpiresAt: assertion.criticalExpiresAt,
+        acr: assertion.acr,
+        amr: [...assertion.amr],
+        authTime: assertion.authTime,
+      };
+      if (assertion.sessionHash !== sidHash
+          || assertion.subjectId !== session.subjectId
+          || assertion.ip !== clientIp(req)
+          || assertion.userAgentHash !== userAgentHash(req)
+          || assertion.accessDigest !== accessDigest(access)) {
+        return { ...base, ...publicFields, state: "binding_mismatch" };
+      }
+      if (!Number.isFinite(Date.parse(assertion.expiresAt))
+          || Date.parse(assertion.expiresAt) <= now) {
+        return { ...base, ...publicFields, state: "expired" };
+      }
+      const criticalValid = Number.isFinite(Date.parse(assertion.criticalExpiresAt))
+        && Date.parse(assertion.criticalExpiresAt) > now;
+      return {
+        ...base,
+        ...publicFields,
+        state: criticalValid ? "verified" : "critical_expired",
+        authenticated: true,
+        criticalAuthenticated: criticalValid,
+      };
+    });
+  }
+
+  async function requireStepUp(current, req, action) {
+    const { sidHash, session } = current;
+    const risk = riskForAction(action);
+    if (!["H", "C"].includes(risk)) return null;
+    if (!config.stepUpOidc || !stepUpOidc) {
+      throw new HttpError(
+        503,
+        "step_up_unavailable",
+        "Step-up authentication is not configured",
+      );
+    }
+    const result = await store.read((data) => {
+      const assertion = data.stepUpAssertions[sidHash];
+      const access = effectiveAccess(data, session.subjectId);
+      if (!assertion) return { code: "step_up_required" };
+      if (assertion.sessionHash !== sidHash
+          || assertion.subjectId !== session.subjectId
+          || assertion.ip !== clientIp(req)
+          || assertion.userAgentHash !== userAgentHash(req)
+          || assertion.accessDigest !== accessDigest(access)) {
+        return { code: "step_up_binding_mismatch" };
+      }
+      const expiry = risk === "C" ? assertion.criticalExpiresAt : assertion.expiresAt;
+      if (!Number.isFinite(Date.parse(expiry || "")) || Date.parse(expiry) <= Date.now()) {
+        return { code: "step_up_expired" };
+      }
+      return {
+        assertion: {
+          authTime: assertion.authTime,
+          acr: assertion.acr,
+          amr: [...assertion.amr],
+          expiresAt: assertion.expiresAt,
+          criticalExpiresAt: assertion.criticalExpiresAt,
+        },
+      };
+    });
+    if (result.code) {
+      const messages = {
+        step_up_required: "Re-authenticate before this high-risk action",
+        step_up_expired: "Your recent authentication has expired",
+        step_up_binding_mismatch: "Your session, role, scope, IP, or browser changed",
+      };
+      throw new HttpError(403, result.code, messages[result.code]);
+    }
+    return result.assertion;
   }
 
   async function requirePermission(session, permission, targetOrgUnitId = "") {
@@ -2579,6 +2740,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
 
     await requirePermission(current.session, "operations.reconcile");
     const targetResult = await operationTarget(current.session, parent);
+    await requireStepUp(current, req, "operation.reconcile");
 
     const requestFingerprint = writeRequestFingerprint(
       "operation.reconcile",
@@ -2886,6 +3048,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       ? targetResult.target.id
       : targetResult.target.userId;
     const targetOrgUnitId = activeUserOrgUnit(targetResult.data, targetUserId);
+    await requireStepUp(current, req, options.action);
     const prepared = options.prepare
       ? options.prepare(body, targetResult.target)
       : {};
@@ -3218,7 +3381,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     }
   }
 
-  async function mePayload(req, session) {
+  async function mePayload(req, current) {
+    const { session } = current;
     let token = csrfCookie(req, config);
     const headers = {};
     if (!validCsrf(session, token)) {
@@ -3243,6 +3407,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         orgUnits: visibleOrgUnits(current, access),
       };
     });
+    const stepUp = await stepUpState(current, req);
     return {
       value: {
         user: publicIdentity(session),
@@ -3251,6 +3416,12 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         scopeOrgUnitIds: data.access.scopeOrgUnitIds,
         orgUnits: data.orgUnits,
         session: sessionInfo(session),
+        stepUp: {
+          ...stepUp,
+          startUrl: stepUp.configured
+            ? `/admin/oauth/step-up/start?returnTo=${encodeURIComponent("/admin/")}`
+            : "",
+        },
         csrfToken: token,
       },
       headers,
@@ -3386,6 +3557,139 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/admin/oauth/step-up/start") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      if (!config.stepUpOidc || !stepUpOidc) {
+        throw new HttpError(
+          503,
+          "step_up_unavailable",
+          "Step-up authentication is not configured",
+        );
+      }
+      const returnTo = stepUpReturnPath(url.searchParams.get("returnTo"));
+      const started = await stepUpOidc.begin({
+        promptLogin: true,
+        maxAgeSeconds: config.stepUpOidc.authTimeMaxAgeSeconds,
+        requireAuthTime: true,
+      });
+      const transaction = {
+        ...started.transaction,
+        returnTo,
+        sidHash: current.sidHash,
+        subjectId: current.session.subjectId,
+      };
+      redirect(res, started.url, {
+        "set-cookie": [
+          cookieHeader(
+            config,
+            config.stepUpCookieName,
+            signCookie(JSON.stringify(transaction), config.sessionSecret),
+            600,
+          ),
+        ],
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/admin/oauth/step-up/callback") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      if (!config.stepUpOidc || !stepUpOidc) {
+        throw new HttpError(
+          503,
+          "step_up_unavailable",
+          "Step-up authentication is not configured",
+        );
+      }
+      const cookies = parseCookies(req.headers.cookie);
+      const raw = verifyCookie(cookies[config.stepUpCookieName], config.sessionSecret);
+      if (!raw) throw new HttpError(400, "step_up_expired", "Step-up transaction is missing or expired");
+      let transaction;
+      try {
+        transaction = JSON.parse(raw);
+      } catch {
+        throw new HttpError(400, "step_up_expired", "Step-up transaction is invalid");
+      }
+      if (!safeEqual(url.searchParams.get("state") || "", transaction.state)
+          || transaction.sidHash !== current.sidHash
+          || transaction.subjectId !== current.session.subjectId) {
+        throw new HttpError(
+          403,
+          "step_up_binding_mismatch",
+          "Step-up transaction does not belong to this management session",
+        );
+      }
+      const returnTo = stepUpReturnPath(transaction.returnTo);
+      const completed = await stepUpOidc.complete(url.searchParams.get("code") || "", transaction);
+      let authentication;
+      let identity;
+      try {
+        authentication = validateStepUpAuthentication(
+          completed.claims,
+          config.stepUpOidc,
+        );
+        identity = normalizeAdminIdentity(completed.claims, config.stepUpOidc);
+      } catch (error) {
+        throw new HttpError(
+          403,
+          "step_up_invalid",
+          error instanceof Error ? error.message : "Step-up authentication is invalid",
+        );
+      }
+      if (identity.subject !== current.session.subject
+          || identity.email !== current.session.email) {
+        throw new HttpError(
+          403,
+          "step_up_binding_mismatch",
+          "Step-up identity does not match the management session",
+        );
+      }
+      const verifiedAt = new Date();
+      const expiresAt = new Date(
+        verifiedAt.getTime() + config.stepUpOidc.ttlSeconds * 1000,
+      );
+      const criticalExpiresAt = new Date(
+        Math.min(
+          expiresAt.getTime(),
+          verifiedAt.getTime() + config.stepUpOidc.criticalTtlSeconds * 1000,
+        ),
+      );
+      await store.mutate((data) => {
+        const access = effectiveAccess(data, current.session.subjectId);
+        data.stepUpAssertions[current.sidHash] = {
+          sessionHash: current.sidHash,
+          subjectId: current.session.subjectId,
+          acr: authentication.acr,
+          amr: [...authentication.amr],
+          authTime: authentication.authTime,
+          verifiedAt: verifiedAt.toISOString(),
+          expiresAt: expiresAt.toISOString(),
+          criticalExpiresAt: criticalExpiresAt.toISOString(),
+          ip: clientIp(req),
+          userAgentHash: userAgentHash(req),
+          accessDigest: accessDigest(access),
+        };
+        data.adminSystemAuditLogs.push({
+          id: `audit_${crypto.randomUUID()}`,
+          action: "step_up.verified",
+          timestamp: verifiedAt.toISOString(),
+          actorSubjectId: current.session.subjectId,
+          actorEmail: current.session.email,
+          acr: authentication.acr,
+          amr: [...authentication.amr],
+          authTime: authentication.authTime,
+          expiresAt: expiresAt.toISOString(),
+          criticalExpiresAt: criticalExpiresAt.toISOString(),
+          result: "verified",
+        });
+      });
+      redirect(res, returnTo, {
+        "set-cookie": [cookieHeader(config, config.stepUpCookieName, "", 0)],
+      });
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/admin/") {
       let current;
       try {
@@ -3398,7 +3702,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         redirect(res, "/admin/login");
         return;
       }
-      const payload = await mePayload(req, current.session);
+      const payload = await mePayload(req, current);
       const overview = await adminOverview(current.session);
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
       res.end(adminPage(
@@ -3411,6 +3715,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         payload.value.orgUnits,
         payload.value.csrfToken,
         overview,
+        payload.value.stepUp,
       ));
       return;
     }
@@ -3418,7 +3723,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     if (req.method === "GET" && url.pathname === "/api/v1/admin/me") {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
-      const payload = await mePayload(req, current.session);
+      const payload = await mePayload(req, current);
       json(res, 200, payload.value, payload.headers);
       return;
     }
@@ -3432,6 +3737,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       await requireCsrf(req, current.session, form.get("_csrf") || "");
       await store.mutate((data) => {
         delete data.adminSessions[current.sidHash];
+        delete data.stepUpAssertions[current.sidHash];
       });
       const headers = { "set-cookie": clearedSessionCookies(config) };
       if (htmlForm) {

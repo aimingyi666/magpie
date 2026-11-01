@@ -21,13 +21,14 @@ Agent → magpie(客户端，本地网关) ──→ magpie(服务端网关) ─
 当前可用范围是 M0、M1、M2-A/M2-B、M2-C1/C2/C3 和 M2-C4-01/C4-02/C4-03a/C4-03b 核心，
 以及 C4-03c 的管理 API、签发 journal、自动 apply/独立回读、同步后交付和启动补偿，
 外加 C4-03d 的管理页额度/模型写表单、员工只读状态门户、M2-C5 的查询/对账后端、
-M2-E1/APR-01a 的服务端审批和 APR-01b 的 HMAC 外部审批回调适配器：
+M2-E1/APR-01a 的服务端审批、APR-01b 的 HMAC 外部审批回调适配器和 APR-01c 的独立
+OIDC step-up：
 手工/OIDC 加入、短期 Key、设备注册与吊销、管理身份与只读治理、四个受控管理写 API、
 管理额度/模型 API、持久化幂等、管理审计、审批申请/决策/撤销、审批一次性消费、
 schema v1 的网关策略机器回读/原子写入、受控 `gateway-control` 适配器、正式只读模型目录，
 以及 auth-service 的用户级策略状态机。`gateway-control` 已通过 15 项 Mock/故障测试；
-auth-service 已通过 25 项测试；admin-service 已通过 53 项测试（46 项管理服务集成测试 +
-7 项目录专项测试），当前合计 93 项通过、0 失败。
+auth-service 已通过 25 项测试；admin-service 已通过 61 项测试（54 项管理服务集成测试 +
+7 项目录专项测试），当前合计 101 项通过、0 失败。
 `GET /api/v1/admin/models` 使用正式目录，由 admin-service 将 group/provider 选择器展开为
 稳定模型 ID 后再交给 auth-service。C4-03d 部分实现：管理页已展示策略版本、完整证据链和
 凭证同步状态，并提供额度/模型写表单；员工页可查看本人额度、模型、凭证、设备和同步状态。
@@ -35,7 +36,7 @@ auth-service 已通过 25 项测试；admin-service 已通过 53 项测试（46 
 启动和健康检查，真实共享卷、真实企业 IdP、浏览器、反向代理、Windows 计划任务和 mTLS
 尚未验收；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实
 限额/模型拒绝、多凭证部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key
-撤销和恢复同步；M2-C5、APR-01a 和 APR-01b 后端已实现但生产页面/环境未验收。APR-01b
+撤销和恢复同步；M2-C5、APR-01a、APR-01b 和 APR-01c 后端已实现但生产页面/环境未验收。APR-01b
 当前是 HMAC 回调适配器，真实飞书/OA/ServiceNow/Jira 适配和故障演练未验证；M2-D 和
 M3-M6 仍未实现。当前不是生产就绪版本。
 
@@ -134,10 +135,11 @@ APR-01b 已实现 HMAC-SHA256 外部审批回调适配器：原始 body 验签�
 协议/Mock 能力，真实飞书/OA/ServiceNow/Jira 的字段映射、证书、网络、租户配置和故障
 演练尚未验证。
 
-仍未实现的是独立管理 OIDC step-up/MFA/ACR、内置审批箱、串并行多级审批、转交、
-break-glass、通知 outbox/渠道、真实 OA 连接器和对应运营页面。审批管理 UI 也尚未实现，
-因此当前只能通过受控 API 和 HMAC 回调适配器使用审批，不能把 Mock/API 证据描述成生产
-审批闭环。
+APR-01c 已实现独立管理 OIDC step-up、MFA/ACR、`auth_time` 新鲜度、会话/IP/User-Agent/
+角色范围绑定和 H/C 风险门禁，并通过 Mock IdP 集成测试。仍未实现或未验收的是 APR-01d/e
+的内置审批箱、串并行多级审批、转交、break-glass、通知 outbox/渠道、真实 OA 连接器和
+对应运营页面。审批管理 UI 也尚未实现，因此当前只能通过受控 API 和 HMAC 回调适配器使用
+审批，不能把 Mock/API 证据描述成生产审批闭环。
 
 M2-E 的统一边界是：
 
@@ -152,7 +154,8 @@ APR-01a/b/c
   `operationId` 审计串联。
 - `APR-01b`：外部审批适配器；HMAC/Mock 协议已实现，真实 OA/飞书/ServiceNow/Jira
   连接器和生产回调验收未完成。
-- `APR-01c`：独立管理 OIDC Client 的 step-up/MFA/ACR、短有效期和会话/IP/角色绑定。
+- `APR-01c`：独立管理 OIDC Client 的 step-up/MFA/ACR、短有效期和会话/IP/角色绑定；
+  代码和 Mock IdP 集成测试已完成，真实 IdP/MFA/反向代理和生产验收未完成。
 - `APR-01d`：M2-D 之后提供内置审批箱、串并行步骤、转交/撤回和双人复核。
 - `APR-01e`：15 分钟 break-glass、强制高风险告警和 24 小时事后复核。
 - `NOTIFY-01a`：与业务状态和审计同事务/同文件锁提交的 transactional outbox、租约、
@@ -163,10 +166,11 @@ APR-01a/b/c
   完整参数、Key、token 或 Cookie。
 - `NOTIFY-01d`：通知渠道、规则、投递、抑制、聚合、死信和重试运营页。
 
-当前仓库已有 APR-01b 的 HMAC 外部审批回调适配器，但没有真实 OA 连接器、step-up 中间件、
-outbox、dispatcher、邮件/IM/Webhook/SIEM/工单适配器，也没有审批或通知运营页面。业务请求
-不能同步调用外部通知渠道；渠道故障不能回滚已成功的业务事务，也不能在页面上伪造“已通知”。
-APR-01a/01b 不证明真实 OA、IdP step-up、审批箱、break-glass 或生产通知已完成。
+当前仓库已有 APR-01b 的 HMAC 外部审批回调适配器和 APR-01c 的 step-up 门禁，但没有真实
+OA 连接器、outbox、dispatcher、邮件/IM/Webhook/SIEM/工单适配器，也没有审批或通知运营页面。
+业务请求不能同步调用外部通知渠道；渠道故障不能回滚已成功的业务事务，也不能在页面上伪造
+“已通知”。APR-01a/b/c 不证明真实 OA、真实 IdP step-up、审批箱、break-glass 或生产通知
+已完成。
 
 ## 快速开始
 
@@ -247,9 +251,12 @@ curl http://127.0.0.1:3445/healthz
 ```
 
 在 `.env` 中配置 `ADMIN_OIDC_*`、`ADMIN_SESSION_SECRET`、`ADMIN_ALLOWED_IPS` 和
-`AUTH_INTERNAL_ADMIN_TOKEN`。管理员打开 `https://admin.ai.corp.example/admin/`，使用企业
-账号 + MFA 登录。`ADMIN_BOOTSTRAP_SUBJECTS`/`ADMIN_BOOTSTRAP_EMAILS` 只用于创建有到期时间的
-首个 `super_admin`；正式角色绑定建立后应移除。
+`AUTH_INTERNAL_ADMIN_TOKEN`。高风险动作还需要独立 step-up Client：
+`ADMIN_STEP_UP_OIDC_CLIENT_ID`、`ADMIN_STEP_UP_OIDC_CLIENT_SECRET` 和
+`ADMIN_STEP_UP_REDIRECT_URI`；可选设置 `ADMIN_STEP_UP_ALLOWED_ACR_VALUES` 和三个 TTL。
+管理员打开 `https://admin.ai.corp.example/admin/`，使用企业账号 + MFA 登录。
+`ADMIN_BOOTSTRAP_SUBJECTS`/`ADMIN_BOOTSTRAP_EMAILS` 只用于创建有到期时间的首个
+`super_admin`；正式角色绑定建立后应移除。
 
 当前管理面能认证管理员、执行 CSRF/IP/会话保护、计算角色和组织范围，并提供最小管理页、
 `/api/v1/admin/me`、组织单元、用户、部门、设备、凭证、模型和用量只读视图。模型视图已改为
@@ -261,8 +268,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
 已有可追溯性。C4-03c 已提供额度/模型管理 API、自动同步、同步后交付和失败状态持久化；
 管理页可查看策略版本、凭证同步状态、最后同步时间和错误码，并可提交额度/模型策略；员工
 页可查看本人额度、模型、凭证、设备和同步状态。M2-C5 已提供 operation/audit 查询和人工
-对账后端，APR-01a 已提供审批 API 和一次性消费；这些后端尚未接入完整页面。停用/吊销/
-轮换页面、失败恢复入口、完整筛选/导出和看板仍未实现。详见
+对账后端，APR-01a 已提供审批 API 和一次性消费，APR-01c 已提供 H/C 风险 step-up 门禁
+和重新认证入口；这些后端尚未接入完整审批/运营页面。停用/吊销/轮换页面、失败恢复入口、
+完整筛选/导出和看板仍未实现。详见
 [`admin-service/README.md`](admin-service/README.md)。
 
 ## 5. 当前员工与管理员流程（只列已实现）
@@ -303,8 +311,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
    refresh/rotate 继承；Docker/共享卷、真实企业 IdP、反向代理和浏览器 E2E 仍未验收。
 6. 高风险写操作在 APR-01a 中必须先通过审批 API 获得有效审批，并在写入时一次性消费；
    申请人不能审批自己的请求。APR-01b 可由受信任外部系统通过 HMAC 回调批准/拒绝，但回调
-   只改变审批状态，不直接执行管理动作。当前没有审批管理 UI、真实 OA 连接器、step-up、
-   审批箱、break-glass 和通知投递。
+   只改变审批状态，不直接执行管理动作。APR-01c 要求 H/C 风险审批创建、决策和写入通过
+   新鲜独立 step-up；未配置时失败关闭。当前没有审批管理 UI、真实 OA 连接器、审批箱、
+   break-glass 和通知投递。
 7. 管理员当前**不能下发 MCP 服务器、企业 Skills/Instructions 或中央资源库**。MCP 治理和
    企业资源库属于 M3，尚未实现；现有管理面只能展示只读元数据、四个受控写 API，以及
    通过 API 调用的额度/模型策略写入。
@@ -316,9 +325,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
 员工不是“只通过网页就能设置本地 Agent”。已实现的闭环是“网页 OIDC 授权 + 本地 Magpie
 落配置”；员工网页可以只读查看本人策略、凭证、设备和同步状态。管理员也不是“完整企业
 控制台”，当前具备身份底座、只读治理、四个受控写 API、额度/模型策略写表单和完整证据链
-状态，以及 C5 查询/对账、APR-01a 审批后端和 APR-01b HMAC 回调适配器；C4-04 的真实管理
-链路 E2E 已通过，但仍缺少停用/吊销/轮换页面、查询/对账/审批页面、真实 OA 连接器、
-step-up、审批箱、break-glass、通知、Docker/共享卷、真实企业 IdP、浏览器和生产验收。
+状态，以及 C5 查询/对账、APR-01a 审批后端、APR-01b HMAC 回调适配器和 APR-01c step-up
+门禁；C4-04 的真实管理链路 E2E 已通过，但仍缺少停用/吊销/轮换页面、查询/对账/审批页面、
+真实 OA 连接器、审批箱、break-glass、通知、Docker/共享卷、真实企业 IdP、浏览器和生产验收。
 在 C4-03d 剩余项、C5 UI、M2-E 剩余项、M2-D、M3/M4 和生产验收完成前，整体只能描述为
 “可演示、可受控技术试点”。
 
@@ -366,7 +375,8 @@ auth-service 重启和凭据脱敏。脚本通过本机非回环 IPv4 访问网�
   策略同步；本地真实 issuer 链路已通过，真实企业 IdP、Docker 和计划任务仍需完整验收。
 - 当前 auth 的 `AUTH_ADMIN_TOKEN` 仍是 M1 最小接口凭据，不应继续扩展成生产管理后台。
 - `enterprise/admin-service` 已实现 M2-A 的管理 OIDC、MFA/ACR、已验证邮箱、会话、CSRF、
-  IP 限制、RBAC、组织范围、独立服务令牌和最小管理页；已通过 Mock 单元/集成测试。
+  IP 限制、RBAC、组织范围、独立服务令牌、最小管理页和 APR-01c step-up；已通过 Mock
+  单元/集成测试。
 - M2-B 已实现用户、部门、设备、凭证、模型和用量只读 API，服务端组织范围过滤、只读
   `usage.jsonl` 读取、用户-部门显式映射和管理页摘要；Mock 集成测试通过。
 - Auth 服务的 M2-C1 内部写接口和 admin-service 的 M2-C2 四个对外写接口已实现并通过 Mock
@@ -380,7 +390,8 @@ auth-service 重启和凭据脱敏。脚本通过本机非回环 IPv4 访问网�
   已补管理页额度/模型写表单、完整证据链状态和员工只读状态门户。C4-04 已通过隔离真实
   Magpie 的完整管理链路 E2E；操作查询、审计查询和人工对账属于 M2-C5；停用/吊销/轮换
   后端已实现；APR-01a 已提供审批 API、绑定校验、职责分离和一次性消费。审批 UI、外部
-  OA、step-up、审批箱、break-glass 和通知未实现；停用/吊销/轮换页面、完整筛选/分页、
+  OA、审批箱、break-glass 和通知未实现；APR-01c step-up 已实现代码和 Mock IdP 集成
+  测试，但真实 IdP/MFA/反向代理和生产验收未完成。停用/吊销/轮换页面、完整筛选/分页、
   导出和看板仍未实现。真实 IdP、Compose、浏览器、反向代理、真实共享卷和真实用量卷也
   尚未验收。当前不是 mTLS。
 

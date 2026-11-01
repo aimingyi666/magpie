@@ -3,7 +3,7 @@
 独立的企业管理控制面。当前版本完成 **M2-A 管理身份底座**、**M2-B 只读治理**、
 **M2-C2 管理写接口与权限映射**、**M2-C3 幂等与 intent/result 管理审计**和
 **M2-C5 操作/审计查询与对账**、**M2-E1/APR-01a 服务端审批**，以及
-**APR-01b HMAC 外部审批回调适配器**：管理 OIDC、
+**APR-01b HMAC 外部审批回调适配器**和 **APR-01c 独立 OIDC step-up**：管理 OIDC、
 会话、CSRF、RBAC、组织范围、用户/部门/设备/凭证/模型/用量只读视图、只读 `usage.jsonl`
 汇总，以及停用/启用用户、吊销设备和轮换当前凭证四个受控写接口。Auth 服务的
 **M2-C1 内部写接口**继续只供服务间调用。
@@ -14,7 +14,7 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 53 项管理测试通过（46 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
+当前总计 61 项管理测试通过（54 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
 CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据链成立时显示“已生效”；
@@ -30,6 +30,12 @@ APR-01b 已提供带 HMAC-SHA256、时间窗、nonce 防重放、issuer/audience
 分离的 **Mock 外部审批回调适配器**。真实飞书/OA/ServiceNow/Jira 的字段映射、网络、
 证书、租户配置和故障演练尚未验证，不能把该适配器描述成已完成真实 OA 集成。
 
+APR-01c 已提供独立 OIDC Client 的 step-up：`prompt=login`、`max_age`、essential
+`auth_time`、MFA/ACR、`sub`/邮箱一致性校验，以及会话、管理员、IP、User-Agent 和
+角色/权限/组织范围摘要绑定。H/C 风险写入、审批创建和审批决策必须通过新鲜 step-up；
+普通 TTL 默认 10 分钟，关键动作 TTL 默认 5 分钟，`auth_time` 默认最多 2 分钟。
+未配置 step-up 时高风险动作返回 `503 step_up_unavailable`，不会降级放行。
+
 完整设计见
 [`../../devtools/enterprise-feature-spec.md`](../../devtools/enterprise-feature-spec.md)
 第 12.1-12.9 节；M2-C 的接口、幂等和审计状态机见第 12.8.1 节。真实实现状态见
@@ -42,12 +48,17 @@ APR-01b 已提供带 HMAC-SHA256、时间窗、nonce 防重放、issuer/audience
 - 独立管理 OIDC Authorization Code + PKCE，不复用员工 OIDC Client。
 - 管理登录要求 MFA；支持通过 `amr`/`acr` 判断，也支持向 IdP 请求指定 `acr_values`。
 - 默认要求 `email_verified=true`，可在确认 IdP 契约后显式关闭。
+- 高风险操作使用独立管理 OIDC Client 做 step-up，强制 `prompt=login`、`max_age` 和
+  essential `auth_time`；普通/关键动作分别使用独立 TTL。
+- step-up assertion 绑定当前会话、管理员 `sub`、IP、User-Agent 和角色/权限/组织范围摘要；
+  身份、权限、网络或浏览器变化后要求重新认证。
 - `HttpOnly` 管理会话 Cookie、独立 CSRF Cookie、绝对/空闲超时、IP 和 User-Agent 绑定。
 - 管理 IP 允许列表，配置错误时 fail closed。
 - 每次请求重新计算角色和组织范围，角色撤销在下一次请求立即生效。
 - 服务间调用使用独立 `AUTH_INTERNAL_ADMIN_TOKEN`，不接受浏览器 Cookie 或员工 admin token。
 - 原子 JSON 存储，损坏文件不会被当成空存储。
 - 最小管理页面 `/admin/`、`/api/v1/admin/me`、组织范围和健康检查。
+- 管理页和写表单会显示近期认证状态；`step_up_*` 错误提供重新认证入口。
 - 用户、部门、设备、凭证、模型和用量的只读 API；服务端按组织子树过滤。
 - 用户与部门使用显式 `userOrgUnits` 映射，不按邮箱或姓名猜部门。
 - 用量只读挂载企业网关数据卷，按 `callerKeyId -> credential -> user -> 组织` 归属；不返回
@@ -171,13 +182,28 @@ M2-C4 工作包。
 2. 使用独立的管理 OIDC Client，不要复用员工登录 Client。
 3. 在 IdP 启用 MFA/条件访问；若 IdP 支持约定的认证上下文，设置
    `ADMIN_ALLOWED_ACR_VALUES`。
-4. 生成互相独立的高熵值：
+4. 为 step-up 再登记一个独立 Client 和回调：
+
+   ```text
+   ADMIN_PUBLIC_URL/admin/oauth/step-up/callback
+   ```
+
+   配置 `ADMIN_STEP_UP_OIDC_CLIENT_ID`、`ADMIN_STEP_UP_OIDC_CLIENT_SECRET` 和
+   `ADMIN_STEP_UP_REDIRECT_URI`。这些值必须成组配置；step-up Client ID 和回调也不能与
+   普通管理登录相同。若 IdP 支持约定的认证上下文，另行设置
+   `ADMIN_STEP_UP_ALLOWED_ACR_VALUES`。
+5. 生成互相独立的高熵值：
 
    ```text
    ADMIN_SESSION_SECRET
    ADMIN_OIDC_CLIENT_SECRET
+   ADMIN_STEP_UP_OIDC_CLIENT_SECRET
    AUTH_INTERNAL_ADMIN_TOKEN
    ```
+
+   step-up TTL 可通过 `ADMIN_STEP_UP_TTL_SECONDS`（默认 600 秒）、
+   `ADMIN_STEP_UP_CRITICAL_TTL_SECONDS`（默认 300 秒）和
+   `ADMIN_STEP_UP_AUTH_TIME_MAX_AGE_SECONDS`（默认 120 秒）收紧；关键 TTL 不得大于普通 TTL。
 
 `AUTH_INTERNAL_ADMIN_TOKEN` 由 auth-service 和 admin-service 共用，只在 Compose/内网中传递。
 它必须不同于 `AUTH_ADMIN_TOKEN`、员工设备令牌、Gateway Key 和 issuer Key，且不能进入浏览器。
@@ -258,6 +284,7 @@ approvalDecisions
 approvalConsumptions
 approvalCallbackEvents
 approvalCallbackNonces
+stepUpAssertions
 ```
 
 当前还没有角色/组织写 API，因此试点初始化时可以由受控运维流程写入 `orgUnits`、
@@ -282,8 +309,10 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 | `GET` | `/healthz` | 未认证存活和存储计数 |
 | `GET` | `/admin/login` | 开始管理 OIDC 登录 |
 | `GET` | `/admin/oauth/callback` | 管理 OIDC 回调 |
+| `GET` | `/admin/oauth/step-up/start` | 为当前管理会话开始独立 OIDC step-up；只允许站内 `/admin/` 返回路径 |
+| `GET` | `/admin/oauth/step-up/callback` | step-up 回调；校验 state、PKCE、`auth_time`、MFA/ACR 和原管理员身份 |
 | `GET` | `/admin/` | 最小管理页面 |
-| `GET` | `/api/v1/admin/me` | 当前身份、角色、权限、范围和 CSRF token |
+| `GET` | `/api/v1/admin/me` | 当前身份、角色、权限、范围、CSRF token 和 step-up 状态 |
 | `POST` | `/api/v1/admin/logout` | 注销会话；表单请求会跳回登录页 |
 | `GET` | `/api/v1/admin/org-units` | 当前管理员可见组织 |
 | `GET` | `/api/v1/admin/org-units/{id}` | 单个组织，服务端校验范围 |
@@ -319,7 +348,9 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 `approval_callback_invalid`、`approval_callback_timestamp_invalid`、
 `approval_callback_signature_invalid`、`approval_callback_issuer_invalid`、
 `approval_callback_audience_invalid`、`approval_callback_replay`、
-`approval_callback_conflict` 和 `approval_callback_scope`。
+`approval_callback_conflict` 和 `approval_callback_scope`。APR-01c 另有
+`step_up_required`、`step_up_expired`、`step_up_binding_mismatch`、
+`step_up_unavailable` 和 `step_up_invalid`。
 
 外部回调契约：
 
@@ -369,7 +400,7 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\admin-service.test.mjs test\model-catalog.test.mjs
 ```
 
-2026-11-02 的实际结果：`53 passed, 0 failed`（46 项管理服务集成测试 + 7 项目录专项测试）。
+2026-11-02 的实际结果：`61 passed, 0 failed`（54 项管理服务集成测试 + 7 项目录专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
 拒绝、用户详情跨范围拒绝、会话过期、IP fail-closed、依赖不可用、凭证元数据、用量归属、
@@ -389,13 +420,17 @@ CSRF/权限/组织范围/自审批拒绝、动作/目标/理由/payload/策略�
 消费、并发复用和启动恢复失败关闭。APR-01b 覆盖回调配置成组校验、HMAC 原始 body 验签、
 时间窗、issuer/audience、nonce 重放、
 eventId 幂等、错误签名/媒体类型/缺失头、审批状态和职责分离、过期/撤销/已消费失败关闭、
-旧 store 集合迁移和 secret 不落响应/存储。管理服务当前为 `53 passed, 0 failed`，
+旧 store 集合迁移和 secret 不落响应/存储。APR-01c 覆盖无 step-up 时 H 风险失败关闭且
+依赖调用为 0、成功 step-up、H/C 独立 TTL、角色/范围/IP/User-Agent 绑定变化、IdP
+`sub`/邮箱变化、缺失/过期/未来 `auth_time`、缺失 MFA/ACR、`prompt=login`/`max_age`/
+essential `auth_time`/ACR 请求、未配置时失败关闭、站外返回路径拒绝、配置一致性和 secret
+不落响应/存储。管理服务当前为 `61 passed, 0 failed`，
 auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，合计
-`93 passed, 0 failed`。
+`101 passed, 0 failed`。
 
 尚未验证：
 
-- 真实 Entra/Okta/Keycloak 的 Claim、MFA、ACR、回调地址和条件访问。
+- 真实 Entra/Okta/Keycloak 的 Claim、MFA、ACR、普通/step-up Client 回调地址和条件访问。
 - Docker Compose 构建和健康检查；当前机器没有 Docker CLI。
 - 浏览器、反向代理、真实 Cookie 域和公司 CA 的端到端演练。
 - C4-03a 的真实部署验收，以及真实共享卷上的用户级模型授权链路。
@@ -403,8 +438,9 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
   回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d 仍有
   页面 E2E、停用/吊销/轮换页面和失败恢复入口待 D 完成；C5 的查询与对账目前只有
   Mock/故障测试证据，尚未接入完整管理页面。
-- APR-01a/01b 的审批管理页面、真实管理 IdP step-up/MFA/ACR、真实飞书/OA/ServiceNow/Jira
-  适配器及生产回调演练、串并行审批箱、转交、break-glass、审批通知未实现/未验收。
+- APR-01c 的代码和 Mock IdP 集成测试已完成；APR-01d/e 及真实管理 IdP step-up/MFA/ACR、
+  真实飞书/OA/ServiceNow/Jira 适配器及生产回调演练、串并行审批箱、转交、break-glass、
+  审批通知仍未实现/未验收。
 - NOTIFY-01 的 transactional outbox、dispatcher、邮件/企业 IM/Webhook/SIEM/工单、
   重试/死信和运营页面未实现。
 - 四个 M2-C2 写接口在真实 IdP、反向代理、真实 auth-service 和真实网关上的端到端演练。
@@ -415,9 +451,9 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - 每个管理请求会更新 `lastSeenAt`，小规模试点可接受，规模化需要共享存储和写合并。
 - result 审计失败时 operation 会停在 `dependency_invoked`；C5 已提供查询、审计分页和受控
   对账，但自动补偿、告警队列和真实运维演练仍未实现/验收。
-- 审批已有服务端 API、一次性消费和 HMAC 外部回调适配器，但没有管理 UI、真实 OA 连接器、
-  step-up、审批箱、break-glass 或通知投递；审批存储仍是单实例 JSON，尚未做多实例并发和
-  真实 OA 验收。
+- 审批已有服务端 API、一次性消费、HMAC 外部回调适配器和 APR-01c step-up，但没有审批
+  管理 UI、真实 OA 连接器、审批箱、break-glass 或通知投递；审批和 step-up 状态存储仍是
+  单实例 JSON，尚未做多实例并发和真实 OA/IdP 验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。
 - 用量读取当前基于单个 `usage.jsonl` 文件；轮转、归档、超大文件和事件存储查询尚未验收。
 - CSV 导出、费用趋势图、完整管理写按钮和运营看板属于 M2-D；C5 已提供审计过滤/分页和

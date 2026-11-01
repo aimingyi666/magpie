@@ -31,22 +31,25 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 测试：只允许 describe/apply/健康检查、独立 Bearer 服务令牌、固定 argv、10 秒超时、
 64 KiB 上限、写入后独立回读和 `pending` 保守状态。C4-02 的 Docker/Compose 尚未实机
 验收，admin-service 经 auth-service 间接调用，尚未直接接入。**C4-03a** 正式只读模型目录已实现，并通过 7 项目录专项
-和 28 项管理服务集成测试，管理服务合计 `35/35`；`GET /api/v1/admin/models` 已使用正式
+和 54 项管理服务集成测试，管理服务合计 `61/61`；`GET /api/v1/admin/models` 已使用正式
 目录，`ADMIN_MODELS` 仅保留兼容显示。C4-03a 仍待真实 Compose/只读挂载/digest 验收；
 auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b** 的用户级策略核心已实现：版本化 `gatewayPolicy`、
 旧 M1 `unknown` 迁移、quota/models 分步首次设置、缺项失败关闭、版本冲突和逐凭证回读确认
-均通过 auth-service `23/23`。C4-03c 的额度/模型管理 API、幂等签发、issuance journal、
+均通过 auth-service `25/25`。C4-03c 的额度/模型管理 API、幂等签发、issuance journal、
 apply/独立回读、同步后交付、失败补偿和启动恢复核心已实现并通过 Mock/故障测试；
 C4-03d 部分实现：管理页已有额度/模型写表单和完整证据链状态，员工页已有本人额度/模型/
 凭证/设备只读门户；失败恢复入口、停用/吊销/轮换页面、operation/audit 查询和人工对账仍
 未实现。C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实限额/
 模型拒绝、多凭证部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销
-和恢复同步；M2-C5、M2-D 和 M3-M6 仍未实现。
+和恢复同步；M2-C5 查询/对账后端已实现，M2-D 和 M3-M6 仍未实现。
 C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
 宣称管理员已经可以在生产自助调额或授予模型。
-`APR-01` 审批/step-up/职责分离和 `NOTIFY-01` outbox/邮件/IM/Webhook/SIEM/工单目前只有
-完整设计，没有实现或验收证据。现有 `approvalId` 只是预留字段；业务请求也不得同步等待外部
-通知渠道。管理页在 M2-E1 和 M2-E2 完成前不能展示或声称具备审批、重新认证和可靠投递能力。
+`APR-01a/b` 的服务端审批、职责分离、一次性消费和 HMAC/Mock 外部审批回调，
+以及 `APR-01c` 的独立 step-up 已实现并通过 Mock/故障测试；`APR-01c` 覆盖独立 OIDC
+Client、`prompt=login`、`max_age`、`auth_time`、ACR/MFA、会话/IP/UA/角色范围绑定，
+未配置时高风险操作失败关闭。`APR-01d/e` 的审批箱和 break-glass、真实 OA/IdP 连接器，
+以及 `NOTIFY-01` outbox/邮件/IM/Webhook/SIEM/工单仍未实现或验收。业务请求不得同步等待
+外部通知渠道，管理页也不能在真实 IdP、MFA、反向代理和生产验收完成前宣称生产可用。
 
 企业功能必须按下面的顺序推进，不能跳步：
 
@@ -60,7 +63,7 @@ C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未�
   -> C4-03d：页面/运营真实状态、失败凭证和对账入口（部分完成）
   -> C4-04：完整管理到真实 Magpie 策略流 E2E（已完成；待 Docker/共享卷和真实 IdP 验收）
   -> C5：operations/audit-logs/reconcile
-  -> APR-01a/b/c：审批绑定/一次性消费、外部审批、step-up
+  -> APR-01a/b/c：审批绑定/一次性消费、外部审批、step-up（代码和 Mock 测试已完成）
   -> NOTIFY-01a/b/c：outbox、邮件/IM/Webhook/工单、SIEM
   -> M2-D：管理台写操作、看板和授权导出
   -> APR-01d/e + NOTIFY-01d：内置审批、break-glass、通知运营页
@@ -97,7 +100,8 @@ feat/m2-c4-gateway-control（已完成，待合入/合入后）
   -> feat/m2-c4-gateway-policy
   -> feat/m2-c4-gateway-policy-e2e
   -> feat/m2-c5-operations-audit
-  -> feat/apr-01-approval-step-up
+  -> feat/apr-01b-external-approval
+  -> feat/apr-01c-step-up（当前）
   -> feat/notify-01-outbox-delivery
   -> feat/m2-d-admin-operations
   -> feat/m2-e-approval-notify-ops

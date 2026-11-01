@@ -19,6 +19,29 @@ import {
 const CALLBACK_SECRET = "approval-callback-test-secret-0000000001";
 const CALLBACK_ISSUER = "https://approval.corp.example";
 const CALLBACK_AUDIENCE = "magpie-enterprise-admin-test";
+const MOCK_ACCESS_TOKEN = "mock-access-token";
+
+function adminConfigEnv(overrides = {}) {
+  return {
+    ADMIN_PUBLIC_URL: "https://admin.corp.example",
+    ADMIN_SESSION_SECRET: "{{SECRET_adminsessionsecret}}-test-only-padding-0001",
+    ADMIN_OIDC_ISSUER: "https://idp.corp.example",
+    ADMIN_OIDC_CLIENT_ID: "magpie-admin",
+    ADMIN_OIDC_CLIENT_SECRET: "{{SECRET_adminoidcclient}}-test-only-padding-0001",
+    ADMIN_OIDC_REDIRECT_URI: "https://admin.corp.example/admin/oauth/callback",
+    ADMIN_AUTH_SERVICE_URL: "http://127.0.0.1:3444",
+    ADMIN_AUTH_SERVICE_TOKEN: "{{SECRET_adminservicetoken}}-test-only-padding-0001",
+    ADMIN_ALLOWED_IPS: "127.0.0.1/32",
+    ADMIN_STEP_UP_OIDC_CLIENT_ID: "magpie-admin-step-up",
+    ADMIN_STEP_UP_OIDC_CLIENT_SECRET: "{{SECRET_adminstepupoidc}}-test-only-padding-0001",
+    ADMIN_STEP_UP_REDIRECT_URI: "https://admin.corp.example/admin/oauth/step-up/callback",
+    ADMIN_STEP_UP_OIDC_SCOPES: "openid,profile,email",
+    ADMIN_STEP_UP_TTL_SECONDS: "600",
+    ADMIN_STEP_UP_CRITICAL_TTL_SECONDS: "300",
+    ADMIN_STEP_UP_AUTH_TIME_MAX_AGE_SECONDS: "120",
+    ...overrides,
+  };
+}
 
 function listen(server, host = "127.0.0.1") {
   return new Promise((resolve, reject) => {
@@ -66,9 +89,13 @@ function createMockOidc(options = {}) {
   const codes = new Map();
   const clientId = "magpie-enterprise-admin-test";
   const clientSecret = "{{SECRET_adminoidcclient}}-test-only-padding-0001";
+  const stepUpClientId = "magpie-enterprise-admin-step-up-test";
+  const stepUpClientSecret = "{{SECRET_adminstepupoidc}}-test-only-padding-0001";
   let base = "";
   let lastAuthorize = null;
+  let lastStepUpAuthorize = null;
   let loginClaims = options.claims || {};
+  let stepUpClaims = options.stepUpClaims || options.claims || {};
 
   function token(claims) {
     const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: "test-key" })).toString("base64url");
@@ -95,14 +122,23 @@ function createMockOidc(options = {}) {
       return;
     }
     if (req.method === "GET" && url.pathname === "/authorize") {
-      lastAuthorize = new URL(url);
+      const requestedClientId = url.searchParams.get("client_id");
+      if (requestedClientId !== clientId && requestedClientId !== stepUpClientId) {
+        res.writeHead(400);
+        res.end();
+        return;
+      }
+      const stepUp = requestedClientId === stepUpClientId;
+      if (stepUp) lastStepUpAuthorize = new URL(url);
+      else lastAuthorize = new URL(url);
       const code = `oidc_${crypto.randomBytes(18).toString("base64url")}`;
       codes.set(code, {
         redirectUri: url.searchParams.get("redirect_uri"),
         nonce: url.searchParams.get("nonce"),
         codeChallenge: url.searchParams.get("code_challenge"),
         createdAt: Date.now(),
-        claims: structuredClone(loginClaims),
+        clientId: requestedClientId,
+        claims: structuredClone(stepUp ? stepUpClaims : loginClaims),
       });
       const target = new URL(url.searchParams.get("redirect_uri"));
       target.searchParams.set("code", code);
@@ -117,8 +153,10 @@ function createMockOidc(options = {}) {
       const form = new URLSearchParams(raw);
       const basic = /^Basic\s+(.+)$/i.exec(String(req.headers.authorization || ""));
       const supplied = basic ? Buffer.from(basic[1], "base64").toString("utf8") : "";
-      const expected = `${clientId}:${clientSecret}`;
       const code = codes.get(form.get("code"));
+      const expected = code?.clientId === stepUpClientId
+        ? `${stepUpClientId}:${stepUpClientSecret}`
+        : `${clientId}:${clientSecret}`;
       const pkceOk = code && crypto.createHash("sha256")
         .update(form.get("code_verifier") || "")
         .digest("base64url") === code.codeChallenge;
@@ -131,12 +169,13 @@ function createMockOidc(options = {}) {
       const now = Math.floor(Date.now() / 1000);
       const idToken = token({
         iss: base,
-        aud: clientId,
+        aud: code.clientId,
         sub: "admin-alice",
         email: "admin@corp.example",
         email_verified: true,
         name: "Admin Alice",
         amr: ["pwd", "mfa"],
+        auth_time: now,
         nonce: code.nonce,
         iat: now,
         exp: now + 300,
@@ -144,7 +183,7 @@ function createMockOidc(options = {}) {
       });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
-        access_token: "mock-access-token",
+        access_token: MOCK_ACCESS_TOKEN,
         token_type: "Bearer",
         expires_in: 300,
         id_token: idToken,
@@ -159,10 +198,17 @@ function createMockOidc(options = {}) {
     server,
     clientId,
     clientSecret,
+    stepUpClientId,
+    stepUpClientSecret,
     get base() { return base; },
     get lastAuthorize() { return lastAuthorize; },
+    get lastStepUpAuthorize() { return lastStepUpAuthorize; },
     setBase(value) { base = value; },
-    setClaims(value) { loginClaims = value || options.claims || {}; },
+    setClaims(value) {
+      loginClaims = value || options.claims || {};
+      stepUpClaims = value || options.stepUpClaims || options.claims || {};
+    },
+    setStepUpClaims(value) { stepUpClaims = value || options.stepUpClaims || options.claims || {}; },
   };
 }
 
@@ -729,6 +775,7 @@ async function fixture(options = {}) {
     const callbackAudience = options.callbackAudience !== undefined
       ? options.callbackAudience
       : (callbackDisabled ? "" : CALLBACK_AUDIENCE);
+    const stepUpEnabled = options.stepUpEnabled !== false;
     const config = loadConfig({
       ADMIN_PUBLIC_URL: "http://127.0.0.1:3998",
       ADMIN_PORT: "3998",
@@ -747,6 +794,17 @@ async function fixture(options = {}) {
       ADMIN_REQUIRE_MFA: "true",
       ADMIN_REQUIRE_VERIFIED_EMAIL: "true",
       ADMIN_ALLOWED_ACR_VALUES: options.allowedAcrValues || "",
+      ADMIN_STEP_UP_OIDC_CLIENT_ID: stepUpEnabled ? oidc.stepUpClientId : "",
+      ADMIN_STEP_UP_OIDC_CLIENT_SECRET: stepUpEnabled ? oidc.stepUpClientSecret : "",
+      ADMIN_STEP_UP_REDIRECT_URI: stepUpEnabled
+        ? "http://127.0.0.1:3998/admin/oauth/step-up/callback"
+        : "",
+      ADMIN_STEP_UP_OIDC_SCOPES: "openid,profile,email",
+      ADMIN_STEP_UP_ALLOWED_ACR_VALUES: options.allowedAcrValues || "",
+      ADMIN_STEP_UP_TTL_SECONDS: options.stepUpTtlSeconds || "600",
+      ADMIN_STEP_UP_CRITICAL_TTL_SECONDS: options.stepUpCriticalTtlSeconds || "300",
+      ADMIN_STEP_UP_AUTH_TIME_MAX_AGE_SECONDS:
+        options.stepUpAuthTimeMaxAgeSeconds || "120",
       ADMIN_BOOTSTRAP_EMAILS: "admin@corp.example",
       ADMIN_BOOTSTRAP_VALID_HOURS: "24",
       ADMIN_AUTH_SERVICE_URL: authBase,
@@ -771,6 +829,9 @@ async function fixture(options = {}) {
     const base = await listen(admin.server);
     config.publicUrl = base;
     config.oidc.redirectUri = `${base}/admin/oauth/callback`;
+    if (config.stepUpOidc) {
+      config.stepUpOidc.redirectUri = `${base}/admin/oauth/step-up/callback`;
+    }
     return {
       temp,
       oidc,
@@ -780,8 +841,11 @@ async function fixture(options = {}) {
       base,
       usagePath,
       catalogPath,
+      stepUpEnabled,
       secrets: {
         oidcClientSecret: oidc.clientSecret,
+        stepUpOidcClientSecret: oidc.stepUpClientSecret,
+        accessToken: MOCK_ACCESS_TOKEN,
         serviceToken,
         sessionSecret: config.sessionSecret,
         callbackSecret,
@@ -802,7 +866,51 @@ async function fixture(options = {}) {
   }
 }
 
-async function adminLogin(f, jar = new CookieJar(), claims = undefined) {
+async function stepUpAttempt(f, jar, options = {}) {
+  if (options.claims !== undefined) f.oidc.setStepUpClaims(options.claims);
+  const returnTo = options.returnTo || "/admin/";
+  const started = await fetch(
+    `${f.base}/admin/oauth/step-up/start?returnTo=${encodeURIComponent(returnTo)}`,
+    {
+      redirect: "manual",
+      headers: { cookie: jar.header() },
+    },
+  );
+  jar.absorb(started);
+  assert.equal(started.status, 302, await started.text());
+  const authorize = await fetch(started.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie: jar.header() },
+  });
+  assert.equal(authorize.status, 302);
+  const callback = await fetch(authorize.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie: jar.header() },
+  });
+  jar.absorb(callback);
+  const body = callback.status === 302 || !String(
+    callback.headers.get("content-type") || "",
+  ).includes("application/json")
+    ? null
+    : await callback.json();
+  return { started, authorize, callback, body };
+}
+
+async function stepUp(f, jar, claims = undefined) {
+  const { callback } = await stepUpAttempt(f, jar, { claims });
+  assert.equal(callback.status, 302, await callback.text());
+  assert.equal(callback.headers.get("location"), "/admin/");
+  const current = await me(f, jar);
+  assert.equal(current.response.status, 200);
+  assert.equal(
+    current.body.stepUp.state,
+    "verified",
+    JSON.stringify(current.body.stepUp),
+  );
+  return jar;
+}
+
+async function adminLogin(f, jar = new CookieJar(), claims = undefined, options = {}) {
   f.oidc.setClaims(claims);
   const started = await fetch(`${f.base}/admin/login`, { redirect: "manual" });
   jar.absorb(started);
@@ -819,6 +927,7 @@ async function adminLogin(f, jar = new CookieJar(), claims = undefined) {
   jar.absorb(callback);
   assert.equal(callback.status, 302);
   assert.equal(callback.headers.get("location"), "/admin/");
+  if (f.stepUpEnabled && options.stepUp !== false) await stepUp(f, jar);
   return jar;
 }
 
@@ -915,6 +1024,13 @@ async function independentApprover(f, options = {}) {
     options.role || "enterprise_admin",
     options.scopeOrgUnitId || "*",
   );
+  if (f.stepUpEnabled) {
+    await stepUp(f, jar, {
+      sub: `admin-${suffix}`,
+      email: `${suffix}@corp.example`,
+      name: options.name || `Approver ${suffix}`,
+    });
+  }
   current = await me(f, jar);
   assert.equal(current.response.status, 200);
   return { jar, current, suffix };
@@ -1151,8 +1267,11 @@ function assertNoWriteSecrets(value, f, jar) {
     "tokenHash",
     f.secrets.serviceToken,
     f.secrets.oidcClientSecret,
+    f.secrets.accessToken,
+    ...(f.secrets.stepUpOidcClientSecret ? [f.secrets.stepUpOidcClientSecret] : []),
     ...(f.secrets.callbackSecret ? [f.secrets.callbackSecret] : []),
     jar.cookies.get(f.config.sessionCookieName) || "__no_cookie__",
+    jar.cookies.get(f.config.stepUpCookieName) || "__no_step_up_cookie__",
   ]) {
     assert.ok(!serialized.includes(forbidden), `response must not contain ${forbidden}`);
   }
@@ -2167,6 +2286,7 @@ test("M2-C2 scoped writes allow the subtree and reject siblings before dependenc
   const jar = await adminLogin(f);
   const current = await me(f, jar);
   await bindRole(f, current.body.user.id, "enterprise_admin", "org-root");
+  await stepUp(f, jar);
   const scoped = await me(f, jar);
   const approver = await independentApprover(f, {
     role: "enterprise_admin",
@@ -2810,10 +2930,12 @@ test("M2-C5 audit logs paginate stably and bind cursors to the session and query
   assert.ok(firstPage.body.nextCursor);
   const cursor = firstPage.body.nextCursor;
 
+  const tamperedCursor = `${cursor[0] === "A" ? "B" : "A"}${cursor.slice(1)}`;
+  assert.notEqual(tamperedCursor, cursor);
   const tampered = await adminGet(
     f,
     jar,
-    `/api/v1/admin/audit-logs?limit=37&cursor=${encodeURIComponent(`${cursor.slice(0, -1)}A`)}`,
+    `/api/v1/admin/audit-logs?limit=37&cursor=${encodeURIComponent(tamperedCursor)}`,
   );
   assert.equal(tampered.response.status, 400);
   assert.equal(tampered.body.error.code, "invalid_cursor");
@@ -4426,6 +4548,374 @@ test("configured ACR values are requested from the IdP", { timeout: 30000 }, asy
   const claims = JSON.parse(f.oidc.lastAuthorize.searchParams.get("claims"));
   assert.deepEqual(claims.id_token.acr.values, ["urn:corp:mfa"]);
   assert.equal(claims.id_token.acr.essential, true);
+});
+
+test("APR-01c high-risk actions require a fresh step-up and succeed after re-authentication", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f, new CookieJar(), undefined, { stepUp: false });
+  let current = await me(f, jar);
+  assert.equal(current.response.status, 200);
+  assert.equal(current.body.stepUp.configured, true);
+  assert.equal(current.body.stepUp.state, "required");
+
+  const reason = "Step-up is required before disabling this user";
+  const body = {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason,
+  };
+  const denied = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/approvals",
+    body,
+    current.body.csrfToken,
+  );
+  assert.equal(denied.response.status, 403);
+  assert.equal(denied.body.error.code, "step_up_required");
+  assert.equal(f.auth.writeCalls.length, 0);
+  let data = await readAdminData(f);
+  assert.equal(Object.keys(data.approvalRequests).length, 0);
+
+  await stepUp(f, jar);
+  current = await me(f, jar);
+  assert.equal(current.body.stepUp.state, "verified");
+  assert.equal(current.body.stepUp.authenticated, true);
+  assert.equal(current.body.stepUp.criticalAuthenticated, true);
+  assert.match(current.body.stepUp.expiresAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.match(current.body.stepUp.startUrl, /^\/admin\/oauth\/step-up\/start/);
+
+  const approval = await requestApproval(f, jar, current, body);
+  const approver = await independentApprover(f);
+  await decideApproval(f, approver, approval.approvalId);
+  const written = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/disable",
+    { reason, approvalId: approval.approvalId },
+    current.body.csrfToken,
+  );
+  assert.equal(written.response.status, 200, JSON.stringify(written.body));
+  assert.equal(f.auth.writeCalls.length, 1);
+  assert.equal(
+    f.auth.writeCalls[0].pathname,
+    "/api/v1/internal/admin/users/usr_bob/disable",
+  );
+
+  data = await readAdminData(f);
+  const stored = await fs.readFile(f.config.storePath, "utf8");
+  assertNoWriteSecrets([denied.body, current.body, written.body, data, stored], f, jar);
+  assert.ok(!stored.includes(f.secrets.accessToken));
+  for (const tokenField of ['"access_token"', '"refresh_token"', '"id_token"']) {
+    assert.ok(!stored.includes(tokenField), `store must not contain ${tokenField}`);
+  }
+
+  data = await readAdminData(f);
+  const mainAssertionKey = Object.keys(data.stepUpAssertions).find(
+    (key) => data.stepUpAssertions[key].subjectId === current.body.user.id,
+  );
+  assert.ok(mainAssertionKey, "main admin session should have a step-up assertion");
+
+  const logout = await fetch(`${f.base}/api/v1/admin/logout`, {
+    method: "POST",
+    headers: {
+      cookie: jar.header(),
+      origin: f.base,
+      "x-csrf-token": current.body.csrfToken,
+    },
+  });
+  assert.equal(logout.status, 200);
+  const afterLogout = await me(f, jar);
+  assert.equal(afterLogout.response.status, 401);
+  data = await readAdminData(f);
+  assert.equal(data.stepUpAssertions[mainAssertionKey], undefined);
+});
+
+test("APR-01c step-up expires independently for high-risk and critical actions", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const parent = await seedAdminOperation(f, { id: "op_apr01c_critical" });
+
+  const jar = await adminLogin(f);
+  let current = await me(f, jar);
+  await f.admin.store.mutate((data) => {
+    const assertion = Object.values(data.stepUpAssertions)[0];
+    assertion.expiresAt = new Date(Date.now() - 1000).toISOString();
+  });
+  const highRiskExpired = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/approvals",
+    {
+      action: "user.disable",
+      targetId: "usr_bob",
+      reason: "Expired step-up must block a high-risk approval",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(highRiskExpired.response.status, 403);
+  assert.equal(highRiskExpired.body.error.code, "step_up_expired");
+
+  await stepUp(f, jar);
+  current = await me(f, jar);
+  await f.admin.store.mutate((data) => {
+    const assertion = Object.values(data.stepUpAssertions)[0];
+    assertion.criticalExpiresAt = new Date(Date.now() - 1000).toISOString();
+  });
+  const criticalExpired = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/approvals",
+    {
+      action: "operation.reconcile",
+      targetId: parent.id,
+      parentOperationId: parent.id,
+      reconciliationAction: "confirm_applied",
+      evidenceRef: "APR-01C-CRITICAL",
+      reason: "Expired critical assertion must block reconciliation",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(criticalExpired.response.status, 403);
+  assert.equal(criticalExpired.body.error.code, "step_up_expired");
+
+  const data = await readAdminData(f);
+  assert.equal(Object.keys(data.approvalRequests).length, 0);
+  assert.equal(f.auth.writeCalls.length, 0);
+});
+
+test("APR-01c step-up binds risk-bearing writes to role, scope, IP, and browser", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  let current = await me(f, jar);
+  await bindRole(f, current.body.user.id, "enterprise_admin", "org-platform");
+
+  const assertBindingMismatch = async (reason) => {
+    const result = await adminPost(
+      f,
+      jar,
+      "/api/v1/admin/approvals",
+      {
+        action: "user.disable",
+        targetId: "usr_bob",
+        reason,
+      },
+      current.body.csrfToken,
+    );
+    assert.equal(result.response.status, 403);
+    assert.equal(result.body.error.code, "step_up_binding_mismatch");
+    const state = await me(f, jar);
+    assert.equal(state.body.stepUp.state, "binding_mismatch");
+  };
+
+  await assertBindingMismatch("Role and scope changed after step-up");
+
+  await stepUp(f, jar);
+  current = await me(f, jar);
+  await f.admin.store.mutate((data) => {
+    Object.values(data.stepUpAssertions)[0].ip = "203.0.113.55";
+  });
+  await assertBindingMismatch("IP changed after step-up");
+
+  await stepUp(f, jar);
+  current = await me(f, jar);
+  await f.admin.store.mutate((data) => {
+    Object.values(data.stepUpAssertions)[0].userAgentHash = crypto.createHash("sha256")
+      .update("different-browser")
+      .digest("hex");
+  });
+  await assertBindingMismatch("Browser changed after step-up");
+
+  const data = await readAdminData(f);
+  assert.equal(Object.keys(data.approvalRequests).length, 0);
+  assert.equal(f.auth.writeCalls.length, 0);
+});
+
+test("APR-01c step-up rejects changed identity and invalid freshness or MFA claims", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f, new CookieJar(), undefined, { stepUp: false });
+
+  const subjectChanged = await stepUpAttempt(f, jar, {
+    claims: { sub: "admin-different-subject" },
+  });
+  assert.equal(subjectChanged.callback.status, 403);
+  assert.equal(subjectChanged.body.error.code, "step_up_binding_mismatch");
+
+  const emailChanged = await stepUpAttempt(f, jar, {
+    claims: { email: "different@corp.example" },
+  });
+  assert.equal(emailChanged.callback.status, 403);
+  assert.equal(emailChanged.body.error.code, "step_up_binding_mismatch");
+
+  const now = Math.floor(Date.now() / 1000);
+  const rejectedClaims = [
+    [{ auth_time: undefined }, "missing auth_time"],
+    [{ auth_time: now - 121 }, "stale auth_time"],
+    [{ auth_time: now + 31 }, "future auth_time"],
+    [{ amr: ["pwd"], acr: "" }, "missing MFA"],
+  ];
+  for (const [claims, label] of rejectedClaims) {
+    const rejected = await stepUpAttempt(f, jar, { claims });
+    assert.equal(rejected.callback.status, 403, label);
+    assert.equal(rejected.body.error.code, "step_up_invalid", label);
+  }
+
+  await stepUp(f, jar, {});
+  const current = await me(f, jar);
+  assert.equal(current.body.stepUp.state, "verified");
+});
+
+test("APR-01c step-up requests explicit login, freshness, auth_time, and approved ACR", { timeout: 30000 }, async (t) => {
+  const f = await fixture({
+    allowedAcrValues: "urn:corp:mfa",
+    claims: { acr: "urn:corp:mfa" },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f, new CookieJar(), undefined, { stepUp: false });
+  const rejected = await stepUpAttempt(f, jar, {
+    claims: { acr: "urn:corp:password" },
+  });
+  assert.equal(rejected.callback.status, 403);
+  assert.equal(rejected.body.error.code, "step_up_invalid");
+
+  await stepUp(f, jar, { acr: "urn:corp:mfa" });
+  const authorize = f.oidc.lastStepUpAuthorize;
+  assert.equal(authorize.searchParams.get("prompt"), "login");
+  assert.equal(authorize.searchParams.get("max_age"), "120");
+  assert.equal(authorize.searchParams.get("acr_values"), "urn:corp:mfa");
+  const requestedClaims = JSON.parse(authorize.searchParams.get("claims"));
+  assert.deepEqual(requestedClaims.id_token.auth_time, { essential: true });
+  assert.deepEqual(requestedClaims.id_token.acr.values, ["urn:corp:mfa"]);
+  const current = await me(f, jar);
+  assert.equal(current.body.stepUp.state, "verified");
+  assert.equal(current.body.stepUp.acr, "urn:corp:mfa");
+});
+
+test("APR-01c unconfigured step-up fails closed for state, routes, and high-risk approvals", { timeout: 30000 }, async (t) => {
+  const f = await fixture({ stepUpEnabled: false });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  assert.equal(current.body.stepUp.configured, false);
+  assert.equal(current.body.stepUp.state, "unavailable");
+  assert.equal(current.body.stepUp.startUrl, "");
+
+  const denied = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/approvals",
+    {
+      action: "user.disable",
+      targetId: "usr_bob",
+      reason: "Unconfigured step-up must fail closed",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(denied.response.status, 503);
+  assert.equal(denied.body.error.code, "step_up_unavailable");
+
+  const start = await fetch(`${f.base}/admin/oauth/step-up/start`, {
+    redirect: "manual",
+    headers: { cookie: jar.header() },
+  });
+  assert.equal(start.status, 503);
+  assert.equal((await start.json()).error.code, "step_up_unavailable");
+  assert.equal(f.auth.writeCalls.length, 0);
+});
+
+test("APR-01c step-up return paths stay inside the admin UI", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f, new CookieJar(), undefined, { stepUp: false });
+
+  const invalidPaths = [
+    "//evil.example",
+    "/admin/\\evil.example",
+    "/admin/oauth/callback",
+    "/admin/oauth/step-up/callback",
+    "/admin/../api/v1/admin/me",
+    "/api/v1/admin/me",
+  ];
+  for (const returnTo of invalidPaths) {
+    const response = await fetch(
+      `${f.base}/admin/oauth/step-up/start?returnTo=${encodeURIComponent(returnTo)}`,
+      {
+        redirect: "manual",
+        headers: { cookie: jar.header() },
+      },
+    );
+    assert.equal(response.status, 400, returnTo);
+    assert.equal((await response.json()).error.code, "invalid_return_path", returnTo);
+  }
+
+  const valid = await fetch(
+    `${f.base}/admin/oauth/step-up/start?returnTo=${encodeURIComponent("/admin/?tab=users")}`,
+    {
+      redirect: "manual",
+      headers: { cookie: jar.header() },
+    },
+  );
+  assert.equal(valid.status, 302);
+  assert.match(valid.headers.get("location"), /\/authorize\?/);
+});
+
+test("APR-01c step-up configuration fails closed on unsafe or inconsistent settings", () => {
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_STEP_UP_OIDC_CLIENT_ID: "magpie-admin",
+    })),
+    /ADMIN_STEP_UP_OIDC_CLIENT_ID must differ/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_STEP_UP_REDIRECT_URI: "https://admin.corp.example/admin/oauth/callback",
+    })),
+    /ADMIN_STEP_UP_REDIRECT_URI must differ/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_STEP_UP_OIDC_CLIENT_SECRET: "too-short",
+    })),
+    /ADMIN_STEP_UP_OIDC_CLIENT_SECRET must be at least 32 characters/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_STEP_UP_CRITICAL_TTL_SECONDS: "601",
+    })),
+    /ADMIN_STEP_UP_CRITICAL_TTL_SECONDS must not exceed/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_STEP_UP_OIDC_SCOPES: "profile,email",
+    })),
+    /ADMIN_STEP_UP_OIDC_SCOPES must include openid/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_STEP_UP_OIDC_CLIENT_SECRET: "",
+    })),
+    /are required when step-up authentication is configured/,
+  );
+
+  const config = loadConfig(adminConfigEnv());
+  assert.equal(config.stepUpOidc.ttlSeconds, 600);
+  assert.equal(config.stepUpOidc.criticalTtlSeconds, 300);
+  assert.equal(config.stepUpOidc.authTimeMaxAgeSeconds, 120);
+  assert.equal(config.stepUpOidc.requireMfa, true);
 });
 
 test("IP allow list fails closed and rejects invalid CIDR", async () => {
