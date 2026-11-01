@@ -126,6 +126,8 @@ const usage = `magpie — one place to pick every agent's model
   magpie gateway-key list|add <name> [--read-only]|rotate <id>|remove <id>   manage the keys clients use to call a shared gateway
   magpie gateway-key limit <id> [list|off|reset [n]|remove <n>|[add] day|week|month|<N>d|<N>h --tokens N --cost USD --cache-reads]   a key's own limits, and what it used
   magpie gateway-key models <id> [all|<provider>/<model>|<provider>/* ...]   the models a key may use, every one unless it names some
+  magpie gateway-key describe <id> --json   machine-readable, secret-free policy state for an enterprise controller
+  magpie gateway-key policy apply <id> --json   atomically replace models and limits from one schema-v1 JSON request on stdin
   magpie gateway-key quotas <id> [on|off]   whether a key held to a budget, models or accounts is told the quotas of what it may use
   magpie gateway-key access <id> [read-only|full]   read-only: the key reads quotas and usage (GET /, /v1/magpie/quotas, /v1/magpie/usage) and uses no model, MCP server or write
   magpie gateway-key move <id> <place>   put a key at a place in the list (from 1), the order list and the app show them in
