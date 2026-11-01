@@ -13,6 +13,7 @@ export const ROLES = Object.freeze({
     "mcp.read",
     "resources.read",
     "usage.read",
+    "approvals.read",
   ],
   enterprise_admin: [
     "users.read",
@@ -37,6 +38,9 @@ export const ROLES = Object.freeze({
     "alerts.respond",
     "roles.read",
     "system.read",
+    "approvals.read",
+    "approvals.decide",
+    "approvals.revoke",
   ],
   auditor: [
     "users.read",
@@ -44,6 +48,7 @@ export const ROLES = Object.freeze({
     "usage.read",
     "audit.read",
     "alerts.read",
+    "approvals.read",
   ],
   security_admin: [
     "devices.read",
@@ -53,11 +58,14 @@ export const ROLES = Object.freeze({
     "users.disable",
     "alerts.read",
     "alerts.respond",
+    "approvals.read",
+    "approvals.decide",
   ],
   ops_admin: [
     "devices.read",
     "devices.revoke",
     "system.read",
+    "approvals.read",
   ],
   super_admin: [
     "users.read",
@@ -82,6 +90,9 @@ export const ROLES = Object.freeze({
     "alerts.respond",
     "roles.read",
     "system.read",
+    "approvals.read",
+    "approvals.decide",
+    "approvals.revoke",
   ],
 });
 

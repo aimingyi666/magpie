@@ -9,6 +9,12 @@ import { loadConfig } from "../src/config.js";
 import { loadModelCatalog } from "../src/model-catalog.js";
 import { JsonStore } from "../src/store.js";
 import { createEnterpriseAdminServer } from "../src/service.js";
+import {
+  approvalBindingDigest,
+  approvalPayloadDigest,
+  normalizedApprovalPayload,
+  riskForAction,
+} from "../src/approval.js";
 
 function listen(server, host = "127.0.0.1") {
   return new Promise((resolve, reject) => {
@@ -58,6 +64,7 @@ function createMockOidc(options = {}) {
   const clientSecret = "{{SECRET_adminoidcclient}}-test-only-padding-0001";
   let base = "";
   let lastAuthorize = null;
+  let loginClaims = options.claims || {};
 
   function token(claims) {
     const header = Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT", kid: "test-key" })).toString("base64url");
@@ -91,6 +98,7 @@ function createMockOidc(options = {}) {
         nonce: url.searchParams.get("nonce"),
         codeChallenge: url.searchParams.get("code_challenge"),
         createdAt: Date.now(),
+        claims: structuredClone(loginClaims),
       });
       const target = new URL(url.searchParams.get("redirect_uri"));
       target.searchParams.set("code", code);
@@ -128,7 +136,7 @@ function createMockOidc(options = {}) {
         nonce: code.nonce,
         iat: now,
         exp: now + 300,
-        ...options.claims,
+        ...code.claims,
       });
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
@@ -150,6 +158,7 @@ function createMockOidc(options = {}) {
     get base() { return base; },
     get lastAuthorize() { return lastAuthorize; },
     setBase(value) { base = value; },
+    setClaims(value) { loginClaims = value || options.claims || {}; },
   };
 }
 
@@ -773,7 +782,8 @@ async function fixture(options = {}) {
   }
 }
 
-async function adminLogin(f, jar = new CookieJar()) {
+async function adminLogin(f, jar = new CookieJar(), claims = undefined) {
+  f.oidc.setClaims(claims);
   const started = await fetch(`${f.base}/admin/login`, { redirect: "manual" });
   jar.absorb(started);
   assert.equal(started.status, 302);
@@ -851,6 +861,90 @@ function bindRole(f, subjectId, role, scopeOrgUnitId, extraPermissions = []) {
       },
     };
   });
+}
+
+function addRoleBinding(f, id, subjectId, role, scopeOrgUnitId, extraPermissions = []) {
+  return f.admin.store.mutate((data) => {
+    data.roleBindings[id] = {
+      id,
+      subjectType: "admin",
+      subjectId,
+      role,
+      scopeOrgUnitId,
+      validFrom: new Date(Date.now() - 60000).toISOString(),
+      validTo: new Date(Date.now() + 3600000).toISOString(),
+      createdBy: "test",
+      extraPermissions,
+    };
+  });
+}
+
+async function independentApprover(f, options = {}) {
+  const suffix = options.suffix || crypto.randomUUID().slice(0, 12);
+  const jar = new CookieJar();
+  await adminLogin(f, jar, {
+    sub: `admin-${suffix}`,
+    email: `${suffix}@corp.example`,
+    name: options.name || `Approver ${suffix}`,
+  });
+  let current = await me(f, jar);
+  await addRoleBinding(
+    f,
+    `rb-approver-${suffix}`,
+    current.body.user.id,
+    options.role || "enterprise_admin",
+    options.scopeOrgUnitId || "*",
+  );
+  current = await me(f, jar);
+  assert.equal(current.response.status, 200);
+  return { jar, current, suffix };
+}
+
+async function requestApproval(f, jar, current, body) {
+  const result = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/approvals",
+    body,
+    current.body.csrfToken,
+  );
+  assert.equal(result.response.status, 201, JSON.stringify(result.body));
+  assert.match(result.body.approval.approvalId, /^apr_/);
+  return result.body.approval;
+}
+
+async function decideApproval(f, approver, approvalId, decision = "approve", reason = "Independent review") {
+  const result = await adminPost(
+    f,
+    approver.jar,
+    `/api/v1/admin/approvals/${approvalId}/decisions`,
+    { decision, reason },
+    approver.current.body.csrfToken,
+  );
+  assert.equal(result.response.status, 200, JSON.stringify(result.body));
+  return result.body.approval;
+}
+
+async function approveReconciliation(
+  f,
+  jar,
+  current,
+  approver,
+  parent,
+  reconciliationAction,
+  reason,
+  evidenceRef = "",
+) {
+  const approval = await requestApproval(f, jar, current, {
+    action: "operation.reconcile",
+    targetId: parent.id,
+    parentOperationId: parent.id,
+    reconciliationAction,
+    reason,
+    ...(evidenceRef ? { evidenceRef } : {}),
+  });
+  await decideApproval(f, approver, approval.approvalId);
+  return approval;
 }
 
 function usageLines() {
@@ -1515,9 +1609,18 @@ test("policy management expands catalog selectors and reports credential sync st
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
   assert.ok(current.body.permissions.includes("quota.write"));
   assert.ok(current.body.permissions.includes("models.write"));
 
+  const quotaApproval = await requestApproval(f, jar, current, {
+    action: "user.policy.quota",
+    targetId: "usr_bob",
+    reason: "Apply the engineering monthly allowance",
+    expectedVersion: 1,
+    limits: [{ period: "month", tokens: 100000, cost: 25 }],
+  });
+  await decideApproval(f, approver, quotaApproval.approvalId);
   const quota = await adminPut(
     f,
     jar,
@@ -1526,6 +1629,7 @@ test("policy management expands catalog selectors and reports credential sync st
       reason: "Apply the engineering monthly allowance",
       expectedVersion: 1,
       limits: [{ period: "month", tokens: 100000, cost: 25 }],
+      approvalId: quotaApproval.approvalId,
     },
     current.body.csrfToken,
     { "idempotency-key": "policy-quota-push-1" },
@@ -1541,6 +1645,14 @@ test("policy management expands catalog selectors and reports credential sync st
   assert.equal(quota.body.result.requiresReconciliation, true);
   assert.equal(quota.body.result.credentials.pending, 1);
 
+  const modelsApproval = await requestApproval(f, jar, current, {
+    action: "user.policy.models",
+    targetId: "usr_bob",
+    reason: "Grant the approved engineering model group",
+    expectedVersion: 2,
+    models: ["group/engineering-approved", "company-model/*"],
+  });
+  await decideApproval(f, approver, modelsApproval.approvalId);
   const models = await adminPatch(
     f,
     jar,
@@ -1549,6 +1661,7 @@ test("policy management expands catalog selectors and reports credential sync st
       reason: "Grant the approved engineering model group",
       expectedVersion: 2,
       models: ["group/engineering-approved", "company-model/*"],
+      approvalId: modelsApproval.approvalId,
     },
     current.body.csrfToken,
     { "idempotency-key": "policy-models-push-1" },
@@ -1678,12 +1791,20 @@ test("policy writes replay by payload and reject conflicting idempotency reuse",
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
   const pathname = "/api/v1/admin/users/usr_alice/policy/quota";
-  const body = {
+  const requestBody = {
     reason: "Replay-safe quota update",
     expectedVersion: 2,
     limits: [{ period: "month", tokens: 50000, cost: 10 }],
   };
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.policy.quota",
+    targetId: "usr_alice",
+    ...requestBody,
+  });
+  await decideApproval(f, approver, approval.approvalId);
+  const body = { ...requestBody, approvalId: approval.approvalId };
   const headers = { "idempotency-key": "policy-idempotency-1" };
 
   const first = await adminPut(f, jar, pathname, body, current.body.csrfToken, headers);
@@ -1737,14 +1858,25 @@ test("policy version conflicts stay 409 and are result-audited by the admin serv
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const requestBody = {
+    reason: "Stale policy update must fail closed",
+    expectedVersion: 0,
+    models: ["openai/gpt-test"],
+  };
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.policy.models",
+    targetId: "usr_bob",
+    ...requestBody,
+  });
+  await decideApproval(f, approver, approval.approvalId);
   const response = await adminPatch(
     f,
     jar,
     "/api/v1/admin/users/usr_bob/policy/models",
     {
-      reason: "Stale policy update must fail closed",
-      expectedVersion: 0,
-      models: ["openai/gpt-test"],
+      ...requestBody,
+      approvalId: approval.approvalId,
     },
     current.body.csrfToken,
     { "idempotency-key": "policy-stale-1" },
@@ -1836,16 +1968,26 @@ test("M2-C2 global admin write routes call auth-service and return only safe fie
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
   assert.equal(current.response.status, 200);
   assert.ok(current.body.permissions.includes("users.disable"));
   assert.ok(current.body.permissions.includes("devices.revoke"));
   assert.ok(current.body.permissions.includes("credentials.rotate"));
 
+  const disableApproval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "Employee reported a lost laptop",
+  });
+  await decideApproval(f, approver, disableApproval.approvalId);
   const disabled = await adminPost(
     f,
     jar,
     "/api/v1/admin/users/usr_alice/disable",
-    { reason: "Employee reported a lost laptop" },
+    {
+      reason: "Employee reported a lost laptop",
+      approvalId: disableApproval.approvalId,
+    },
     current.body.csrfToken,
     { "idempotency-key": "m2c2-global-disable-1" },
   );
@@ -1873,11 +2015,20 @@ test("M2-C2 global admin write routes call auth-service and return only safe fie
   assert.equal(enabled.body.result.user.status, "active");
   assert.equal(enabled.body.result.requiresDeviceJoin, true);
 
+  const revokeApproval = await requestApproval(f, jar, current, {
+    action: "device.revoke",
+    targetId: "dev_alice",
+    reason: "Device is no longer managed",
+  });
+  await decideApproval(f, approver, revokeApproval.approvalId);
   const revoked = await adminPost(
     f,
     jar,
     "/api/v1/admin/devices/dev_alice/revoke",
-    { reason: "Device is no longer managed" },
+    {
+      reason: "Device is no longer managed",
+      approvalId: revokeApproval.approvalId,
+    },
     current.body.csrfToken,
   );
   assert.equal(revoked.response.status, 200);
@@ -1886,11 +2037,20 @@ test("M2-C2 global admin write routes call auth-service and return only safe fie
   assert.equal(revoked.body.result.device.status, "revoked");
   assert.equal(revoked.body.result.affectedCredentials, 1);
 
+  const rotateApproval = await requestApproval(f, jar, current, {
+    action: "credential.rotate",
+    targetId: "key-alice-new",
+    reason: "Routine credential rotation",
+  });
+  await decideApproval(f, approver, rotateApproval.approvalId);
   const rotated = await adminPost(
     f,
     jar,
     "/api/v1/admin/credentials/key-alice-new/rotate",
-    { reason: "Routine credential rotation" },
+    {
+      reason: "Routine credential rotation",
+      approvalId: rotateApproval.approvalId,
+    },
     current.body.csrfToken,
   );
   assert.equal(rotated.response.status, 200);
@@ -1939,31 +2099,62 @@ test("M2-C2 scoped writes allow the subtree and reject siblings before dependenc
   const current = await me(f, jar);
   await bindRole(f, current.body.user.id, "enterprise_admin", "org-root");
   const scoped = await me(f, jar);
+  const approver = await independentApprover(f, {
+    role: "enterprise_admin",
+    scopeOrgUnitId: "org-root",
+  });
   assert.equal(scoped.response.status, 200);
   assert.deepEqual(scoped.body.roles, ["enterprise_admin"]);
   assert.deepEqual(scoped.body.scopeOrgUnitIds.sort(), ["org-platform", "org-root"]);
 
+  const disableApproval = await requestApproval(f, jar, scoped, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Scoped administrator action",
+  });
+  await decideApproval(f, approver, disableApproval.approvalId);
   const ownUser = await adminPost(
     f,
     jar,
     "/api/v1/admin/users/usr_bob/disable",
-    { reason: "Scoped administrator action" },
+    {
+      reason: "Scoped administrator action",
+      approvalId: disableApproval.approvalId,
+    },
     scoped.body.csrfToken,
   );
   assert.equal(ownUser.response.status, 200);
+  const revokeApproval = await requestApproval(f, jar, scoped, {
+    action: "device.revoke",
+    targetId: "dev_bob",
+    reason: "Scoped device revocation",
+  });
+  await decideApproval(f, approver, revokeApproval.approvalId);
   const ownDevice = await adminPost(
     f,
     jar,
     "/api/v1/admin/devices/dev_bob/revoke",
-    { reason: "Scoped device revocation" },
+    {
+      reason: "Scoped device revocation",
+      approvalId: revokeApproval.approvalId,
+    },
     scoped.body.csrfToken,
   );
   assert.equal(ownDevice.response.status, 200);
+  const rotateApproval = await requestApproval(f, jar, scoped, {
+    action: "credential.rotate",
+    targetId: "key-bob",
+    reason: "Scoped credential rotation",
+  });
+  await decideApproval(f, approver, rotateApproval.approvalId);
   const ownCredential = await adminPost(
     f,
     jar,
     "/api/v1/admin/credentials/key-bob/rotate",
-    { reason: "Scoped credential rotation" },
+    {
+      reason: "Scoped credential rotation",
+      approvalId: rotateApproval.approvalId,
+    },
     scoped.body.csrfToken,
   );
   assert.equal(ownCredential.response.status, 200);
@@ -2109,12 +2300,22 @@ test("M2-C3 writes persist operation state and intent/result management audits",
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "Lost device requires immediate suspension",
+  });
+  await decideApproval(f, approver, approval.approvalId);
   const idempotencyKey = "m2c3-audit-key-1";
   const disabled = await adminPost(
     f,
     jar,
     "/api/v1/admin/users/usr_alice/disable",
-    { reason: "Lost device requires immediate suspension", approvalId: "INC-1001" },
+    {
+      reason: "Lost device requires immediate suspension",
+      approvalId: approval.approvalId,
+    },
     current.body.csrfToken,
     { "idempotency-key": idempotencyKey },
   );
@@ -2142,7 +2343,7 @@ test("M2-C3 writes persist operation state and intent/result management audits",
   assert.equal(operation.action, "user.disable");
   assert.equal(operation.targetId, "usr_alice");
   assert.equal(operation.reason, "Lost device requires immediate suspension");
-  assert.equal(operation.approvalId, "INC-1001");
+  assert.equal(operation.approvalId, approval.approvalId);
   assert.equal(operation.responseStatus, 200);
   assert.equal(operation.responseBody.operationId, disabled.body.operationId);
   assert.equal(operation.beforeSummary.status, "active");
@@ -2154,10 +2355,19 @@ test("M2-C3 writes persist operation state and intent/result management audits",
   assert.deepEqual(audits.map((audit) => audit.phase), ["intent", "result"]);
   assert.equal(audits[0].result, "pending");
   assert.equal(audits[0].reason, "Lost device requires immediate suspension");
-  assert.equal(audits[0].approvalId, "INC-1001");
+  assert.equal(audits[0].approvalId, approval.approvalId);
   assert.equal(audits[1].result, "succeeded");
   assert.equal(audits[1].afterSummary.user.id, "usr_alice");
   assert.ok(audits.every((audit) => audit.requestId === disabled.body.requestId));
+  assert.equal(data.approvalRequests[approval.approvalId].status, "consumed");
+  assert.equal(
+    data.approvalRequests[approval.approvalId].operationId,
+    disabled.body.operationId,
+  );
+  assert.equal(
+    data.approvalConsumptions[approval.approvalId].outcome,
+    "succeeded",
+  );
   const enabledOperation = data.adminOperations[enabled.body.operationId];
   assert.equal(enabledOperation.status, "succeeded");
   assert.equal(enabledOperation.idempotencyKeyHash, "");
@@ -2178,9 +2388,17 @@ test("M2-C3 replays successful writes, rejects key conflicts, and runs concurren
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
   const idempotencyKey = "m2c3-replay-key-1";
   const pathName = "/api/v1/admin/users/usr_alice/disable";
-  const body = { reason: "Replay-safe suspension" };
+  const reason = "Replay-safe suspension";
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason,
+  });
+  await decideApproval(f, approver, approval.approvalId);
+  const body = { reason, approvalId: approval.approvalId };
 
   const first = await adminPost(
     f,
@@ -2210,7 +2428,10 @@ test("M2-C3 replays successful writes, rejects key conflicts, and runs concurren
     f,
     jar,
     pathName,
-    { reason: "A different request must not reuse the key" },
+    {
+      reason: "A different request must not reuse the key",
+      approvalId: approval.approvalId,
+    },
     current.body.csrfToken,
     { "idempotency-key": idempotencyKey },
   );
@@ -2222,7 +2443,17 @@ test("M2-C3 replays successful writes, rejects key conflicts, and runs concurren
   f.auth.setWriteDelay(400);
   const concurrentKey = "m2c3-concurrent-key-1";
   const concurrentPath = "/api/v1/admin/devices/dev_bob/revoke";
-  const concurrentBody = { reason: "Concurrent idempotency check" };
+  const concurrentReason = "Concurrent idempotency check";
+  const concurrentApproval = await requestApproval(f, jar, current, {
+    action: "device.revoke",
+    targetId: "dev_bob",
+    reason: concurrentReason,
+  });
+  await decideApproval(f, approver, concurrentApproval.approvalId);
+  const concurrentBody = {
+    reason: concurrentReason,
+    approvalId: concurrentApproval.approvalId,
+  };
   const concurrent = await Promise.all([
     adminPost(
       f,
@@ -2263,6 +2494,14 @@ test("M2-C3 intent audit failure blocks the auth-service call", { timeout: 30000
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const reason = "Intent audit must fail closed";
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason,
+  });
+  await decideApproval(f, approver, approval.approvalId);
   const originalMutate = f.admin.store.mutate.bind(f.admin.store);
   f.admin.store.mutate = (fn) => originalMutate((draft) => {
     const operationsBefore = Object.keys(draft.adminOperations).length;
@@ -2277,7 +2516,7 @@ test("M2-C3 intent audit failure blocks the auth-service call", { timeout: 30000
     f,
     jar,
     "/api/v1/admin/users/usr_alice/disable",
-    { reason: "Intent audit must fail closed" },
+    { reason, approvalId: approval.approvalId },
     current.body.csrfToken,
     { "idempotency-key": "m2c3-intent-failure-1" },
   );
@@ -2297,12 +2536,21 @@ test("M2-C3 dependency failures are result-audited before the stable error is re
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const reason = "Dependency failure must be audited";
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason,
+  });
+  await decideApproval(f, approver, approval.approvalId);
+  const body = { reason, approvalId: approval.approvalId };
   f.auth.setWriteFailing(true);
   const response = await adminPost(
     f,
     jar,
     "/api/v1/admin/users/usr_alice/disable",
-    { reason: "Dependency failure must be audited" },
+    body,
     current.body.csrfToken,
     { "idempotency-key": "m2c3-result-failure-1" },
   );
@@ -2324,7 +2572,7 @@ test("M2-C3 dependency failures are result-audited before the stable error is re
     f,
     jar,
     "/api/v1/admin/users/usr_alice/disable",
-    { reason: "Dependency failure must be audited" },
+    body,
     current.body.csrfToken,
     { "idempotency-key": "m2c3-result-failure-1" },
   );
@@ -2342,6 +2590,14 @@ test("M2-C3 result audit failure never returns success and leaves the operation 
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const reason = "The result audit must fail closed";
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason,
+  });
+  await decideApproval(f, approver, approval.approvalId);
   const originalMutate = f.admin.store.mutate.bind(f.admin.store);
   let failResultCommit = true;
   f.admin.store.mutate = (fn) => originalMutate((draft) => {
@@ -2364,7 +2620,7 @@ test("M2-C3 result audit failure never returns success and leaves the operation 
     f,
     jar,
     "/api/v1/admin/users/usr_alice/disable",
-    { reason: "The result audit must fail closed" },
+    { reason, approvalId: approval.approvalId },
     current.body.csrfToken,
     { "idempotency-key": "m2c3-result-audit-failure-1" },
   );
@@ -2705,6 +2961,7 @@ test("M2-C5 supports all four reconciliation actions without rewriting the paren
 
   const jar = await adminLogin(f);
   const current = await me(f, jar);
+  const approver = await independentApprover(f);
   const operationIds = [
     "op_reconcile_applied",
     "op_reconcile_not_applied",
@@ -2726,6 +2983,41 @@ test("M2-C5 supports all four reconciliation actions without rewriting the paren
         : undefined,
     });
   }
+  const approvalCases = {
+    op_reconcile_applied: {
+      action: "confirm_applied",
+      reason: "Controlled confirm_applied reconciliation",
+      evidenceRef: "ticket:CHG-APPLIED",
+    },
+    op_reconcile_not_applied: {
+      action: "confirm_not_applied",
+      reason: "Controlled confirm_not_applied reconciliation",
+      evidenceRef: "ticket:CHG-NOT-APPLIED",
+    },
+    op_reconcile_retry: {
+      action: "retry_desired",
+      reason: "Controlled retry_desired reconciliation",
+      evidenceRef: "",
+    },
+    op_reconcile_rollback: {
+      action: "rollback_previous",
+      reason: "Controlled rollback_previous reconciliation",
+      evidenceRef: "",
+    },
+  };
+  const approvals = {};
+  for (const [operationId, approvalCase] of Object.entries(approvalCases)) {
+    approvals[operationId] = await approveReconciliation(
+      f,
+      jar,
+      current,
+      approver,
+      { id: operationId },
+      approvalCase.action,
+      approvalCase.reason,
+      approvalCase.evidenceRef,
+    );
+  }
   const before = await readAdminData(f);
   const parentAudits = Object.fromEntries(operationIds.map((id) => [
     id,
@@ -2733,13 +3025,14 @@ test("M2-C5 supports all four reconciliation actions without rewriting the paren
   ]));
 
   async function reconcile(operationId, action, key, evidenceRef = "") {
+    const approvalCase = approvalCases[operationId];
     return adminPost(
       f,
       jar,
       `/api/v1/admin/operations/${operationId}/reconcile`,
       {
-        reason: `Controlled ${action} reconciliation`,
-        approvalId: `CHG-${key}`,
+        reason: approvalCase.reason,
+        approvalId: approvals[operationId].approvalId,
         action,
         ...(evidenceRef ? { evidenceRef } : {}),
       },
@@ -2879,10 +3172,21 @@ test("M2-C5 reconciliation dependency failures are result-audited and idempotent
   const jar = await adminLogin(f);
   const current = await me(f, jar);
   const parent = await seedAdminOperation(f, { id: "op_reconcile_dependency_failure" });
+  const approver = await independentApprover(f);
+  const reason = "Dependency failure must remain auditable";
+  const approval = await approveReconciliation(
+    f,
+    jar,
+    current,
+    approver,
+    parent,
+    "retry_desired",
+    reason,
+  );
   const pathname = `/api/v1/admin/operations/${parent.id}/reconcile`;
   const body = {
-    reason: "Dependency failure must remain auditable",
-    approvalId: "CHG-DEPENDENCY",
+    reason,
+    approvalId: approval.approvalId,
     action: "retry_desired",
   };
   const headers = { "idempotency-key": "m2c5-dependency-failure" };
@@ -2950,6 +3254,17 @@ test("M2-C5 intent audit failure blocks reconciliation before the dependency cal
   const jar = await adminLogin(f);
   const current = await me(f, jar);
   const parent = await seedAdminOperation(f, { id: "op_reconcile_intent_failure" });
+  const approver = await independentApprover(f);
+  const reason = "Intent audit must fail closed";
+  const approval = await approveReconciliation(
+    f,
+    jar,
+    current,
+    approver,
+    parent,
+    "retry_desired",
+    reason,
+  );
   const originalMutate = f.admin.store.mutate.bind(f.admin.store);
   f.admin.store.mutate = (fn) => originalMutate((draft) => {
     const before = Object.keys(draft.adminOperations).length;
@@ -2965,8 +3280,8 @@ test("M2-C5 intent audit failure blocks reconciliation before the dependency cal
     jar,
     `/api/v1/admin/operations/${parent.id}/reconcile`,
     {
-      reason: "Intent audit must fail closed",
-      approvalId: "CHG-INTENT-FAILURE",
+      reason,
+      approvalId: approval.approvalId,
       action: "retry_desired",
     },
     current.body.csrfToken,
@@ -2989,6 +3304,17 @@ test("M2-C5 result audit failure leaves reconciliation incomplete and does not a
   const jar = await adminLogin(f);
   const current = await me(f, jar);
   const parent = await seedAdminOperation(f, { id: "op_reconcile_result_failure" });
+  const approver = await independentApprover(f);
+  const reason = "Result audit must fail closed";
+  const approval = await approveReconciliation(
+    f,
+    jar,
+    current,
+    approver,
+    parent,
+    "retry_desired",
+    reason,
+  );
   const originalMutate = f.admin.store.mutate.bind(f.admin.store);
   let failResultCommit = true;
   f.admin.store.mutate = (fn) => originalMutate((draft) => {
@@ -3013,8 +3339,8 @@ test("M2-C5 result audit failure leaves reconciliation incomplete and does not a
     jar,
     `/api/v1/admin/operations/${parent.id}/reconcile`,
     {
-      reason: "Result audit must fail closed",
-      approvalId: "CHG-RESULT-FAILURE",
+      reason,
+      approvalId: approval.approvalId,
       action: "retry_desired",
     },
     current.body.csrfToken,
@@ -3036,6 +3362,476 @@ test("M2-C5 result audit failure leaves reconciliation incomplete and does not a
     ["intent"],
   );
   assert.equal(data.adminOperations[parent.id].reconciliationState, undefined);
+});
+
+test("approval risk levels and canonical digests are stable", () => {
+  assert.deepEqual(
+    [
+      "user.enable",
+      "credential.rotate",
+      "user.policy.quota",
+      "user.disable",
+      "device.revoke",
+      "user.policy.models",
+      "operation.reconcile",
+    ].map(riskForAction),
+    ["L", "M", "M", "H", "H", "H", "C"],
+  );
+  assert.equal(riskForAction("unknown.action"), "");
+
+  assert.deepEqual(
+    normalizedApprovalPayload("user.policy.models", {
+      expectedVersion: 3,
+      models: ["openai/gpt-test", "deepseek/deepseek-chat", "openai/gpt-test"],
+    }),
+    {
+      expectedVersion: 3,
+      models: ["deepseek/deepseek-chat", "openai/gpt-test"],
+    },
+  );
+  assert.equal(
+    approvalPayloadDigest("user.policy.quota", {
+      expectedVersion: 2,
+      limits: [
+        { cost: 1, period: "month", tokens: 1000 },
+        { tokens: 50, period: "day" },
+      ],
+    }),
+    approvalPayloadDigest("user.policy.quota", {
+      limits: [
+        { period: "day", tokens: 50 },
+        { tokens: 1000, period: "month", cost: 1 },
+      ],
+      expectedVersion: 2,
+    }),
+  );
+
+  const binding = {
+    environmentId: "env_test",
+    policyVersion: "policy-v1",
+    requesterSubjectId: "adm_requester",
+    action: "user.disable",
+    targetType: "user",
+    targetId: "usr_alice",
+    targetOrgUnitId: "org-platform",
+    riskLevel: "H",
+    reason: "Lost laptop",
+    payloadDigest: approvalPayloadDigest("user.disable", {}),
+  };
+  assert.equal(approvalBindingDigest(binding), approvalBindingDigest({ ...binding }));
+  assert.notEqual(
+    approvalBindingDigest(binding),
+    approvalBindingDigest({ ...binding, policyVersion: "policy-v2" }),
+  );
+  assert.notEqual(
+    approvalBindingDigest(binding),
+    approvalBindingDigest({ ...binding, targetOrgUnitId: "org-sales" }),
+  );
+});
+
+test("approval APIs enforce CSRF, separation of duty, permissions, and organization scope", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const salesDepartmentAdmin = await independentApprover(f, {
+    role: "department_admin",
+    scopeOrgUnitId: "org-sales",
+  });
+  const engineeringDepartmentAdmin = await independentApprover(f, {
+    role: "department_admin",
+    scopeOrgUnitId: "org-root",
+  });
+
+  const noCsrf = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/approvals",
+    {
+      action: "user.disable",
+      targetId: "usr_bob",
+      reason: "CSRF must protect approval creation",
+    },
+    "",
+  );
+  assert.equal(noCsrf.response.status, 403);
+  assert.equal(noCsrf.body.error.code, "csrf_invalid");
+
+  const lowRisk = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/approvals",
+    {
+      action: "user.enable",
+      targetId: "usr_bob",
+      reason: "Enabling is low risk",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(lowRisk.response.status, 400);
+  assert.equal(lowRisk.body.error.code, "approval_not_required");
+
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Separation-of-duty test",
+  });
+
+  const selfDecision = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/approvals/${approval.approvalId}/decisions`,
+    { decision: "approve", reason: "I approve my own request" },
+    current.body.csrfToken,
+  );
+  assert.equal(selfDecision.response.status, 403);
+  assert.equal(selfDecision.body.error.code, "approval_separation_required");
+
+  const noDecisionCsrf = await adminPost(
+    f,
+    approver.jar,
+    `/api/v1/admin/approvals/${approval.approvalId}/decisions`,
+    { decision: "approve", reason: "Missing CSRF" },
+    "",
+  );
+  assert.equal(noDecisionCsrf.response.status, 403);
+  assert.equal(noDecisionCsrf.body.error.code, "csrf_invalid");
+
+  const crossScopeRead = await adminGet(
+    f,
+    salesDepartmentAdmin.jar,
+    `/api/v1/admin/approvals/${approval.approvalId}`,
+  );
+  assert.equal(crossScopeRead.response.status, 403);
+  assert.equal(crossScopeRead.body.error.code, "forbidden_scope");
+
+  const readOnlyDecision = await adminPost(
+    f,
+    engineeringDepartmentAdmin.jar,
+    `/api/v1/admin/approvals/${approval.approvalId}/decisions`,
+    { decision: "approve", reason: "Department admins are read-only" },
+    engineeringDepartmentAdmin.current.body.csrfToken,
+  );
+  assert.equal(readOnlyDecision.response.status, 403);
+  assert.equal(readOnlyDecision.body.error.code, "forbidden_role");
+
+  const approved = await decideApproval(
+    f,
+    approver,
+    approval.approvalId,
+    "approve",
+    "Independent security review",
+  );
+  assert.equal(approved.status, "approved");
+  assert.equal(approved.decisions.length, 1);
+  assert.equal(approved.decisions[0].actorSubjectId, approver.current.body.user.id);
+  assertNoWriteSecrets(approved, f, jar);
+});
+
+test("write approvals bind action, target, reason, payload, and policy version, and are consumed once", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const reason = "Apply the approved monthly quota";
+  const limits = [{ period: "month", tokens: 1000, cost: 1 }];
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.policy.quota",
+    targetId: "usr_alice",
+    reason,
+    expectedVersion: 2,
+    limits,
+  });
+  await decideApproval(f, approver, approval.approvalId);
+
+  const crossAction = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/devices/dev_alice/revoke",
+    { reason, approvalId: approval.approvalId },
+    current.body.csrfToken,
+  );
+  assert.equal(crossAction.response.status, 403);
+  assert.equal(crossAction.body.error.code, "approval_target_mismatch");
+
+  const crossTarget = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/policy/quota",
+    {
+      reason,
+      expectedVersion: 1,
+      limits,
+      approvalId: approval.approvalId,
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(crossTarget.response.status, 403);
+  assert.equal(crossTarget.body.error.code, "approval_target_mismatch");
+
+  const changedPayload = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    {
+      reason,
+      expectedVersion: 2,
+      limits: [{ period: "month", tokens: 2000, cost: 2 }],
+      approvalId: approval.approvalId,
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(changedPayload.response.status, 409);
+  assert.equal(changedPayload.body.error.code, "approval_payload_mismatch");
+
+  const changedReason = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    {
+      reason: "A different reason must not reuse the approval",
+      expectedVersion: 2,
+      limits,
+      approvalId: approval.approvalId,
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(changedReason.response.status, 409);
+  assert.equal(changedReason.body.error.code, "approval_payload_mismatch");
+
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[approval.approvalId].policyVersion = "tampered-policy";
+  });
+  const changedPolicyVersion = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    { reason, expectedVersion: 2, limits, approvalId: approval.approvalId },
+    current.body.csrfToken,
+  );
+  assert.equal(changedPolicyVersion.response.status, 409);
+  assert.equal(changedPolicyVersion.body.error.code, "approval_payload_mismatch");
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[approval.approvalId].policyVersion = approval.policyVersion;
+  });
+  assert.equal(f.auth.writeCalls.length, 0);
+
+  const idempotencyKey = "approval-consume-once";
+  const body = { reason, expectedVersion: 2, limits, approvalId: approval.approvalId };
+  const written = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    body,
+    current.body.csrfToken,
+    { "idempotency-key": idempotencyKey },
+  );
+  assert.equal(written.response.status, 200, JSON.stringify(written.body));
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const replay = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    body,
+    current.body.csrfToken,
+    { "idempotency-key": idempotencyKey },
+  );
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.operationId, written.body.operationId);
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const consumed = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    body,
+    current.body.csrfToken,
+  );
+  assert.equal(consumed.response.status, 409);
+  assert.equal(consumed.body.error.code, "approval_consumed");
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const lowRiskWithApproval = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/enable",
+    { reason: "Low-risk enable", approvalId: approval.approvalId },
+    current.body.csrfToken,
+  );
+  assert.equal(lowRiskWithApproval.response.status, 403);
+  assert.equal(lowRiskWithApproval.body.error.code, "approval_invalid");
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const data = await readAdminData(f);
+  assert.equal(data.approvalRequests[approval.approvalId].status, "consumed");
+  assert.equal(
+    data.approvalRequests[approval.approvalId].operationId,
+    written.body.operationId,
+  );
+  assert.equal(data.approvalConsumptions[approval.approvalId].outcome, "succeeded");
+  const consumedAudit = data.adminSystemAuditLogs.find((audit) => (
+    audit.action === "approval.consumed"
+    && audit.approvalId === approval.approvalId
+  ));
+  assert.equal(consumedAudit.operationId, written.body.operationId);
+  assertNoWriteSecrets(data, f, jar);
+});
+
+test("expired and revoked approvals fail closed, and concurrent operations cannot share one approval", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+
+  const expiredReason = "Expired approvals cannot authorize writes";
+  const expiredApproval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: expiredReason,
+  });
+  await decideApproval(f, approver, expiredApproval.approvalId);
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[expiredApproval.approvalId].expiresAt = "2000-01-01T00:00:00.000Z";
+  });
+  const expired = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/disable",
+    { reason: expiredReason, approvalId: expiredApproval.approvalId },
+    current.body.csrfToken,
+  );
+  assert.equal(expired.response.status, 403);
+  assert.equal(expired.body.error.code, "approval_expired");
+  assert.equal(f.auth.writeCalls.length, 0);
+
+  const revokedReason = "Revoked approvals cannot authorize writes";
+  const revokedApproval = await requestApproval(f, jar, current, {
+    action: "device.revoke",
+    targetId: "dev_bob",
+    reason: revokedReason,
+  });
+  await decideApproval(f, approver, revokedApproval.approvalId);
+  const revoked = await adminPost(
+    f,
+    approver.jar,
+    `/api/v1/admin/approvals/${revokedApproval.approvalId}/revoke`,
+    { reason: "Security reviewer withdrew the approval" },
+    approver.current.body.csrfToken,
+  );
+  assert.equal(revoked.response.status, 200);
+  assert.equal(revoked.body.approval.status, "revoked");
+  const revokedWrite = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/devices/dev_bob/revoke",
+    { reason: revokedReason, approvalId: revokedApproval.approvalId },
+    current.body.csrfToken,
+  );
+  assert.equal(revokedWrite.response.status, 403);
+  assert.equal(revokedWrite.body.error.code, "approval_revoked");
+  assert.equal(f.auth.writeCalls.length, 0);
+
+  const concurrentReason = "Only one concurrent operation may consume this approval";
+  const concurrentApproval = await requestApproval(f, jar, current, {
+    action: "credential.rotate",
+    targetId: "key-bob",
+    reason: concurrentReason,
+  });
+  await decideApproval(f, approver, concurrentApproval.approvalId);
+  f.auth.setWriteDelay(250);
+  const concurrentBody = {
+    reason: concurrentReason,
+    approvalId: concurrentApproval.approvalId,
+  };
+  const concurrent = await Promise.all([
+    adminPost(
+      f,
+      jar,
+      "/api/v1/admin/credentials/key-bob/rotate",
+      concurrentBody,
+      current.body.csrfToken,
+      { "idempotency-key": "approval-race-left" },
+    ),
+    adminPost(
+      f,
+      jar,
+      "/api/v1/admin/credentials/key-bob/rotate",
+      concurrentBody,
+      current.body.csrfToken,
+      { "idempotency-key": "approval-race-right" },
+    ),
+  ]);
+  concurrent.sort((left, right) => left.response.status - right.response.status);
+  assert.deepEqual(concurrent.map((result) => result.response.status), [200, 409]);
+  assert.equal(concurrent[1].body.error.code, "approval_consumed");
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const data = await readAdminData(f);
+  assert.equal(data.approvalRequests[concurrentApproval.approvalId].status, "consumed");
+  assert.equal(data.adminOperations[concurrent[0].body.operationId].status, "succeeded");
+  assertNoWriteSecrets(data, f, jar);
+});
+
+test("startup recovery turns a reserved approval into a fail-closed consumed approval", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "Restart recovery test",
+  });
+  await decideApproval(f, approver, approval.approvalId);
+  await f.admin.store.mutate((data) => {
+    const stored = data.approvalRequests[approval.approvalId];
+    stored.status = "reserved";
+    stored.operationId = "op_recovered_reservation";
+    stored.stateHistory.push({
+      status: "reserved",
+      at: new Date().toISOString(),
+      actorSubjectId: current.body.user.id,
+      reason: "simulated process interruption",
+    });
+    data.approvalConsumptions[approval.approvalId] = {
+      approvalId: approval.approvalId,
+      operationId: "op_recovered_reservation",
+      reservedAt: new Date().toISOString(),
+      consumedAt: "",
+      outcome: "reserved",
+    };
+  });
+
+  const restarted = await createEnterpriseAdminServer(f.config);
+  const recovered = await restarted.store.read((data) => ({
+    approval: structuredClone(data.approvalRequests[approval.approvalId]),
+    consumption: structuredClone(data.approvalConsumptions[approval.approvalId]),
+    audits: structuredClone(data.adminSystemAuditLogs),
+  }));
+  assert.equal(recovered.approval.status, "consumed");
+  assert.match(recovered.approval.consumedAt, /^\d{4}-\d{2}-\d{2}T/);
+  assert.equal(recovered.approval.recoveredAt, recovered.approval.consumedAt);
+  assert.equal(recovered.consumption.outcome, "unknown_recovered");
+  assert.equal(recovered.consumption.operationId, "op_recovered_reservation");
+  assert.ok(recovered.audits.some((audit) => (
+    audit.action === "approval.recovered_reserved"
+    && audit.approvalId === approval.approvalId
+    && audit.result === "failed_closed"
+  )));
+  assertNoWriteSecrets(recovered, f, jar);
 });
 
 test("usage storage failures are not rendered as partial reports", { timeout: 30000 }, async (t) => {

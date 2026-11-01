@@ -227,13 +227,13 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 | M2-C3 | 已实现，Mock 测试 | 持久化幂等、`operationId`、intent/result 审计和审计失败阻断 | 真实审计存储和查询/对账 |
 | C4-01 | 已实现，本地测试通过 | schema v1、原子 `policy apply`、版本冲突、无秘密输出、文件锁和真实二进制冒烟 | 管理链路 |
 | C4-02 | 已实现，15 项 Mock/故障测试通过 | 固定路由/argv、服务令牌、超时、输出上限、独立回读和 `pending` | Docker、真实共享卷、mTLS |
-| C4-03a | 已实现，35/35 管理测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启 |
-| C4-03b | 核心已实现，23/23 auth 测试通过 | 用户级 `gatewayPolicy`、M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | 真实部署和真实请求 E2E |
+| C4-03a | 已实现，49/49 管理测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启 |
+| C4-03b | 核心已实现，25/25 auth 测试通过 | 用户级 `gatewayPolicy`、M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | 真实部署和真实请求 E2E |
 | C4-03c | 核心已实现，Mock/故障测试通过 | 管理额度/模型 API、幂等签发、issuance journal、apply/readback、同步后交付、失败补偿和启动恢复 | 真实 Magpie/共享卷故障注入、真实 IdP 和生产验收 |
-| C4-03d | 部分实现 | 管理页有额度/模型写表单、完整证据链和失败证据；员工页有本人额度/模型/凭证/设备只读门户 | 页面 E2E、失败恢复入口、停用/吊销/轮换页面、operation/audit 查询和人工对账 |
+| C4-03d | 部分实现 | 管理页有额度/模型写表单、完整证据链和失败证据；员工页有本人额度/模型/凭证/设备只读门户 | 页面 E2E、失败恢复入口、停用/吊销/轮换页面，以及 C5 查询/对账 API 的页面接入 |
 | C4-04 | 完整管理链路 E2E 已通过 | 隔离真实 Magpie 的管理 OIDC/CSRF、分步策略、双设备 Key、限额/模型拒绝、`partial_success`、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描 | Docker/共享卷、真实企业 IdP、反向代理、浏览器自动化和生产验收 |
-| M2-C5 | 未实现 | 只有查询/对账设计 | operations、audit-logs 和人工对账 |
-| M2-E | 未实现 | APR-01/NOTIFY-01 设计完成 | 审批、step-up、break-glass、outbox、SIEM/Webhook/工单 |
+| M2-C5 | 后端已实现，Mock/故障测试通过 | operation 详情、脱敏审计分页、签名 cursor 和四种人工对账 API | 真实审计存储、生产运维演练和完整查询/对账 UI |
+| M2-E | APR-01a 后端已实现，其余未实现 | 服务端审批、绑定、职责分离和一次性消费已实现；APR-01b-e/NOTIFY-01 设计完成 | step-up、外部 OA、审批箱、break-glass、outbox、SIEM/Webhook/工单 |
 | M2-D | 未实现 | 员工只读状态门户已在 C4-03d 部分交付 | 看板、报表、导出、完整运营写 UI 和操作历史 |
 | M3 | 未实现 | 只有完整设计 | 中央 MCP、Skills、Instructions、Subagents、签名资源、同步、漂移和回滚 |
 | M4 | 未实现 | 只有审计分级设计 | 对话正文、工具审计、脱敏、检索、留存和导出 |
@@ -242,8 +242,8 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 
 当前已执行并通过的本地测试：
 
-- `enterprise/auth-service`：`23 passed, 0 failed`
-- `enterprise/admin-service`：`35 passed, 0 failed`（28 项管理集成 + 7 项目录专项）
+- `enterprise/auth-service`：`25 passed, 0 failed`
+- `enterprise/admin-service`：`49 passed, 0 failed`（42 项管理集成 + 7 项目录专项）
 - `enterprise/gateway-control`：`15 passed, 0 failed`
 - `enterprise/test/c4-enterprise-policy-e2e.ps1`：18 阶段完整管理到真实 Magpie 策略流 E2E 通过
 
@@ -263,10 +263,13 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 
 - 不能查看员工对话正文、Prompt、回复、附件正文或完整工具参数。
 - 管理页已有受控额度/模型写表单，C4-04 已证明隔离真实链路生效；但页面浏览器 E2E、
-  真实共享卷、真实企业 IdP、生产反向代理和 C5 对账仍未验收，不能宣称生产自助管理完成。
-- 不能查询 operations/audit-logs 或执行人工对账；C5 尚未实现。
+  真实共享卷、真实企业 IdP、生产反向代理和 C5 页面/生产验收仍未完成，不能宣称生产自助
+  管理完成。
+- 不能通过完整管理页面查询 operations/audit-logs 或执行人工对账；C5 后端 API 已实现，
+  但查询/对账 UI 尚未接入。
 - 不能配置中央 MCP 服务器、工具权限或公司资源库；M3 尚未实现。
-- 不能宣称审批、step-up、break-glass、Webhook/SIEM/工单已可用；APR-01/NOTIFY-01 尚未实现。
+- 不能宣称 step-up、break-glass、Webhook/SIEM/工单或完整审批运营已可用；APR-01a 服务端
+  审批已实现，但 APR-01b-e 和 NOTIFY-01 尚未实现。
 - 不能宣称高可用、多副本、KMS、mTLS 或多地域已完成；M6 尚未实现。
 
 ## 10. MCP 与企业资源库（M3，尚未实现）

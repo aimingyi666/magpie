@@ -2,7 +2,7 @@
 
 独立的企业管理控制面。当前版本完成 **M2-A 管理身份底座**、**M2-B 只读治理**、
 **M2-C2 管理写接口与权限映射**、**M2-C3 幂等与 intent/result 管理审计**和
-**M2-C5 操作/审计查询与对账**：管理 OIDC、
+**M2-C5 操作/审计查询与对账**，以及 **M2-E1/APR-01a 服务端审批**：管理 OIDC、
 会话、CSRF、RBAC、组织范围、用户/部门/设备/凭证/模型/用量只读视图、只读 `usage.jsonl`
 汇总，以及停用/启用用户、吊销设备和轮换当前凭证四个受控写接口。Auth 服务的
 **M2-C1 内部写接口**继续只供服务间调用。
@@ -13,7 +13,7 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 44 项管理测试通过（37 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
+当前总计 49 项管理测试通过（42 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
 CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据链成立时显示“已生效”；
@@ -69,6 +69,15 @@ CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据�
   动作固定为 `retry_desired`、`rollback_previous`、`confirm_applied`、
   `confirm_not_applied`。每次对账创建子 operation 并追加 intent/result 审计，父 operation
   的状态、响应和原审计保持不变。
+- `POST /api/v1/admin/approvals`、`GET /api/v1/admin/approvals/{id}`、
+  `POST /api/v1/admin/approvals/{id}/decisions` 和
+  `POST /api/v1/admin/approvals/{id}/revoke` 提供审批申请、查询、批准/拒绝和撤销。
+  申请、决策、撤销要求管理会话、CSRF、必填理由和对应权限；决策/撤销还会校验目标组织范围。
+- APR-01a 使用 24 小时有效期和 L/M/H/C 风险。审批绑定环境、申请人、组织、动作、目标、
+  理由、规范化 payload SHA-256、binding SHA-256 和策略版本；禁止自审批。
+- 除低风险 `user.enable` 外，现有受支持管理写操作都要消费有效审批。审批在业务依赖调用前
+  原子预留，成功后一次性消费；并发复用返回 `409 approval_consumed`，进程启动时遗留
+  `reserved` 状态按失败关闭处理为 `consumed`。
 
 ## M2-C4 目标边界（C4-01/C4-02/C4-03a/C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 完整策略流 E2E 已通过）
 
@@ -131,7 +140,7 @@ M2-C4 工作包。
 | 角色 | 当前用途 |
 | --- | --- |
 | `employee` | 无管理权限 |
-| `department_admin` | 指定组织单元及子单元内的只读视图、用户/设备/凭证受控写操作，以及 `quota.write`/`models.write` 策略写入；仍需真实 IdP、代理和网关验收 |
+| `department_admin` | 指定组织单元及子单元内的只读视图、用户/设备/凭证受控写操作、`quota.write`/`models.write` 策略写入和审批申请/读取；仍需真实 IdP、代理和网关验收 |
 | `enterprise_admin` | 全企业治理，但不默认获得正文审计权限 |
 | `auditor` | 只读审计和用量 |
 | `security_admin` | 设备、凭据、告警和人员停用 |
@@ -234,6 +243,9 @@ adminSessions
 adminAuditLogs
 adminOperations
 adminIdempotency
+approvalRequests
+approvalDecisions
+approvalConsumptions
 ```
 
 当前还没有角色/组织写 API，因此试点初始化时可以由受控运维流程写入 `orgUnits`、
@@ -278,12 +290,19 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 | `POST` | `/api/v1/admin/credentials/{id}/rotate` | 轮换当前凭证，新 Key 等待目标设备刷新 |
 | `PUT` | `/api/v1/admin/users/{id}/policy/quota` | 调额；要求 `quota.write`、`expectedVersion` 和幂等校验 |
 | `PATCH` | `/api/v1/admin/users/{id}/policy/models` | 模型授权；要求 `models.write`、`expectedVersion` 和幂等校验 |
+| `POST` | `/api/v1/admin/approvals` | 申请审批；要求被审批动作的原权限、CSRF、`reason` 和动作绑定字段 |
+| `GET` | `/api/v1/admin/approvals/{id}` | 读取审批状态和决策；要求 `approvals.read` 和目标组织范围 |
+| `POST` | `/api/v1/admin/approvals/{id}/decisions` | 批准/拒绝；要求 `approvals.decide`、CSRF 和 `reason`，禁止自审批 |
+| `POST` | `/api/v1/admin/approvals/{id}/revoke` | 撤销审批；要求 `approvals.revoke`、CSRF 和 `reason` |
 
 稳定错误码包括 `not_signed_in`、`session_expired`、`session_idle`、`session_binding_mismatch`、
 `forbidden_role`、`forbidden_scope`、`csrf_invalid`、`mfa_required`、`email_not_verified` 和
 `target_not_found`，以及 `dependency_unavailable`、`storage_unavailable`、
 `invalid_time_range`、`invalid_json`、`invalid_reason`、`invalid_idempotency_key`、
-`idempotency_conflict`、`operation_in_progress`、`audit_unavailable`。
+`idempotency_conflict`、`operation_in_progress`、`audit_unavailable`、`approval_required`、
+`approval_invalid`、`approval_expired`、`approval_revoked`、`approval_consumed`、
+`approval_target_mismatch`、`approval_payload_mismatch` 和
+`approval_separation_required`。
 
 四个写接口的成功响应包含 `requestId`、`operationId`、动作名、目标 ID 和白名单业务摘要。
 请求可携带 `Idempotency-Key`（去空白后最长 128 个字符且不得含控制字符）。服务端只持久化
@@ -319,7 +338,7 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\admin-service.test.mjs test\model-catalog.test.mjs
 ```
 
-2026-11-02 的实际结果：`44 passed, 0 failed`（37 项管理服务集成测试 + 7 项目录专项测试）。
+2026-11-02 的实际结果：`49 passed, 0 failed`（42 项管理服务集成测试 + 7 项目录专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
 拒绝、用户详情跨范围拒绝、会话过期、IP fail-closed、依赖不可用、凭证元数据、用量归属、
@@ -334,7 +353,9 @@ digest 不匹配和失败关闭。C4-03c 集成测试覆盖额度/模型 API、�
 C4-03d 页面测试覆盖 CSRF meta、静态脚本、只读角色无写表单、完整证据链才显示 verified，
 以及页面不泄漏 Gateway Key 或 token hash。M2-C5 覆盖 operation 详情权限/组织范围、审计
 过滤和 cursor 绑定、脱敏、四种对账动作、父/子 operation 关系、原审计不可改写、旧快照
-失败关闭、依赖/审计失败和幂等重放。管理服务当前为 `44 passed, 0 failed`，auth-service
+失败关闭、依赖/审计失败和幂等重放。APR-01a 覆盖风险与摘要稳定性、审批申请/决策/撤销的
+CSRF/权限/组织范围/自审批拒绝、动作/目标/理由/payload/策略版本绑定、过期/撤销、一次性
+消费、并发复用和启动恢复失败关闭。管理服务当前为 `49 passed, 0 failed`，auth-service
 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`。
 
 尚未验证：
@@ -347,6 +368,10 @@ C4-03d 页面测试覆盖 CSRF meta、静态脚本、只读角色无写表单、
   回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d 仍有
   页面 E2E、停用/吊销/轮换页面和失败恢复入口待 D 完成；C5 的查询与对账目前只有
   Mock/故障测试证据，尚未接入完整管理页面。
+- APR-01a 的审批管理页面、真实管理 IdP step-up/MFA/ACR、外部 OA/飞书/ServiceNow/Jira
+  回调、串并行审批箱、转交、break-glass、审批通知和生产审批演练未实现/未验收。
+- NOTIFY-01 的 transactional outbox、dispatcher、邮件/企业 IM/Webhook/SIEM/工单、
+  重试/死信和运营页面未实现。
 - 四个 M2-C2 写接口在真实 IdP、反向代理、真实 auth-service 和真实网关上的端到端演练。
 
 ## 当前限制
@@ -355,6 +380,8 @@ C4-03d 页面测试覆盖 CSRF meta、静态脚本、只读角色无写表单、
 - 每个管理请求会更新 `lastSeenAt`，小规模试点可接受，规模化需要共享存储和写合并。
 - result 审计失败时 operation 会停在 `dependency_invoked`；C5 已提供查询、审计分页和受控
   对账，但自动补偿、告警队列和真实运维演练仍未实现/验收。
+- 审批已有服务端 API 和一次性消费，但没有管理 UI、外部 OA 回调、step-up、审批箱、
+  break-glass 或通知投递；审批存储仍是单实例 JSON，尚未做多实例并发和真实 OA 验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。
 - 用量读取当前基于单个 `usage.jsonl` 文件；轮转、归档、超大文件和事件存储查询尚未验收。
 - CSV 导出、费用趋势图、完整管理写按钮和运营看板属于 M2-D；C5 已提供审计过滤/分页和

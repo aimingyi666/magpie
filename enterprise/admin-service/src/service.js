@@ -32,6 +32,17 @@ import {
   signCookie,
   verifyCookie,
 } from "./security.js";
+import {
+  APPROVAL_POLICY_VERSION,
+  approvalBindingDigest,
+  approvalConsumptionFailure,
+  approvalIsExpired,
+  approvalPayloadDigest,
+  approvalRequiredForAction,
+  normalizedApprovalPayload,
+  publicApproval,
+  riskForAction,
+} from "./approval.js";
 import { JsonStore } from "./store.js";
 import { readUsageFile } from "./usage-reader.js";
 
@@ -41,6 +52,7 @@ const MAX_TIMESERIES_POINTS = 10000;
 const DEFAULT_AUDIT_LIMIT = 50;
 const MAX_AUDIT_LIMIT = 200;
 const MAX_AUDIT_CURSOR = 4096;
+const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 const ADMIN_APP_JS = await fs.readFile(new URL("./admin-app.js", import.meta.url), "utf8");
 
 const OPERATION_PERMISSIONS = Object.freeze({
@@ -51,6 +63,16 @@ const OPERATION_PERMISSIONS = Object.freeze({
   "user.policy.quota": "quota.write",
   "user.policy.models": "models.write",
   "operation.reconcile": "operations.reconcile",
+});
+
+const APPROVAL_ACTION_TARGETS = Object.freeze({
+  "user.disable": { targetType: "user", permission: "users.disable" },
+  "user.enable": { targetType: "user", permission: "users.disable" },
+  "device.revoke": { targetType: "device", permission: "devices.revoke" },
+  "credential.rotate": { targetType: "credential", permission: "credentials.rotate" },
+  "user.policy.quota": { targetType: "user", permission: "quota.write" },
+  "user.policy.models": { targetType: "user", permission: "models.write" },
+  "operation.reconcile": { targetType: "operation", permission: "operations.reconcile" },
 });
 
 const POLICY_ACTIONS = new Set([
@@ -75,14 +97,24 @@ const RECONCILIATION_STATES = new Set([
 
 const NON_RETRYABLE_OPERATION_ERRORS = new Set([
   "approval_required",
+  "approval_invalid",
+  "approval_expired",
+  "approval_revoked",
+  "approval_consumed",
+  "approval_target_mismatch",
+  "approval_payload_mismatch",
+  "approval_separation_required",
+  "approval_unavailable",
   "csrf_invalid",
   "forbidden_role",
   "forbidden_scope",
   "idempotency_conflict",
   "invalid_approval_id",
+  "invalid_approval_action",
   "invalid_json",
   "invalid_reason",
   "invalid_request",
+  "target_org_required",
   "target_not_found",
 ]);
 
@@ -220,6 +252,15 @@ function cleanOptionalApprovalId(value) {
     throw new HttpError(400, "invalid_approval_id", "approvalId is invalid");
   }
   return approvalId;
+}
+
+function cleanIdentifier(value, name, code = "invalid_request") {
+  const identifier = String(value ?? "").trim();
+  if (!identifier) throw new HttpError(400, code, `${name} is required`);
+  if ([...identifier].length > 128 || /[\u0000-\u001f\u007f]/.test(identifier)) {
+    throw new HttpError(400, code, `${name} is invalid`);
+  }
+  return identifier;
 }
 
 function cleanEvidenceRef(value, required = false) {
@@ -981,6 +1022,586 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   const oidc = options.oidc || new OidcClient(config.oidc);
   const authService = options.authService || new AuthServiceClient(config.authService);
   const rate = new Map();
+  const approvalEnvironmentId = `env_${sha256(new URL(config.publicUrl).origin).slice(0, 24)}`;
+
+  function currentApprovalPolicyVersion() {
+    const catalogVersion = Number.isSafeInteger(modelCatalog.status.catalogVersion)
+      ? modelCatalog.status.catalogVersion
+      : 0;
+    return `${APPROVAL_POLICY_VERSION}:catalog=${catalogVersion}:${
+      modelCatalog.status.catalogDigest || "legacy"
+    }`;
+  }
+
+  function appendApprovalSystemAudit(data, action, approval, options = {}) {
+    data.adminSystemAuditLogs.push({
+      id: `audit_${crypto.randomUUID()}`,
+      action,
+      timestamp: new Date().toISOString(),
+      approvalId: String(approval?.id || ""),
+      result: String(options.result || ""),
+      errorCode: String(options.errorCode || ""),
+      actorSubjectId: String(options.actorSubjectId || ""),
+      actorEmail: String(options.actorEmail || ""),
+      requesterSubjectId: String(approval?.requesterSubjectId || ""),
+      approvalAction: String(approval?.action || options.approvalAction || ""),
+      targetType: String(approval?.targetType || options.targetType || ""),
+      targetId: String(approval?.targetId || options.targetId || ""),
+      targetOrgUnitId: String(approval?.targetOrgUnitId || options.targetOrgUnitId || ""),
+      riskLevel: String(approval?.riskLevel || options.riskLevel || ""),
+      payloadDigest: String(approval?.payloadDigest || options.payloadDigest || ""),
+      operationId: String(options.operationId || approval?.operationId || ""),
+      reason: String(options.reason || ""),
+    });
+  }
+
+  function transitionApproval(approval, status, actorSubjectId, reason = "") {
+    if (!approval || !status) return;
+    const at = new Date().toISOString();
+    approval.status = status;
+    approval.updatedAt = at;
+    approval.stateHistory.push({
+      status,
+      at,
+      actorSubjectId: String(actorSubjectId || ""),
+      reason: String(reason || ""),
+    });
+  }
+
+  function recoverApprovals(data) {
+    const now = Date.now();
+    for (const approval of Object.values(data.approvalRequests)) {
+      if (approval.status === "reserved") {
+        approval.recoveredAt = new Date(now).toISOString();
+        const consumption = data.approvalConsumptions[approval.id];
+        if (consumption) {
+          if (!consumption.outcome || consumption.outcome === "reserved") {
+            consumption.outcome = "unknown_recovered";
+          }
+          consumption.consumedAt = consumption.consumedAt || approval.recoveredAt;
+        }
+        transitionApproval(approval, "consumed", "system_recovery", "reserved at restart");
+        approval.consumedAt = approval.recoveredAt;
+        appendApprovalSystemAudit(data, "approval.recovered_reserved", approval, {
+          result: "failed_closed",
+          errorCode: "approval_consumed",
+          operationId: consumption?.operationId || approval.operationId,
+        });
+        continue;
+      }
+      if (["requested", "pending_approval", "approved"].includes(approval.status)
+          && approvalIsExpired(approval, now)) {
+        transitionApproval(approval, "expired", "system_expiry", "approval expired");
+        appendApprovalSystemAudit(data, "approval.expired", approval, {
+          result: "expired",
+          errorCode: "approval_expired",
+        });
+      }
+    }
+  }
+
+  await store.mutate(recoverApprovals);
+
+  function approvalExpectedBinding(input) {
+    const payloadDigest = approvalPayloadDigest(input.action, input.payload);
+    const bindingDigest = approvalBindingDigest({
+      environmentId: approvalEnvironmentId,
+      policyVersion: currentApprovalPolicyVersion(),
+      requesterSubjectId: input.requesterSubjectId,
+      action: input.action,
+      targetType: input.targetType,
+      targetId: input.targetId,
+      targetOrgUnitId: input.targetOrgUnitId,
+      riskLevel: input.riskLevel,
+      reason: input.reason,
+      payloadDigest,
+    });
+    return {
+      environmentId: approvalEnvironmentId,
+      policyVersion: currentApprovalPolicyVersion(),
+      requesterSubjectId: String(input.requesterSubjectId || ""),
+      action: String(input.action || ""),
+      targetType: String(input.targetType || ""),
+      targetId: String(input.targetId || ""),
+      targetOrgUnitId: String(input.targetOrgUnitId || ""),
+      riskLevel: String(input.riskLevel || ""),
+      reason: String(input.reason || ""),
+      payload: normalizedApprovalPayload(input.action, input.payload),
+      payloadDigest,
+      bindingDigest,
+    };
+  }
+
+  function approvalHttpError(code, message = "Approval validation failed") {
+    const statusCode = code === "approval_required"
+      ? 400
+      : code === "approval_consumed" || code === "approval_payload_mismatch"
+        ? 409
+        : code === "approval_unavailable"
+          ? 503
+          : 403;
+    return new HttpError(statusCode, code, message);
+  }
+
+  function approvalActionDefinition(action) {
+    const definition = APPROVAL_ACTION_TARGETS[action];
+    if (!definition || !riskForAction(action)) {
+      throw new HttpError(400, "invalid_approval_action", "action is not supported");
+    }
+    return definition;
+  }
+
+  function approvalBusinessPayload(action, body) {
+    if (action === "user.policy.quota") {
+      if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 0) {
+        throw new HttpError(400, "version_required", "expectedVersion must be a non-negative integer");
+      }
+      if (!policyLimitsAreValid(body.limits)) {
+        throw new HttpError(400, "invalid_quota", "limits are invalid");
+      }
+      return {
+        expectedVersion: body.expectedVersion,
+        limits: body.limits,
+      };
+    }
+    if (action === "user.policy.models") {
+      if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 0) {
+        throw new HttpError(400, "version_required", "expectedVersion must be a non-negative integer");
+      }
+      try {
+        return {
+          expectedVersion: body.expectedVersion,
+          models: [...modelCatalog.expandSelectors(body.models)],
+        };
+      } catch (error) {
+        if (error?.name === "ModelCatalogError") {
+          throw new HttpError(400, error.code || "invalid_models", error.message);
+        }
+        throw error;
+      }
+    }
+    if (action === "operation.reconcile") {
+      const reconciliationAction = String(body.reconciliationAction || "").trim();
+      if (!RECONCILIATION_ACTIONS.has(reconciliationAction)) {
+        throw new HttpError(
+          400,
+          "invalid_reconciliation_action",
+          "reconciliationAction is not supported",
+        );
+      }
+      return {
+        parentOperationId: cleanIdentifier(
+          body.parentOperationId,
+          "parentOperationId",
+          "invalid_reconciliation_action",
+        ),
+        reconciliationAction,
+        evidenceRef: cleanEvidenceRef(
+          body.evidenceRef,
+          reconciliationAction === "confirm_applied"
+            || reconciliationAction === "confirm_not_applied",
+        ),
+      };
+    }
+    return {};
+  }
+
+  async function resolveApprovalTarget(session, action, targetId, payload) {
+    const definition = approvalActionDefinition(action);
+    if (action === "operation.reconcile") {
+      if (payload.parentOperationId !== targetId) {
+        throw new HttpError(
+          400,
+          "invalid_reconciliation_action",
+          "targetId and parentOperationId must identify the same operation",
+        );
+      }
+      const parent = await store.read((data) => {
+        const operation = data.adminOperations[targetId];
+        return operation ? structuredClone(operation) : null;
+      });
+      if (!parent) throw new HttpError(404, "operation_not_found", "Operation not found");
+      if (parent.action === "operation.reconcile") {
+        throw new HttpError(
+          409,
+          "operation_action_unsupported",
+          "A reconciliation operation cannot be reconciled",
+        );
+      }
+      if (!operationRequiresReconciliation(parent)) {
+        throw new HttpError(
+          409,
+          "reconciliation_not_required",
+          "This operation does not require reconciliation",
+        );
+      }
+      const targetResult = await operationTarget(session, parent, definition.permission);
+      const targetOrgUnitId = activeUserOrgUnit(targetResult.data, targetResult.userId);
+      if (!targetOrgUnitId) {
+        throw new HttpError(
+          409,
+          "target_org_required",
+          "An approval target must belong to an active organization unit",
+        );
+      }
+      return {
+        targetType: parent.targetType,
+        targetId: parent.targetId,
+        targetOrgUnitId,
+        target: targetResult.target,
+      };
+    }
+    const targetResult = await writeTarget(
+      session,
+      definition.permission,
+      definition.targetType,
+      targetId,
+    );
+    const userId = definition.targetType === "user"
+      ? targetResult.target.id
+      : targetResult.target.userId;
+    const targetOrgUnitId = activeUserOrgUnit(targetResult.data, userId);
+    if (!targetOrgUnitId) {
+      throw new HttpError(
+        409,
+        "target_org_required",
+        "An approval target must belong to an active organization unit",
+      );
+    }
+    return {
+      targetType: definition.targetType,
+      targetId,
+      targetOrgUnitId,
+      target: targetResult.target,
+    };
+  }
+
+  function approvalDecisionList(data, approvalId) {
+    return Object.values(data.approvalDecisions)
+      .filter((decision) => decision.approvalId === approvalId)
+      .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+  }
+
+  async function createApproval(req, res) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const action = String(body.action || "").trim();
+    approvalActionDefinition(action);
+    if (!approvalRequiredForAction(action)) {
+      throw new HttpError(400, "approval_not_required", "This action does not require approval");
+    }
+    const targetId = cleanIdentifier(body.targetId, "targetId", "invalid_request");
+    const reason = cleanReason(body.reason);
+    const payload = approvalBusinessPayload(action, body);
+    const target = await resolveApprovalTarget(current.session, action, targetId, payload);
+    const expected = approvalExpectedBinding({
+      requesterSubjectId: current.session.subjectId,
+      action,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      targetOrgUnitId: target.targetOrgUnitId,
+      riskLevel: riskForAction(action),
+      reason,
+      payload,
+    });
+    const now = new Date();
+    const approval = {
+      id: `apr_${crypto.randomUUID()}`,
+      status: "requested",
+      environmentId: expected.environmentId,
+      policyVersion: expected.policyVersion,
+      requesterSubjectId: current.session.subjectId,
+      requesterEmail: current.session.email,
+      action,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      targetOrgUnitId: target.targetOrgUnitId,
+      riskLevel: expected.riskLevel,
+      reason,
+      payloadDigest: expected.payloadDigest,
+      bindingDigest: expected.bindingDigest,
+      payloadSummary: expected.payload,
+      createdAt: now.toISOString(),
+      updatedAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
+      approvedAt: "",
+      approvedBySubjectId: "",
+      rejectedAt: "",
+      revokedAt: "",
+      operationId: "",
+      consumedAt: "",
+      stateHistory: [{
+        status: "requested",
+        at: now.toISOString(),
+        actorSubjectId: current.session.subjectId,
+        reason: "approval requested",
+      }],
+    };
+    await store.mutate((data) => {
+      data.approvalRequests[approval.id] = structuredClone(approval);
+      appendApprovalSystemAudit(data, "approval.requested", approval, {
+        result: "requested",
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+      });
+    });
+    json(res, 201, { approval: publicApproval(approval) });
+  }
+
+  async function getApproval(req, res, approvalId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    const found = await store.read((data) => {
+      const approval = data.approvalRequests[approvalId];
+      return approval
+        ? {
+          approval: structuredClone(approval),
+          decisions: structuredClone(approvalDecisionList(data, approvalId)),
+        }
+        : null;
+    });
+    if (!found) throw new HttpError(404, "approval_not_found", "Approval not found");
+    await requirePermission(
+      current.session,
+      "approvals.read",
+      found.approval.targetOrgUnitId,
+    );
+    json(res, 200, {
+      approval: publicApproval(found.approval, found.decisions),
+    });
+  }
+
+  async function decideApproval(req, res, approvalId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const decision = String(body.decision || "").trim();
+    if (decision !== "approve" && decision !== "reject") {
+      throw new HttpError(400, "invalid_decision", "decision must be approve or reject");
+    }
+    const reason = cleanReason(body.reason);
+    const storedApproval = await store.read((data) => {
+      const approval = data.approvalRequests[approvalId];
+      return approval ? structuredClone(approval) : null;
+    });
+    if (!storedApproval) throw new HttpError(404, "approval_not_found", "Approval not found");
+    const definition = approvalActionDefinition(storedApproval.action);
+    await requirePermission(
+      current.session,
+      "approvals.decide",
+      storedApproval.targetOrgUnitId,
+    );
+    await requirePermission(
+      current.session,
+      definition.permission,
+      storedApproval.targetOrgUnitId,
+    );
+    if (storedApproval.requesterSubjectId === current.session.subjectId) {
+      throw approvalHttpError(
+        "approval_separation_required",
+        "The requester cannot decide their own approval",
+      );
+    }
+
+    const outcome = await store.mutate((data) => {
+      const approval = data.approvalRequests[approvalId];
+      if (!approval) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not available") };
+      }
+      if (!["requested", "pending_approval"].includes(approval.status)) {
+        if (approvalIsExpired(approval)) {
+          transitionApproval(approval, "expired", "system_expiry", "approval expired");
+          appendApprovalSystemAudit(data, "approval.expired", approval, {
+            result: "expired",
+            errorCode: "approval_expired",
+          });
+          return { error: approvalHttpError("approval_expired", "Approval has expired") };
+        }
+        if (approval.status === "revoked") {
+          return { error: approvalHttpError("approval_revoked", "Approval was revoked") };
+        }
+        if (approval.status === "reserved" || approval.status === "consumed") {
+          return { error: approvalHttpError("approval_consumed", "Approval was already consumed") };
+        }
+        return {
+          error: approvalHttpError(
+            "approval_unavailable",
+            "Approval is not awaiting a decision",
+          ),
+        };
+      }
+      if (approvalIsExpired(approval)) {
+        transitionApproval(approval, "expired", "system_expiry", "approval expired");
+        appendApprovalSystemAudit(data, "approval.expired", approval, {
+          result: "expired",
+          errorCode: "approval_expired",
+        });
+        return { error: approvalHttpError("approval_expired", "Approval has expired") };
+      }
+      if (approval.requesterSubjectId === current.session.subjectId) {
+        return {
+          error: approvalHttpError(
+            "approval_separation_required",
+            "The requester cannot decide their own approval",
+          ),
+        };
+      }
+      const createdAt = new Date().toISOString();
+      const record = {
+        id: `apd_${crypto.randomUUID()}`,
+        approvalId,
+        decision,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        createdAt,
+      };
+      data.approvalDecisions[record.id] = record;
+      if (decision === "approve") {
+        transitionApproval(approval, "approved", current.session.subjectId, "approved");
+        approval.approvedAt = createdAt;
+        approval.approvedBySubjectId = current.session.subjectId;
+      } else {
+        transitionApproval(approval, "rejected", current.session.subjectId, "rejected");
+        approval.rejectedAt = createdAt;
+      }
+      appendApprovalSystemAudit(
+        data,
+        decision === "approve" ? "approval.approved" : "approval.rejected",
+        approval,
+        {
+          result: decision === "approve" ? "approved" : "rejected",
+          actorSubjectId: current.session.subjectId,
+          actorEmail: current.session.email,
+          reason,
+        },
+      );
+      return {
+        approval: structuredClone(approval),
+        decisions: structuredClone(approvalDecisionList(data, approvalId)),
+      };
+    });
+    if (outcome.error) throw outcome.error;
+    json(res, 200, {
+      approval: publicApproval(outcome.approval, outcome.decisions),
+    });
+  }
+
+  async function revokeApproval(req, res, approvalId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const storedApproval = await store.read((data) => {
+      const approval = data.approvalRequests[approvalId];
+      return approval ? structuredClone(approval) : null;
+    });
+    if (!storedApproval) throw new HttpError(404, "approval_not_found", "Approval not found");
+    await requirePermission(
+      current.session,
+      "approvals.revoke",
+      storedApproval.targetOrgUnitId,
+    );
+    const outcome = await store.mutate((data) => {
+      const approval = data.approvalRequests[approvalId];
+      if (!approval) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not available") };
+      }
+      if (approvalIsExpired(approval)) {
+        if (["requested", "pending_approval", "approved"].includes(approval.status)) {
+          transitionApproval(approval, "expired", "system_expiry", "approval expired");
+          appendApprovalSystemAudit(data, "approval.expired", approval, {
+            result: "expired",
+            errorCode: "approval_expired",
+          });
+        }
+        return { error: approvalHttpError("approval_expired", "Approval has expired") };
+      }
+      if (!["requested", "pending_approval", "approved"].includes(approval.status)) {
+        if (approval.status === "reserved" || approval.status === "consumed") {
+          return { error: approvalHttpError("approval_consumed", "Approval was already consumed") };
+        }
+        if (approval.status === "revoked") {
+          return { error: approvalHttpError("approval_revoked", "Approval was already revoked") };
+        }
+        return {
+          error: approvalHttpError(
+            "approval_unavailable",
+            "Approval cannot be revoked in its current state",
+          ),
+        };
+      }
+      const revokedAt = new Date().toISOString();
+      transitionApproval(approval, "revoked", current.session.subjectId, "revoked");
+      approval.revokedAt = revokedAt;
+      appendApprovalSystemAudit(data, "approval.revoked", approval, {
+        result: "revoked",
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+      });
+      return {
+        approval: structuredClone(approval),
+        decisions: structuredClone(approvalDecisionList(data, approvalId)),
+      };
+    });
+    if (outcome.error) throw outcome.error;
+    json(res, 200, {
+      approval: publicApproval(outcome.approval, outcome.decisions),
+    });
+  }
+
+  function reserveApprovalForOperation(data, approvalId, expected, operation) {
+    const approval = data.approvalRequests[approvalId];
+    const failure = data.approvalConsumptions[approvalId]
+      ? "approval_consumed"
+      : approvalConsumptionFailure(approval, expected);
+    if (failure) {
+      throw approvalHttpError(failure, "Approval cannot be consumed for this operation");
+    }
+    transitionApproval(approval, "reserved", operation.actorSubjectId, "reserved by operation");
+    approval.operationId = operation.id;
+    data.approvalConsumptions[approvalId] = {
+      approvalId,
+      operationId: operation.id,
+      reservedAt: approval.updatedAt,
+      consumedAt: "",
+      outcome: "reserved",
+    };
+    appendApprovalSystemAudit(data, "approval.reserved", approval, {
+      result: "reserved",
+      operationId: operation.id,
+      actorSubjectId: operation.actorSubjectId,
+      actorEmail: operation.actorEmail,
+    });
+  }
+
+  function consumeApprovalForOperation(data, approvalId, operation, outcome) {
+    if (!approvalId) return;
+    const approval = data.approvalRequests[approvalId];
+    const consumption = data.approvalConsumptions[approvalId];
+    if (!approval || !consumption || consumption.operationId !== operation.id) {
+      throw new Error("Approval reservation is missing before operation completion");
+    }
+    if (approval.status !== "reserved") {
+      throw new Error("Approval reservation is no longer available");
+    }
+    transitionApproval(approval, "consumed", "system_operation", "operation completed");
+    approval.consumedAt = approval.updatedAt;
+    approval.operationId = operation.id;
+    consumption.consumedAt = approval.updatedAt;
+    consumption.outcome = outcome;
+    appendApprovalSystemAudit(data, "approval.consumed", approval, {
+      result: outcome,
+      operationId: operation.id,
+      actorSubjectId: operation.actorSubjectId,
+      actorEmail: operation.actorEmail,
+    });
+  }
 
   function allowRequest(req) {
     const now = Date.now();
@@ -1762,6 +2383,14 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     }
 
     const now = new Date().toISOString();
+    const targetOrgUnitId = activeUserOrgUnit(targetResult.data, targetResult.userId);
+    if (!targetOrgUnitId) {
+      throw new HttpError(
+        409,
+        "target_org_required",
+        "A reconciliation target must belong to an active organization unit",
+      );
+    }
     const childOperation = {
       id: `op_${crypto.randomUUID()}`,
       requestId,
@@ -1774,6 +2403,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       action: "operation.reconcile",
       targetType: parent.targetType,
       targetId: parent.targetId,
+      targetOrgUnitId,
       reason,
       approvalId,
       parentOperationId: parent.id,
@@ -1830,6 +2460,21 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         if (inProgress) {
           throw new HttpError(409, "reconciliation_in_progress", "Another reconciliation is still in progress");
         }
+        const expected = approvalExpectedBinding({
+          requesterSubjectId: current.session.subjectId,
+          action: "operation.reconcile",
+          targetType: parent.targetType,
+          targetId: parent.targetId,
+          targetOrgUnitId,
+          riskLevel: riskForAction("operation.reconcile"),
+          reason,
+          payload: {
+            parentOperationId: parent.id,
+            reconciliationAction,
+            evidenceRef,
+          },
+        });
+        reserveApprovalForOperation(data, approvalId, expected, childOperation);
         data.adminOperations[childOperation.id] = structuredClone(childOperation);
         data.adminIdempotency[idempotencyKeyHash] = {
           operationId: childOperation.id,
@@ -1919,6 +2564,12 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           afterSummary: responseBody?.result || {},
           errorCode,
         });
+        consumeApprovalForOperation(
+          data,
+          childOperation.approvalId,
+          childOperation,
+          operationError ? "failed" : "succeeded",
+        );
         data.adminAuditLogs.push(resultAudit);
         stored.resultAuditId = resultAudit.id;
 
@@ -1964,6 +2615,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       options.targetId,
     );
     const targetId = targetResult.target.id;
+    const targetUserId = options.targetType === "user"
+      ? targetResult.target.id
+      : targetResult.target.userId;
+    const targetOrgUnitId = activeUserOrgUnit(targetResult.data, targetUserId);
     const prepared = options.prepare
       ? options.prepare(body, targetResult.target)
       : {};
@@ -1991,6 +2646,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       action: options.action,
       targetType: options.targetType,
       targetId,
+      targetOrgUnitId,
       reason,
       approvalId,
       beforeSummary: writeTargetSnapshot(options.targetType, targetResult.target),
@@ -2033,6 +2689,38 @@ export async function createEnterpriseAdminServer(config, options = {}) {
             }
             return { kind: "existing", operation: structuredClone(existing) };
           }
+        }
+
+        if (approvalRequiredForAction(options.action)) {
+          if (!approvalId) {
+            throw approvalHttpError(
+              "approval_required",
+              "approvalId is required for this action",
+            );
+          }
+          if (!targetOrgUnitId) {
+            throw new HttpError(
+              409,
+              "target_org_required",
+              "An approval target must belong to an active organization unit",
+            );
+          }
+          const expected = approvalExpectedBinding({
+            requesterSubjectId: current.session.subjectId,
+            action: options.action,
+            targetType: options.targetType,
+            targetId,
+            targetOrgUnitId,
+            riskLevel: riskForAction(options.action),
+            reason,
+            payload: prepared,
+          });
+          reserveApprovalForOperation(data, approvalId, expected, operation);
+        } else if (approvalId) {
+          throw approvalHttpError(
+            "approval_invalid",
+            "This action must not consume an approval",
+          );
         }
 
         data.adminOperations[operation.id] = structuredClone(operation);
@@ -2124,6 +2812,12 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           afterSummary: responseBody?.result || {},
           errorCode,
         });
+        consumeApprovalForOperation(
+          data,
+          operation.approvalId,
+          operation,
+          operationError ? "failed" : "succeeded",
+        );
         data.adminAuditLogs.push(resultAudit);
         stored.resultAuditId = resultAudit.id;
       });
@@ -2476,6 +3170,33 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/approvals") {
+      await createApproval(req, res);
+      return;
+    }
+
+    const approvalDecisionMatch =
+      /^\/api\/v1\/admin\/approvals\/([A-Za-z0-9_-]+)\/decisions$/.exec(url.pathname);
+    if (req.method === "POST" && approvalDecisionMatch) {
+      await decideApproval(req, res, approvalDecisionMatch[1]);
+      return;
+    }
+
+    const approvalRevokeMatch =
+      /^\/api\/v1\/admin\/approvals\/([A-Za-z0-9_-]+)\/revoke$/.exec(url.pathname);
+    if (req.method === "POST" && approvalRevokeMatch) {
+      await revokeApproval(req, res, approvalRevokeMatch[1]);
+      return;
+    }
+
+    const approvalMatch = /^\/api\/v1\/admin\/approvals\/([A-Za-z0-9_-]+)$/.exec(
+      url.pathname,
+    );
+    if (req.method === "GET" && approvalMatch) {
+      await getApproval(req, res, approvalMatch[1]);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/v1/admin/org-units") {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
@@ -2550,8 +3271,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
             );
           }
           if (policyPart === "quota") {
-            if (!Array.isArray(body.limits)) {
-              throw new HttpError(400, "invalid_quota", "limits must be an array");
+            if (!policyLimitsAreValid(body.limits)) {
+              throw new HttpError(400, "invalid_quota", "limits are invalid");
             }
             return {
               expectedVersion: body.expectedVersion,

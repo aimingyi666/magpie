@@ -12,10 +12,10 @@
 逐项生产验收证据和签字表见
 [`enterprise-acceptance-checklist.md`](enterprise-acceptance-checklist.md)。
 
-当前进度（2026-11-02，完整实施方案 v3.7）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
+当前进度（2026-11-02，完整实施方案 v3.10）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
 员工密钥开通、客户端加入、验收脚本和可重复的端到端测试；没有修改任何上游跟踪文件。
 M1 的 `enterprise-auth`、OIDC+PKCE、设备注册、短期 Key 刷新、同设备并发刷新串行化和
-加入脚本已经实现，并通过 Node 单元/Mock 集成测试（23/23）。真实 Magpie issuer E2E 已全部
+加入脚本已经实现，并通过 Node 单元/Mock 集成测试（25/25）。真实 Magpie issuer E2E 已全部
 通过：签发、调用、用量归属、刷新撤销、停用吊销和重启恢复均已验证。
 M2-A 管理身份底座、M2-B 只读治理、M2-C2 管理写接口和 M2-C3 幂等/管理审计已实现：`enterprise/admin-service` 提供独立管理 OIDC、
 MFA/ACR、已验证邮箱、管理会话、CSRF、IP 限制、RBAC、组织范围、内部服务令牌、最小管理页，
@@ -23,7 +23,7 @@ MFA/ACR、已验证邮箱、管理会话、CSRF、IP 限制、RBAC、组织范�
 组织子树过滤。M2-C2 已提供停用/启用用户、吊销设备和轮换当前凭证四个受控写 API，
 接入管理会话、CSRF、RBAC、组织子树、必填理由和响应脱敏；M2-C3 已接入持久化
 `Idempotency-Key`、同键重放/冲突、执行中保护、`operationId` 和 intent/result 管理审计。
-管理端测试为 35/35（28 项管理集成 + 7 项目录专项），auth-service 为 23/23。M2-C1 的 auth-service
+管理端测试为 49/49（42 项管理集成 + 7 项目录专项），auth-service 为 25/25。M2-C1 的 auth-service
 内部写接口也已实现并通过 Mock 测试。C4-01 的 schema v1 机器协议已经实现并通过 Go 单测、
 gateway-key CLI 回归和隔离真实二进制冒烟：`gateway-key describe <id> --json` 可安全回读，
 `gateway-key policy apply <id> --json` 可在文件锁内原子替换模型和额度。C4-02
@@ -31,15 +31,16 @@ gateway-key CLI 回归和隔离真实二进制冒烟：`gateway-key describe <id
 令牌、固定 argv、Key ID 白名单、10 秒超时、64 KiB 上限、独立回读和 `pending` 状态均已
 验证。C4-03a 正式只读模型目录已实现，管理服务 `GET /api/v1/admin/models` 已使用该目录；
 C4-03b 用户级 `gatewayPolicy` 核心已实现，覆盖旧 M1 `unknown` 迁移、quota/models 分步初始化、
-版本冲突、失败关闭和回读确认接口，并通过 23 项测试；这仍不等于真实管理链路已通过生产验收。
+版本冲突、失败关闭和回读确认接口，并通过 25 项测试；这仍不等于真实管理链路已通过生产验收。
 C4-03c 的管理 API、幂等签发、issuance journal、apply/独立回读、同步后交付、失败补偿和
 启动恢复核心已实现并通过 Mock/故障测试；C4-03d 部分实现：管理页已有额度/模型写表单和
 完整证据链状态，员工页已有本人额度/模型/凭证/设备只读门户；失败恢复入口、停用/吊销/
-轮换页面、operation/audit 查询和人工对账未实现。C4-04 完整管理到真实 Magpie 策略流 E2E
+轮换页面和查询/对账 UI 未实现。C4-04 完整管理到真实 Magpie 策略流 E2E
 已实现并通过，验证管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、模型拒绝、
 Token 限额、冲突不落盘、`partial_success`、refresh/rotate 策略继承、故障后
 `unknown/pending_sync`、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描。C5
-（操作/审计查询与对账）和 M2-D（完整管理运营 UI、看板和报表）仍未实现。真实企业 IdP、
+（操作/审计查询与对账）后端已实现并通过 Mock/故障测试，但页面和生产验收未完成；M2-D
+（完整管理运营 UI、看板和报表）仍未实现。真实企业 IdP、
 Docker Compose、真实共享卷、真实用量数据卷、
 反向代理/浏览器、公司 CA 和 Windows 计划任务仍需完整验收。
 M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，但 `APR-01`/`NOTIFY-01`
@@ -66,7 +67,7 @@ M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，
 | **OIDC / SSO** | M1 本地实现（OIDC+PKCE、设备注册、短期 Key）；真实 IdP 未验收 | 完成验收后可用 |
 | **对话内容审计** | 默认不落内容，usage 只有元数据 | **要建** |
 | **管理后台 / RBAC** | M2-A/M2-B 已实现管理身份和只读治理；M2-C1 内部写接口、M2-C2 管理写 API 和 M2-C3 幂等/管理审计已实现；C4-01 网关机器协议和 C4-02 受控适配器已实现本地/Mock 测试；C4-03a 正式只读目录、C4-03b 用户级策略核心和 C4-03c 管理 API/签发同步/交付核心已实现；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过 | C4-03d 剩余页面、M2-C5/D 待建；C4-02/C4-03a/C4-03c 待真实部署和真实共享卷验收 |
-| **审批 / step-up / 职责分离** | 第 5.11、6.12、25.2.11 节已设计风险矩阵、绑定摘要、状态机、外部审批、一次性消费和 break-glass；无实现 | **要建 APR-01a-e** |
+| **审批 / step-up / 职责分离** | APR-01a 已实现审批存储/API、风险分级、绑定摘要、职责分离、一次性消费和启动恢复，并通过 Mock/故障测试；APR-01b-e 的 step-up、外部审批和 break-glass 待建 | **继续 APR-01b-e** |
 | **通知 / Webhook / SIEM / 工单** | 第 6.12、25.2.11 节已设计 transactional outbox、重试、死信、抑制和投递 schema；无实现 | **要建 NOTIFY-01a-d** |
 | **指标 / 健康检查** | auth/admin 已有 `/healthz`；网关指标、告警和值班闭环未建 | 逐步补齐 |
 | **高可用 / 共享存储** | JSON 文件、单实例 | 按规模再建 |
@@ -97,7 +98,7 @@ M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，
   设备令牌和网关 Key 不进入日志；刷新失败会撤销未持久化的新 Key。
 - 已测试：OIDC/JWT 验签、PKCE、加入码换取、设备心跳、刷新、停用吊销、过期令牌、
   公钥格式校验、持久化失败回滚、同设备并发刷新、“刷新签发中停用”、内部管理状态接口、
-  真实 issuer join → 调用 → 用量 → 刷新撤销 → 停用 → 重启；auth-service 当前 `23/23` 通过。
+   真实 issuer join → 调用 → 用量 → 刷新撤销 → 停用 → 重启；auth-service 当前 `25/25` 通过。
 - 待验收：真实企业 IdP、Docker 镜像/健康检查、Windows 计划任务实机刷新、
   SCIM/离职自动同步。
 - 预期效果：员工用公司账号一键登录，不再手工贴 key；密钥短命，离职 <1 小时失效；IT 不用逐台发密钥。
@@ -112,11 +113,11 @@ M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，
     权限按“权限 + 组织范围 + 资源范围 + 时间”判断；
   - `/admin/me`、组织范围读取、最小管理页、内部服务状态和稳定错误码；
   - auth-service 与 admin-service 使用独立的 `AUTH_INTERNAL_ADMIN_TOKEN`，浏览器不能接触。
-- 已测试：管理服务 `35/35`（28 项管理集成 + 7 项目录专项），覆盖登录、MFA、已验证邮箱、ACR、CSRF、会话
+- 已测试：管理服务 `49/49`（42 项管理集成 + 7 项目录专项），覆盖登录、MFA、已验证邮箱、ACR、CSRF、会话
   过期、IP fail-closed、角色撤销、部门子树、兄弟部门拒绝、用户/设备/凭证/模型/用量只读
   接口、用量归属、依赖故障、损坏用量和凭据不落盘；M2-C2 覆盖四个写接口、写组织范围、
   必填理由、坏 JSON 和响应/存储脱敏；M2-C3 覆盖同键重放/冲突、执行中保护、失败重放、
-  intent/result 审计和审计失败阻断；auth-service 当前 `23/23`。
+  intent/result 审计和审计失败阻断；auth-service 当前 `25/25`。
 - 已实现 M2-B：用户、部门、设备、凭证、模型和用量只读 API、服务端范围过滤、显式用户-
   部门映射、只读 `usage.jsonl` 读取和管理页摘要。
 - 已实现 M2-C1：auth-service 内部停用/启用、设备吊销、当前凭证轮换；只有独立服务令牌，
@@ -139,11 +140,11 @@ M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，
   Docker/Compose、真实共享卷和 mTLS 尚未验收。
 - C4-03a 已实现：admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`；严格 JSON、稳定模型 ID、
   显式 `providerWildcards`、group 展开、2 MiB 上限、SHA-256 digest 和安全状态摘要。
-  `ADMIN_MODELS` 仅在未配置正式目录时兼容显示，不是权限事实来源。当前 35/35 通过；
+  `ADMIN_MODELS` 仅在未配置正式目录时兼容显示，不是权限事实来源。当前 49/49 通过；
   auth-service 不加载目录，只接收展开后的稳定模型 ID，真实 Compose/只读挂载/digest 重启仍待验收。
 - C4-03b 核心已实现：auth-service 已有版本化用户级 `gatewayPolicy`、旧 M1 `unknown` 迁移、
   quota/models 任意顺序首次提交、`policy_setup_required`、版本冲突、失败关闭和逐凭证回读确认；
-  当前 23/23 测试通过。C4-03c 已由 admin-service 调用 auth-service 编排额度/模型策略，
+  当前 25/25 测试通过。C4-03c 已由 admin-service 调用 auth-service 编排额度/模型策略，
   但真实 Compose/共享卷/真实 IdP 尚未验收。
 - C4-03c 核心已实现：额度修改、模型授权、规范化 payload 指纹、issuance journal、apply、
   独立回读、原子持久化和同步后才交付。管理服务禁止直接读写 `caller-keys.json`；由专用
@@ -151,7 +152,8 @@ M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，
   `unknown`/`pending` 时失败关闭；任一步失败撤销新 Key，启动恢复处理可确认的孤儿 Key。
 - C4-03d 部分实现：管理页已有额度/模型写表单，并可展示策略状态、逐凭证同步状态、最后同步
   时间和错误码；员工页已有本人额度、模型、凭证、设备和同步状态只读门户；
-  失败设备恢复入口、停用/吊销/轮换页面、operation/audit 查询和人工对账入口尚未完成；
+   失败设备恢复入口、停用/吊销/轮换页面和查询/对账 UI 尚未完成；M2-C5 已提供
+   operation/audit 查询和人工对账后端；
   只有 `succeeded + known + synced + 回读一致` 才显示“已生效”，`dependency_invoked`
   禁止自动重试。员工网页仍不能直接修改本机 Agent 文件。
 - C4-04 完整管理到真实 Magpie 策略流 E2E 已实现并通过：
@@ -221,8 +223,9 @@ M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，
 - 验收门槛：缺失/伪造/过期/撤销/跨组织/跨动作/改 payload/自审批/重复消费全部失败关闭；
   并发消费只产生一个业务结果；step-up 不满足时依赖调用为 0；outbox 在进程重启和渠道故障后
   不丢事件；死信可人工重放；Webhook SSRF、SIEM 脱敏和全链路秘密扫描有原始证据。
-- 当前边界：该工作包只有设计，没有审批表、审批 API、step-up 中间件、outbox、dispatcher、
-  渠道适配器或运营页；现有 `approvalId` 只是预留字段，不能证明审批真实、有效或已消费。
+- 当前边界：APR-01a 已实现审批存储/API、绑定校验、职责分离、一次性消费和启动恢复，并通过
+  Mock/故障测试；step-up 中间件、外部 OA 回调、审批箱、break-glass、outbox、dispatcher、
+  渠道适配器或运营页仍未实现。
 
 ### P1-1 审计与内容合规（对应 M4，4-6 周）
 
@@ -278,13 +281,13 @@ M2-E 的审批、step-up、通知 outbox、Webhook/SIEM/工单已完成设计，
 | M2-C3 幂等与管理审计 | 已完成，Mock 测试通过 | 持久化幂等、`operationId`、intent/result 审计和审计失败阻断 | 审计失败时依赖调用为 0；敏感操作可追溯 |
 | M2-C4-01 网关机器协议 | 已完成，本地测试通过 | `describe --json`、原子 `policy apply --json`、版本冲突、无秘密输出 | Go 单测、CLI 回归和隔离真实二进制冒烟通过 |
 | M2-C4-02 受控网关适配器 | 已完成，Mock/故障测试通过 | 固定路由、独立服务令牌、固定 argv、超时/64 KiB 上限、独立回读和 `pending` | Node `15/15`；Docker/Compose、真实共享卷和 mTLS 待验收 |
-| C4-03a 正式只读模型目录 | 已完成，待部署验收 | 严格 JSON、schema v1、稳定模型 ID、Provider 通配符、group、2 MiB、digest 和安全投影；管理 `35/35` | 真实只读挂载、digest 重启和失败关闭通过；admin-service 已把选择器展开为稳定模型 ID |
-| C4-03b 用户级策略核心 | 已完成本地测试 | 版本化 `gatewayPolicy`、旧 M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | auth-service `23/23`；真实部署待验收 |
+| C4-03a 正式只读模型目录 | 已完成，待部署验收 | 严格 JSON、schema v1、稳定模型 ID、Provider 通配符、group、2 MiB、digest 和安全投影；管理 `49/49` | 真实只读挂载、digest 重启和失败关闭通过；admin-service 已把选择器展开为稳定模型 ID |
+| C4-03b 用户级策略核心 | 已完成本地测试 | 版本化 `gatewayPolicy`、旧 M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | auth-service `25/25`；真实部署待验收 |
 | C4-03c 管理 API、签发同步与交付 | 核心已实现，Mock/故障测试通过 | 额度/模型 API、幂等签发、issuance journal、apply/readback、同步后交付、失败补偿和启动恢复 | 真实共享卷/Magpie/IdP 验收待完成 |
 | C4-04 完整管理到真实 Magpie 策略流 E2E | 已完成 | 管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、真实模型拒绝/限额、部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描 | 完整链路 `PASS`；不接触真实用户目录或 `127.0.0.1:3425` |
-| C4-03d 页面与剩余运营能力 | 1-2 周 | C4-03d 部分实现；剩余页面状态、失败恢复入口、operation/audit 查询和人工对账 | 管理 API 失败关闭；页面只显示真实状态；失败可对账 |
-| M2-C5 操作/审计查询与对账 | 与 C4 同阶段或紧随其后 | operations/audit-logs/reconcile、失败查询、子 operation 和人工补偿 | 可按操作 ID、操作者、目标、时间和结果查询；失败可对账 |
-| M2-E1 审批、step-up 与通知后端 | 1.5-2 周 | APR-01a/b/c、NOTIFY-01a/b/c；审批绑定/消费、外部审批、step-up、outbox、渠道和 SIEM | 高风险动作失败关闭；业务提交不等外部渠道；重启、重试、死信和人工重放可验证 |
+| C4-03d 页面与剩余运营能力 | 1-2 周 | C4-03d 部分实现；剩余页面状态、失败恢复入口和 C5 查询/对账 UI 接入 | 管理 API 失败关闭；页面只显示真实状态；失败可经 C5 对账 |
+| M2-C5 操作/审计查询与对账 | 后端已实现，Mock/故障测试通过 | operations/audit-logs/reconcile API、失败查询、子 operation 和人工补偿 | 可按操作 ID、操作者、目标、时间和结果查询；真实审计存储、生产演练和完整 UI 未验收 |
+| M2-E1 审批、step-up 与通知后端 | APR-01a 已实现；剩余 1.5-2 周 | APR-01b/c、NOTIFY-01a/b/c；外部审批、step-up、outbox、渠道和 SIEM | APR-01a 高风险动作失败关闭已通过；真实外部审批、业务提交不等渠道、重启、重试、死信和人工重放待验收 |
 | M2-D 看板与运营 | 1-2 周 | 总览、筛选、用量/费用趋势、导出和告警入口 | 可稳定输出人/部门/模型报表 |
 | M2-E2 内置审批与通知运营页 | 0.5-1 周 | APR-01d/e、NOTIFY-01d；审批箱、break-glass、渠道/死信/重试/抑制页面 | 双人审批可证明；break-glass 15 分钟过期并 24 小时内复核；死信可受审计重放 |
 | M3 中央 MCP/资源库 | 4-6 周 | 目录、远程/本地 MCP、签名资源、同步、漂移和回滚 | 授权后 5 分钟可见；未授权不可见/不可调用；失败可回滚 |
