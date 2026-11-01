@@ -43,6 +43,10 @@ import {
   publicApproval,
   riskForAction,
 } from "./approval.js";
+import {
+  ApprovalCallbackError,
+  parseApprovalCallback,
+} from "./external-approval.js";
 import { JsonStore } from "./store.js";
 import { readUsageFile } from "./usage-reader.js";
 
@@ -185,7 +189,7 @@ function bootstrapBinding(identity, config) {
   };
 }
 
-async function readBody(req) {
+async function readRawBody(req) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
@@ -193,7 +197,11 @@ async function readBody(req) {
     if (size > MAX_BODY) throw new HttpError(413, "request_too_large", "Request body is too large");
     chunks.push(chunk);
   }
-  return Buffer.concat(chunks).toString("utf8");
+  return Buffer.concat(chunks);
+}
+
+async function readBody(req) {
+  return (await readRawBody(req)).toString("utf8");
 }
 
 async function readForm(req) {
@@ -1043,6 +1051,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       errorCode: String(options.errorCode || ""),
       actorSubjectId: String(options.actorSubjectId || ""),
       actorEmail: String(options.actorEmail || ""),
+      source: String(options.source || ""),
+      eventId: String(options.eventId || ""),
+      externalReference: String(options.externalReference || ""),
       requesterSubjectId: String(approval?.requesterSubjectId || ""),
       approvalAction: String(approval?.action || options.approvalAction || ""),
       targetType: String(approval?.targetType || options.targetType || ""),
@@ -1070,6 +1081,12 @@ export async function createEnterpriseAdminServer(config, options = {}) {
 
   function recoverApprovals(data) {
     const now = Date.now();
+    for (const [nonceDigest, nonce] of Object.entries(data.approvalCallbackNonces)) {
+      const expiresAt = Date.parse(nonce?.expiresAt || "");
+      if (!Number.isFinite(expiresAt) || expiresAt <= now) {
+        delete data.approvalCallbackNonces[nonceDigest];
+      }
+    }
     for (const approval of Object.values(data.approvalRequests)) {
       if (approval.status === "reserved") {
         approval.recoveredAt = new Date(now).toISOString();
@@ -1130,6 +1147,39 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       payloadDigest,
       bindingDigest,
     };
+  }
+
+  function approvalStoredBindingIsValid(approval) {
+    const definition = APPROVAL_ACTION_TARGETS[approval.action];
+    if (!definition
+        || definition.targetType !== approval.targetType
+        || riskForAction(approval.action) !== approval.riskLevel
+        || !approval.payloadSummary
+        || typeof approval.payloadSummary !== "object"
+        || Array.isArray(approval.payloadSummary)) {
+      return false;
+    }
+    let payload;
+    try {
+      payload = normalizedApprovalPayload(approval.action, approval.payloadSummary);
+    } catch {
+      return false;
+    }
+    const payloadDigest = approvalPayloadDigest(approval.action, payload);
+    const bindingDigest = approvalBindingDigest({
+      environmentId: approval.environmentId,
+      policyVersion: approval.policyVersion,
+      requesterSubjectId: approval.requesterSubjectId,
+      action: approval.action,
+      targetType: approval.targetType,
+      targetId: approval.targetId,
+      targetOrgUnitId: approval.targetOrgUnitId,
+      riskLevel: approval.riskLevel,
+      reason: approval.reason,
+      payloadDigest,
+    });
+    return approval.payloadDigest === payloadDigest
+      && approval.bindingDigest === bindingDigest;
   }
 
   function approvalHttpError(code, message = "Approval validation failed") {
@@ -1280,6 +1330,217 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     return Object.values(data.approvalDecisions)
       .filter((decision) => decision.approvalId === approvalId)
       .sort((left, right) => String(left.createdAt).localeCompare(String(right.createdAt)));
+  }
+
+  async function externalApprovalCallback(req, res) {
+    if (!config.approvalCallback.enabled) {
+      throw new ApprovalCallbackError(
+        503,
+        "approval_callback_unavailable",
+        "External approval callbacks are not configured",
+      );
+    }
+    if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers["content-type"] || ""))) {
+      throw new HttpError(415, "unsupported_media_type", "Content-Type must be application/json");
+    }
+    const rawBody = await readRawBody(req);
+    const callback = parseApprovalCallback(config, req.headers, rawBody);
+    const outcome = await store.mutate((data) => {
+      const existingEvent = data.approvalCallbackEvents[callback.body.eventId];
+      if (existingEvent) {
+        if (existingEvent.eventDigest !== callback.eventDigest) {
+          return {
+            error: new ApprovalCallbackError(
+              409,
+              "approval_callback_conflict",
+              "This event ID was already used with a different payload",
+            ),
+          };
+        }
+        const approval = data.approvalRequests[existingEvent.approvalId];
+        if (!approval) {
+          return {
+            error: new ApprovalCallbackError(
+              409,
+              "approval_callback_conflict",
+              "The original callback approval is no longer available",
+            ),
+          };
+        }
+        return {
+          approval: structuredClone(approval),
+          decisions: structuredClone(approvalDecisionList(data, approval.id)),
+          idempotent: true,
+        };
+      }
+
+      const existingNonce = data.approvalCallbackNonces[callback.nonceDigest];
+      if (existingNonce) {
+        if (Date.parse(existingNonce.expiresAt) > Date.now()) {
+          return {
+            error: new ApprovalCallbackError(
+              409,
+              "approval_callback_replay",
+              "This callback nonce was already used",
+            ),
+          };
+        }
+        delete data.approvalCallbackNonces[callback.nonceDigest];
+      }
+
+      const approval = data.approvalRequests[callback.body.approvalId];
+      if (!approval) {
+        return {
+          error: new ApprovalCallbackError(404, "approval_not_found", "Approval not found"),
+        };
+      }
+      if (approval.environmentId !== approvalEnvironmentId
+          || !approvalStoredBindingIsValid(approval)) {
+        return {
+          error: new ApprovalCallbackError(
+            403,
+            "approval_callback_scope",
+            "Approval does not belong to this environment or has invalid binding data",
+          ),
+        };
+      }
+      const targetOrgUnit = data.orgUnits[approval.targetOrgUnitId];
+      if (!targetOrgUnit || targetOrgUnit.status !== "active") {
+        return {
+          error: new ApprovalCallbackError(
+            403,
+            "approval_callback_scope",
+            "The approval target organization is not active",
+          ),
+        };
+      }
+      if (approval.requesterSubjectId === callback.body.actorSubjectId
+          || (callback.body.actorEmail
+            && approval.requesterEmail
+            && callback.body.actorEmail.toLowerCase() === approval.requesterEmail.toLowerCase())) {
+        return {
+          error: approvalHttpError(
+            "approval_separation_required",
+            "The requester cannot decide their own approval",
+          ),
+        };
+      }
+      if (approvalIsExpired(approval)) {
+        transitionApproval(approval, "expired", "system_expiry", "approval expired");
+        appendApprovalSystemAudit(data, "approval.expired", approval, {
+          result: "expired",
+          errorCode: "approval_expired",
+          source: "external",
+          eventId: callback.body.eventId,
+          externalReference: callback.body.externalReference,
+        });
+        return { error: approvalHttpError("approval_expired", "Approval has expired") };
+      }
+      if (approval.status === "revoked") {
+        return { error: approvalHttpError("approval_revoked", "Approval was revoked") };
+      }
+      if (approval.status === "reserved"
+          || approval.status === "consumed"
+          || data.approvalConsumptions[approval.id]) {
+        return { error: approvalHttpError("approval_consumed", "Approval was already consumed") };
+      }
+      if (!["requested", "pending_approval"].includes(approval.status)) {
+        return {
+          error: approvalHttpError(
+            "approval_unavailable",
+            "Approval is not awaiting a decision",
+          ),
+        };
+      }
+
+      const createdAt = callback.receivedAt;
+      const decisionId = `apd_${crypto.randomUUID()}`;
+      const record = {
+        id: decisionId,
+        approvalId: approval.id,
+        decision: callback.body.decision,
+        actorSubjectId: callback.body.actorSubjectId,
+        actorEmail: callback.body.actorEmail,
+        source: "external",
+        eventId: callback.body.eventId,
+        externalReference: callback.body.externalReference,
+        issuer: callback.body.issuer,
+        reason: callback.body.reason,
+        createdAt,
+      };
+      data.approvalDecisions[decisionId] = record;
+      approval.decisionSource = "external";
+      approval.externalReference = callback.body.externalReference;
+      approval.externalEventId = callback.body.eventId;
+      if (callback.body.decision === "approve") {
+        transitionApproval(
+          approval,
+          "approved",
+          callback.body.actorSubjectId,
+          "approved by external callback",
+        );
+        approval.approvedAt = createdAt;
+        approval.approvedBySubjectId = callback.body.actorSubjectId;
+        approval.approvedByEmail = callback.body.actorEmail;
+      } else {
+        transitionApproval(
+          approval,
+          "rejected",
+          callback.body.actorSubjectId,
+          "rejected by external callback",
+        );
+        approval.rejectedAt = createdAt;
+        approval.rejectedBySubjectId = callback.body.actorSubjectId;
+        approval.rejectedByEmail = callback.body.actorEmail;
+      }
+      appendApprovalSystemAudit(
+        data,
+        callback.body.decision === "approve" ? "approval.approved" : "approval.rejected",
+        approval,
+        {
+          result: callback.body.decision === "approve" ? "approved" : "rejected",
+          actorSubjectId: callback.body.actorSubjectId,
+          actorEmail: callback.body.actorEmail,
+          reason: callback.body.reason,
+          source: "external",
+          eventId: callback.body.eventId,
+          externalReference: callback.body.externalReference,
+        },
+      );
+      const event = {
+        eventId: callback.body.eventId,
+        eventDigest: callback.eventDigest,
+        approvalId: approval.id,
+        nonceDigest: callback.nonceDigest,
+        outcome: callback.body.decision === "approve" ? "approved" : "rejected",
+        issuer: callback.body.issuer,
+        audience: callback.body.audience,
+        externalReference: callback.body.externalReference,
+        actorSubjectId: callback.body.actorSubjectId,
+        decisionId,
+        receivedAt: createdAt,
+      };
+      data.approvalCallbackEvents[event.eventId] = event;
+      data.approvalCallbackNonces[callback.nonceDigest] = {
+        nonceDigest: callback.nonceDigest,
+        eventId: event.eventId,
+        receivedAt: createdAt,
+        expiresAt: new Date(
+          Date.parse(createdAt) + config.approvalCallback.nonceTtlSeconds * 1000,
+        ).toISOString(),
+      };
+      return {
+        approval: structuredClone(approval),
+        decisions: structuredClone(approvalDecisionList(data, approval.id)),
+        idempotent: false,
+      };
+    });
+    if (outcome.error) throw outcome.error;
+    json(res, 200, {
+      ok: true,
+      idempotent: outcome.idempotent,
+      approval: publicApproval(outcome.approval, outcome.decisions),
+    });
   }
 
   async function createApproval(req, res) {
@@ -1899,6 +2160,12 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       userAgentHash: String(record.userAgentHash || ""),
       reason: String(record.reason || ""),
       approvalId: String(record.approvalId || ""),
+      approvalAction: String(record.approvalAction || ""),
+      riskLevel: String(record.riskLevel || ""),
+      payloadDigest: String(record.payloadDigest || ""),
+      source: String(record.source || ""),
+      eventId: String(record.eventId || ""),
+      externalReference: String(record.externalReference || ""),
       parentOperationId: String(record.parentOperationId || ""),
       reconciliationAction: String(record.reconciliationAction || ""),
       evidenceRef: String(record.evidenceRef || ""),
@@ -3023,6 +3290,11 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         ...status,
         modelCatalog: { ...modelCatalog.status },
       });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/integrations/approvals/callback") {
+      await externalApprovalCallback(req, res);
       return;
     }
 

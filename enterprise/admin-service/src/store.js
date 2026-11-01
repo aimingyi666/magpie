@@ -16,6 +16,8 @@ function emptyStore() {
     approvalRequests: {},
     approvalDecisions: {},
     approvalConsumptions: {},
+    approvalCallbackEvents: {},
+    approvalCallbackNonces: {},
   };
 }
 
@@ -50,6 +52,8 @@ function validateLoaded(value) {
     "approvalRequests",
     "approvalDecisions",
     "approvalConsumptions",
+    "approvalCallbackEvents",
+    "approvalCallbackNonces",
   ]) {
     if (!value[key] || typeof value[key] !== "object" || Array.isArray(value[key])) {
       throw new Error(`admin store ${key} must be an object`);
@@ -121,6 +125,45 @@ function validateLoaded(value) {
         || typeof consumption.operationId !== "string"
         || !consumption.operationId) {
       throw new Error("admin store approvalConsumptions must reference an approval and operation");
+    }
+  }
+  for (const [eventId, event] of Object.entries(value.approvalCallbackEvents)) {
+    if (!event
+        || typeof event !== "object"
+        || Array.isArray(event)
+        || event.eventId !== eventId
+        || !value.approvalRequests[event.approvalId]
+        || !/^[a-f0-9]{64}$/.test(String(event.eventDigest || ""))
+        || !/^[a-f0-9]{64}$/.test(String(event.nonceDigest || ""))
+        || !["approved", "rejected"].includes(event.outcome)) {
+      throw new Error("admin store approvalCallbackEvents contains an invalid event");
+    }
+    for (const key of [
+      "issuer",
+      "audience",
+      "externalReference",
+      "actorSubjectId",
+      "decisionId",
+      "receivedAt",
+    ]) {
+      if (typeof event[key] !== "string" || !event[key]) {
+        throw new Error(`admin store approval callback event ${key} is invalid`);
+      }
+    }
+    if (!Number.isFinite(Date.parse(event.receivedAt))) {
+      throw new Error("admin store approval callback event receivedAt is invalid");
+    }
+  }
+  for (const [nonceDigest, nonce] of Object.entries(value.approvalCallbackNonces)) {
+    if (!nonce
+        || typeof nonce !== "object"
+        || Array.isArray(nonce)
+        || nonce.nonceDigest !== nonceDigest
+        || !/^[a-f0-9]{64}$/.test(nonceDigest)
+        || !value.approvalCallbackEvents[nonce.eventId]
+        || !Number.isFinite(Date.parse(nonce.receivedAt))
+        || !Number.isFinite(Date.parse(nonce.expiresAt))) {
+      throw new Error("admin store approvalCallbackNonces contains an invalid nonce");
     }
   }
   return value;

@@ -16,6 +16,10 @@ import {
   riskForAction,
 } from "../src/approval.js";
 
+const CALLBACK_SECRET = "approval-callback-test-secret-0000000001";
+const CALLBACK_ISSUER = "https://approval.corp.example";
+const CALLBACK_AUDIENCE = "magpie-enterprise-admin-test";
+
 function listen(server, host = "127.0.0.1") {
   return new Promise((resolve, reject) => {
     server.once("error", reject);
@@ -715,6 +719,16 @@ async function fixture(options = {}) {
     const serviceToken = "{{SECRET_adminservicetoken}}-test-only-padding-0001";
     auth = createMockAuthService(serviceToken);
     const authBase = await listen(auth.server);
+    const callbackDisabled = options.callbackEnabled === false;
+    const callbackSecret = options.callbackSecret !== undefined
+      ? options.callbackSecret
+      : (callbackDisabled ? "" : CALLBACK_SECRET);
+    const callbackIssuer = options.callbackIssuer !== undefined
+      ? options.callbackIssuer
+      : (callbackDisabled ? "" : CALLBACK_ISSUER);
+    const callbackAudience = options.callbackAudience !== undefined
+      ? options.callbackAudience
+      : (callbackDisabled ? "" : CALLBACK_AUDIENCE);
     const config = loadConfig({
       ADMIN_PUBLIC_URL: "http://127.0.0.1:3998",
       ADMIN_PORT: "3998",
@@ -738,6 +752,11 @@ async function fixture(options = {}) {
       ADMIN_AUTH_SERVICE_URL: authBase,
       ADMIN_AUTH_SERVICE_TOKEN: serviceToken,
       ADMIN_AUTH_SERVICE_TIMEOUT_MS: "1000",
+      ADMIN_APPROVAL_CALLBACK_SECRET: callbackSecret,
+      ADMIN_APPROVAL_CALLBACK_ISSUER: callbackIssuer,
+      ADMIN_APPROVAL_CALLBACK_AUDIENCE: callbackAudience,
+      ADMIN_APPROVAL_CALLBACK_MAX_SKEW_SECONDS: "300",
+      ADMIN_APPROVAL_CALLBACK_NONCE_TTL_SECONDS: "600",
       ADMIN_MODELS: options.models || "deepseek/deepseek-chat,openai/gpt-test",
       ADMIN_MODEL_CATALOG_PATH: catalogPath,
       ADMIN_MODEL_CATALOG_DIGEST: options.catalogDigest || "",
@@ -765,6 +784,7 @@ async function fixture(options = {}) {
         oidcClientSecret: oidc.clientSecret,
         serviceToken,
         sessionSecret: config.sessionSecret,
+        callbackSecret,
       },
       async close() {
         await close(admin.server);
@@ -925,6 +945,54 @@ async function decideApproval(f, approver, approvalId, decision = "approve", rea
   return result.body.approval;
 }
 
+function callbackPayload(approvalId, overrides = {}) {
+  return {
+    schemaVersion: 1,
+    eventId: `evt_${crypto.randomUUID()}`,
+    issuer: CALLBACK_ISSUER,
+    audience: CALLBACK_AUDIENCE,
+    approvalId,
+    decision: "approve",
+    actorSubjectId: "admin-external-reviewer",
+    actorEmail: "reviewer@corp.example",
+    externalReference: `OA-${crypto.randomUUID()}`,
+    reason: "External approval board approved this request",
+    ...overrides,
+  };
+}
+
+async function postApprovalCallback(f, payload, options = {}) {
+  const rawBody = typeof payload === "string" ? payload : JSON.stringify(payload);
+  const timestamp = options.timestamp ?? Math.floor(Date.now() / 1000);
+  const nonce = options.nonce ?? `nonce_${crypto.randomUUID()}`;
+  const signature = options.signature ?? crypto.createHmac(
+    "sha256",
+    options.secret ?? f.secrets.callbackSecret,
+  )
+    .update(`${timestamp}.${nonce}.`)
+    .update(rawBody)
+    .digest("hex");
+  const headers = {
+    "content-type": options.contentType ?? "application/json",
+  };
+  if (!options.omitTimestamp) headers["x-magpie-timestamp"] = String(timestamp);
+  if (!options.omitNonce) headers["x-magpie-nonce"] = nonce;
+  if (!options.omitSignature) headers["x-magpie-signature"] = `sha256=${signature}`;
+  const response = await fetch(`${f.base}/api/v1/integrations/approvals/callback`, {
+    method: "POST",
+    headers,
+    body: rawBody,
+  });
+  return {
+    response,
+    body: await response.json(),
+    rawBody,
+    timestamp,
+    nonce,
+    signature,
+  };
+}
+
 async function approveReconciliation(
   f,
   jar,
@@ -1083,6 +1151,7 @@ function assertNoWriteSecrets(value, f, jar) {
     "tokenHash",
     f.secrets.serviceToken,
     f.secrets.oidcClientSecret,
+    ...(f.secrets.callbackSecret ? [f.secrets.callbackSecret] : []),
     jar.cookies.get(f.config.sessionCookieName) || "__no_cookie__",
   ]) {
     assert.ok(!serialized.includes(forbidden), `response must not contain ${forbidden}`);
@@ -3531,6 +3600,379 @@ test("approval APIs enforce CSRF, separation of duty, permissions, and organizat
   assertNoWriteSecrets(approved, f, jar);
 });
 
+test("external approval callbacks verify HMAC, time, issuer, audience, event idempotency, and nonce replay", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Validate an external approval callback",
+  });
+
+  const missingSignature = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { omitSignature: true },
+  );
+  assert.equal(missingSignature.response.status, 400);
+  assert.equal(missingSignature.body.error.code, "approval_callback_invalid");
+
+  const missingTimestamp = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { omitTimestamp: true },
+  );
+  assert.equal(missingTimestamp.response.status, 400);
+  assert.equal(missingTimestamp.body.error.code, "approval_callback_invalid");
+
+  const missingNonce = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { omitNonce: true },
+  );
+  assert.equal(missingNonce.response.status, 400);
+  assert.equal(missingNonce.body.error.code, "approval_callback_invalid");
+
+  const wrongSignature = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { signature: "0".repeat(64) },
+  );
+  assert.equal(wrongSignature.response.status, 401);
+  assert.equal(wrongSignature.body.error.code, "approval_callback_signature_invalid");
+
+  const stale = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { timestamp: Math.floor(Date.now() / 1000) - 3600 },
+  );
+  assert.equal(stale.response.status, 401);
+  assert.equal(stale.body.error.code, "approval_callback_timestamp_invalid");
+
+  const future = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { timestamp: Math.floor(Date.now() / 1000) + 3600 },
+  );
+  assert.equal(future.response.status, 401);
+  assert.equal(future.body.error.code, "approval_callback_timestamp_invalid");
+
+  const wrongIssuer = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId, { issuer: "https://untrusted.example" }),
+  );
+  assert.equal(wrongIssuer.response.status, 403);
+  assert.equal(wrongIssuer.body.error.code, "approval_callback_issuer_invalid");
+
+  const wrongAudience = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId, { audience: "another-service" }),
+  );
+  assert.equal(wrongAudience.response.status, 403);
+  assert.equal(wrongAudience.body.error.code, "approval_callback_audience_invalid");
+
+  const wrongContentType = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { contentType: "text/plain" },
+  );
+  assert.equal(wrongContentType.response.status, 415);
+  assert.equal(wrongContentType.body.error.code, "unsupported_media_type");
+
+  const invalidSchema = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId, { schemaVersion: 2 }),
+  );
+  assert.equal(invalidSchema.response.status, 400);
+  assert.equal(invalidSchema.body.error.code, "approval_callback_invalid");
+
+  let data = await readAdminData(f);
+  assert.deepEqual(data.approvalCallbackEvents, {});
+  assert.deepEqual(data.approvalCallbackNonces, {});
+
+  const acceptedPayload = callbackPayload(approval.approvalId);
+  const accepted = await postApprovalCallback(f, acceptedPayload);
+  assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.idempotent, false);
+  assert.equal(accepted.body.approval.status, "approved");
+  assert.equal(accepted.body.approval.decisionSource, "external");
+  assert.equal(accepted.body.approval.externalEventId, acceptedPayload.eventId);
+  assert.equal(accepted.body.approval.decisions.length, 1);
+  assert.equal(accepted.body.approval.decisions[0].source, "external");
+  assert.equal(accepted.body.approval.decisions[0].eventId, acceptedPayload.eventId);
+  assert.equal(accepted.body.approval.decisions[0].issuer, CALLBACK_ISSUER);
+
+  const idempotent = await postApprovalCallback(f, acceptedPayload);
+  assert.equal(idempotent.response.status, 200);
+  assert.equal(idempotent.body.idempotent, true);
+  assert.equal(idempotent.body.approval.decisions.length, 1);
+
+  const conflict = await postApprovalCallback(f, {
+    ...acceptedPayload,
+    externalReference: "OA-conflicting-payload",
+  });
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.error.code, "approval_callback_conflict");
+
+  const replayedNonce = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+    { nonce: accepted.nonce },
+  );
+  assert.equal(replayedNonce.response.status, 409);
+  assert.equal(replayedNonce.body.error.code, "approval_callback_replay");
+
+  data = await readAdminData(f);
+  assert.equal(Object.keys(data.approvalCallbackEvents).length, 1);
+  assert.equal(Object.keys(data.approvalCallbackNonces).length, 1);
+  assert.equal(
+    Object.values(data.approvalDecisions)
+      .filter((decision) => decision.approvalId === approval.approvalId)
+      .length,
+    1,
+  );
+  assert.equal(
+    data.adminSystemAuditLogs.filter((audit) => (
+      audit.action === "approval.approved"
+      && audit.approvalId === approval.approvalId
+    )).length,
+    1,
+  );
+  assertNoWriteSecrets(
+    [accepted.body, idempotent.body, data, await fs.readFile(f.config.storePath, "utf8")],
+    f,
+    jar,
+  );
+});
+
+test("external callbacks enforce scope, separation of duty, binding, and one-time business consumption", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const reason = "External approval must still bind to one business action";
+  const limits = [{ period: "month", tokens: 1000, cost: 1 }];
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.policy.quota",
+    targetId: "usr_alice",
+    reason,
+    expectedVersion: 2,
+    limits,
+  });
+
+  const selfBySubject = await postApprovalCallback(f, callbackPayload(approval.approvalId, {
+    actorSubjectId: current.body.user.id,
+  }));
+  assert.equal(selfBySubject.response.status, 403);
+  assert.equal(selfBySubject.body.error.code, "approval_separation_required");
+
+  const selfByEmail = await postApprovalCallback(f, callbackPayload(approval.approvalId, {
+    actorSubjectId: "admin-external-reviewer-email",
+    actorEmail: current.body.user.email,
+  }));
+  assert.equal(selfByEmail.response.status, 403);
+  assert.equal(selfByEmail.body.error.code, "approval_separation_required");
+
+  const unknown = await postApprovalCallback(
+    f,
+    callbackPayload(`apr_${crypto.randomUUID()}`),
+  );
+  assert.equal(unknown.response.status, 404);
+  assert.equal(unknown.body.error.code, "approval_not_found");
+
+  const crossEnvironment = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Cross-environment callback must fail",
+  });
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[crossEnvironment.approvalId].environmentId = "env_other_environment";
+  });
+  const cross = await postApprovalCallback(
+    f,
+    callbackPayload(crossEnvironment.approvalId),
+  );
+  assert.equal(cross.response.status, 403);
+  assert.equal(cross.body.error.code, "approval_callback_scope");
+
+  const tampered = await requestApproval(f, jar, current, {
+    action: "device.revoke",
+    targetId: "dev_bob",
+    reason: "Tampered approval binding must fail",
+  });
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[tampered.approvalId].reason = "Tampered after creation";
+  });
+  const tamperedResult = await postApprovalCallback(
+    f,
+    callbackPayload(tampered.approvalId),
+  );
+  assert.equal(tamperedResult.response.status, 403);
+  assert.equal(tamperedResult.body.error.code, "approval_callback_scope");
+
+  const accepted = await postApprovalCallback(f, callbackPayload(approval.approvalId));
+  assert.equal(accepted.response.status, 200, JSON.stringify(accepted.body));
+  assert.equal(accepted.body.approval.status, "approved");
+  assert.equal(f.auth.writeCalls.length, 0);
+
+  const changedPayload = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    {
+      reason,
+      expectedVersion: 2,
+      limits: [{ period: "month", tokens: 2000, cost: 2 }],
+      approvalId: approval.approvalId,
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(changedPayload.response.status, 409);
+  assert.equal(changedPayload.body.error.code, "approval_payload_mismatch");
+  assert.equal(f.auth.writeCalls.length, 0);
+
+  const body = { reason, expectedVersion: 2, limits, approvalId: approval.approvalId };
+  const written = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    body,
+    current.body.csrfToken,
+  );
+  assert.equal(written.response.status, 200, JSON.stringify(written.body));
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const consumed = await adminPut(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/policy/quota",
+    body,
+    current.body.csrfToken,
+  );
+  assert.equal(consumed.response.status, 409);
+  assert.equal(consumed.body.error.code, "approval_consumed");
+  assert.equal(f.auth.writeCalls.length, 1);
+
+  const replayAfterConsumption = await postApprovalCallback(
+    f,
+    callbackPayload(approval.approvalId),
+  );
+  assert.equal(replayAfterConsumption.response.status, 409);
+  assert.equal(replayAfterConsumption.body.error.code, "approval_consumed");
+
+  const data = await readAdminData(f);
+  assert.equal(data.approvalRequests[approval.approvalId].status, "consumed");
+  assert.equal(Object.keys(data.approvalCallbackEvents).length, 1);
+  assert.equal(Object.keys(data.approvalCallbackNonces).length, 1);
+  assertNoWriteSecrets([written.body, data], f, jar);
+});
+
+test("external callbacks fail closed for disabled configuration and unavailable approval states", { timeout: 30000 }, async (t) => {
+  const disabled = await fixture({ callbackEnabled: false });
+  t.after(() => disabled.close());
+  const disabledResult = await postApprovalCallback(
+    disabled,
+    callbackPayload(`apr_${crypto.randomUUID()}`),
+    { secret: CALLBACK_SECRET },
+  );
+  assert.equal(disabledResult.response.status, 503);
+  assert.equal(disabledResult.body.error.code, "approval_callback_unavailable");
+
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  const expired = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "Expired external approval",
+  });
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[expired.approvalId].expiresAt = "2000-01-01T00:00:00.000Z";
+  });
+  const expiredResult = await postApprovalCallback(
+    f,
+    callbackPayload(expired.approvalId),
+  );
+  assert.equal(expiredResult.response.status, 403);
+  assert.equal(expiredResult.body.error.code, "approval_expired");
+
+  const revoked = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "Revoked external approval",
+  });
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[revoked.approvalId].status = "revoked";
+  });
+  const revokedResult = await postApprovalCallback(
+    f,
+    callbackPayload(revoked.approvalId),
+  );
+  assert.equal(revokedResult.response.status, 403);
+  assert.equal(revokedResult.body.error.code, "approval_revoked");
+
+  const reserved = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "Reserved external approval",
+  });
+  await f.admin.store.mutate((data) => {
+    data.approvalRequests[reserved.approvalId].status = "reserved";
+  });
+  const reservedResult = await postApprovalCallback(
+    f,
+    callbackPayload(reserved.approvalId),
+  );
+  assert.equal(reservedResult.response.status, 409);
+  assert.equal(reservedResult.body.error.code, "approval_consumed");
+
+  const rejected = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_alice",
+    reason: "External rejection path",
+  });
+  const rejectedResult = await postApprovalCallback(
+    f,
+    callbackPayload(rejected.approvalId, { decision: "reject" }),
+  );
+  assert.equal(rejectedResult.response.status, 200, JSON.stringify(rejectedResult.body));
+  assert.equal(rejectedResult.body.approval.status, "rejected");
+  assert.equal(rejectedResult.body.approval.rejectedBySubjectId, "admin-external-reviewer");
+  assert.equal(rejectedResult.body.approval.decisions[0].decision, "reject");
+
+  const alreadyDecided = await postApprovalCallback(
+    f,
+    callbackPayload(rejected.approvalId),
+  );
+  assert.equal(alreadyDecided.response.status, 503);
+  assert.equal(alreadyDecided.body.error.code, "approval_unavailable");
+
+  const data = await readAdminData(f);
+  assert.equal(data.approvalRequests[expired.approvalId].status, "expired");
+  assert.equal(Object.keys(data.approvalCallbackEvents).length, 1);
+  assert.equal(Object.keys(data.approvalCallbackNonces).length, 1);
+});
+
+test("callback configuration fails closed unless secret, issuer, and audience are configured together", async () => {
+  await assert.rejects(
+    () => fixture({ callbackAudience: "" }),
+    /ADMIN_APPROVAL_CALLBACK_ISSUER and ADMIN_APPROVAL_CALLBACK_AUDIENCE are required/,
+  );
+  await assert.rejects(
+    () => fixture({ callbackEnabled: false, callbackIssuer: CALLBACK_ISSUER }),
+    /ADMIN_APPROVAL_CALLBACK_SECRET is required when callback issuer or audience is set/,
+  );
+});
+
 test("write approvals bind action, target, reason, payload, and policy version, and are consumed once", { timeout: 30000 }, async (t) => {
   const f = await fixture();
   t.after(() => f.close());
@@ -4062,6 +4504,8 @@ test("an older admin store gains operation collections without losing its existi
     assert.equal(loaded.orgUnits["org-kept"].name, "Kept");
     assert.deepEqual(loaded.adminOperations, {});
     assert.deepEqual(loaded.adminIdempotency, {});
+    assert.deepEqual(loaded.approvalCallbackEvents, {});
+    assert.deepEqual(loaded.approvalCallbackNonces, {});
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

@@ -17,6 +17,15 @@ function secret(env, name) {
   return value;
 }
 
+function optionalSecret(env, name) {
+  const value = String(env[name] || "").trim();
+  if (!value) return "";
+  if (value.length < MIN_SECRET_LENGTH) {
+    throw new Error(`${name} must be at least ${MIN_SECRET_LENGTH} characters`);
+  }
+  return value;
+}
+
 function bool(env, name, fallback) {
   const value = env[name];
   if (value == null || value === "") return fallback;
@@ -61,6 +70,41 @@ export function loadConfig(env = process.env) {
   const allowedIpValues = allowedIpsText.length > 0
     ? allowedIpsText
     : ["127.0.0.1/32", "::1/128"];
+  const approvalCallbackSecret = optionalSecret(env, "ADMIN_APPROVAL_CALLBACK_SECRET");
+  const approvalCallbackIssuer = String(env.ADMIN_APPROVAL_CALLBACK_ISSUER || "").trim();
+  const approvalCallbackAudience = String(env.ADMIN_APPROVAL_CALLBACK_AUDIENCE || "").trim();
+  const approvalCallbackMaxSkewSeconds = integer(
+    env,
+    "ADMIN_APPROVAL_CALLBACK_MAX_SKEW_SECONDS",
+    300,
+    1,
+    3600,
+  );
+  const approvalCallbackNonceTtlSeconds = integer(
+    env,
+    "ADMIN_APPROVAL_CALLBACK_NONCE_TTL_SECONDS",
+    600,
+    60,
+    604800,
+  );
+  if (!approvalCallbackSecret
+      && (approvalCallbackIssuer || approvalCallbackAudience)) {
+    throw new Error(
+      "ADMIN_APPROVAL_CALLBACK_SECRET is required when callback issuer or audience is set",
+    );
+  }
+  if (approvalCallbackSecret
+      && (!approvalCallbackIssuer || !approvalCallbackAudience)) {
+    throw new Error(
+      "ADMIN_APPROVAL_CALLBACK_ISSUER and ADMIN_APPROVAL_CALLBACK_AUDIENCE are required",
+    );
+  }
+  if (approvalCallbackNonceTtlSeconds < approvalCallbackMaxSkewSeconds) {
+    throw new Error(
+      "ADMIN_APPROVAL_CALLBACK_NONCE_TTL_SECONDS must be at least "
+      + "ADMIN_APPROVAL_CALLBACK_MAX_SKEW_SECONDS",
+    );
+  }
 
   const config = {
     bind: String(env.ADMIN_BIND || "0.0.0.0").trim(),
@@ -101,6 +145,14 @@ export function loadConfig(env = process.env) {
       url: url(env, "ADMIN_AUTH_SERVICE_URL"),
       token: secret(env, "ADMIN_AUTH_SERVICE_TOKEN"),
       timeoutMs: integer(env, "ADMIN_AUTH_SERVICE_TIMEOUT_MS", 5000, 500, 30000),
+    },
+    approvalCallback: {
+      enabled: Boolean(approvalCallbackSecret),
+      secret: approvalCallbackSecret,
+      issuer: approvalCallbackIssuer,
+      audience: approvalCallbackAudience,
+      maxSkewSeconds: approvalCallbackMaxSkewSeconds,
+      nonceTtlSeconds: approvalCallbackNonceTtlSeconds,
     },
     models: list(env, "ADMIN_MODELS"),
     modelCatalog: {
