@@ -1,18 +1,38 @@
-// A minimal OpenAI-compatible upstream for the client/server separation test.
-// It is not part of magpie; enterprise/test/e2e.ps1 starts it on 127.0.0.1:3499.
+// A minimal OpenAI-compatible upstream for the enterprise E2E tests.
+// /__stats counts real chat requests, so tests can prove that a gateway
+// refusal never reached the provider.
 import http from "node:http";
 
 const port = Number(process.env.PORT || 3499);
+let chatRequests = 0;
+const chatRequestsByModel = new Map();
+
+function countChat(model) {
+  chatRequests += 1;
+  chatRequestsByModel.set(model, (chatRequestsByModel.get(model) || 0) + 1);
+}
 
 const server = http.createServer((req, res) => {
   let body = "";
   req.on("data", (chunk) => (body += chunk));
   req.on("end", () => {
+    if (req.method === "GET" && req.url === "/__stats") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({
+        chatRequests,
+        chatRequestsByModel: Object.fromEntries(chatRequestsByModel),
+      }));
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/v1/models") {
       res.writeHead(200, { "content-type": "application/json" });
       res.end(JSON.stringify({
         object: "list",
-        data: [{ id: "mock-model", object: "model", owned_by: "enterprise-test" }],
+        data: [
+          { id: "mock-model", object: "model", owned_by: "enterprise-test" },
+          { id: "mock-second", object: "model", owned_by: "enterprise-test" },
+        ],
       }));
       return;
     }
@@ -27,6 +47,7 @@ const server = http.createServer((req, res) => {
       const id = "chatcmpl-mock";
       const now = Math.floor(Date.now() / 1000);
       const model = parsed.model || "mock-model";
+      countChat(model);
 
       if (parsed.stream) {
         res.writeHead(200, {
