@@ -10,6 +10,7 @@ import {
   NOTIFICATION_STATUSES,
   publicNotificationDelivery,
 } from "./notification-schema.js";
+import { SIEM_CRITICAL_VISIBILITY_TARGET_MS } from "./notification-siem.js";
 
 export {
   NOTIFICATION_EVENT_TYPES,
@@ -38,6 +39,7 @@ const STABLE_ERROR_CODES = new Set([
   "transport_private_address",
   "transport_redirect_rejected",
   "transport_response_too_large",
+  "transport_payload_too_large",
   "transport_secret_unavailable",
   "transport_endpoint_unavailable",
   "transport_channel_unavailable",
@@ -324,6 +326,10 @@ export function claimNotificationDelivery(data, options = {}) {
       return !Number.isFinite(next) || next <= nowMs;
     })
     .sort((left, right) => {
+      const severityOrder = { critical: 0, warning: 1, info: 2 };
+      const bySeverity = (severityOrder[left.severity] ?? 3)
+        - (severityOrder[right.severity] ?? 3);
+      if (bySeverity !== 0) return bySeverity;
       const byDate = String(left.nextAttemptAt || "").localeCompare(String(right.nextAttemptAt || ""));
       if (byDate !== 0) return byDate;
       return String(left.createdAt || "").localeCompare(String(right.createdAt || ""));
@@ -409,6 +415,9 @@ export class NotificationDispatcher {
     this.ownerId = options.ownerId || `ntw_${process.pid}_${crypto.randomUUID()}`;
     this.leaseMs = options.leaseMs || 60 * 1000;
     this.pollIntervalMs = options.pollIntervalMs || 30 * 1000;
+    if (this.pollIntervalMs > SIEM_CRITICAL_VISIBILITY_TARGET_MS) {
+      throw new Error("notification dispatcher polling must not exceed the 5-minute SIEM target");
+    }
     this.batchSize = options.batchSize || 20;
     this.now = options.now || (() => new Date());
     this.timer = null;

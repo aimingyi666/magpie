@@ -6,23 +6,25 @@
 [`enterprise-master-plan.md`](enterprise-master-plan.md) 和
 [`enterprise-roadmap.md`](enterprise-roadmap.md)。
 
-2026-11-02 方案基线更新到 v3.14。M2-C1 的 auth-service 内部写接口、M2-C2 的四个管理写
+2026-11-02 方案基线更新到 v3.15。M2-C1 的 auth-service 内部写接口、M2-C2 的四个管理写
 接口和 M2-C3 的幂等/管理审计状态机已实现并通过 Mock 测试。当前
-`feat/notify-01a-outbox` 分支实现了 **M2-C5** 的 operation 详情、脱敏审计分页和
+`feat/notify-01c-siem` 分支实现了 **M2-C5** 的 operation 详情、脱敏审计分页和
 四种人工对账动作，**M2-E1/APR-01a** 的服务端审批、绑定摘要、职责分离、一次性消费和
 审批系统审计，**APR-01b** 的 HMAC 外部审批回调适配器，以及 **APR-01c** 的独立 OIDC
 step-up；对账生成子 operation，不修改原 intent/result。APR-01c 覆盖独立 OIDC Client、
 `prompt=login`、`max_age`、`auth_time`、ACR/MFA、会话/IP/User-Agent/角色范围摘要绑定，
 未配置 step-up 时高风险操作返回 `503 step_up_unavailable` 并失败关闭。**NOTIFY-01a**
 新增 transactional outbox、稳定 `eventId`/`deliveryId` 幂等、租约、指数退避、死信、重启
-恢复、deliveries 查询和受审计人工重放。本轮 **NOTIFY-01b** 新增
+恢复、deliveries 查询和受审计人工重放。**NOTIFY-01b** 新增
 `email`/`im`/`webhook`/`ticketing` 渠道管理 API、渠道测试、按 `eventId + channelId`
 fanout 去重，以及统一 HTTPS 渠道适配器：仅允许 HTTPS:443、host allowlist、固定 DNS
 解析并拒绝私网/回环/链路本地/云元数据地址，只接受 307/308 且最多 3 跳，每跳重新校验，
 并限制超时和响应大小；Webhook 使用时间戳、nonce 和 HMAC-SHA256，Secret 只保存
-`secretRef` 环境变量名。admin-service 当前通过 **75 passed, 0 failed**（61 项管理服务
-集成测试 + 7 项目录专项 + 7 项通知渠道专项），auth-service 通过 **25 passed, 0 failed**，
-gateway-control 通过 **15 passed, 0 failed**，总计 **115 passed, 0 failed**。**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
+`secretRef` 环境变量名。本轮 **NOTIFY-01c** 新增 `siem` 渠道及 `http-collector`/
+`otlp-http`/`syslog-tls` transport、固定 L0 schema、4 个安全事件类型和 dead-letters API。
+admin-service 当前通过 **82 passed, 0 failed**（62 项管理服务
+集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项），auth-service 通过 **25 passed, 0 failed**，
+gateway-control 通过 **15 passed, 0 failed**，总计 **122 passed, 0 failed**。**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
 冒烟；**C4-02** `gateway-control` 受控适配器已通过 15 项 Mock/故障测试；**C4-03a**
 正式只读模型目录、**C4-03b/C4-03c** 用户级策略、幂等签发、issuance journal、自动
 apply/独立回读、失败补偿、启动恢复和同步后交付均已实现，并通过 Mock/故障测试。
@@ -36,10 +38,11 @@ M2-D。**C4-04 完整管理到真实 Magpie 策略流 E2E** 已实现并通过�
 真实共享卷、真实企业 IdP、反向代理、浏览器自动化 E2E 和生产验收仍未完成。APR-01b 已
 实现 HMAC/Mock 回调协议，但真实 OA/飞书/ServiceNow/Jira 连接器未验证；APR-01c 的
 step-up 已完成代码和 Mock IdP 集成测试，APR-01d/e 的审批箱和 break-glass 仍未实现；
-NOTIFY-01a 的 outbox 核心和 NOTIFY-01b 的渠道管理/统一 HTTPS 网关适配器已实现并通过
-Mock/故障测试；邮件、IM、工单当前是 HTTPS 网关契约，不是原生 SMTP、Graph、飞书、
-Teams、ServiceNow 或 Jira SDK。NOTIFY-01c/d 的 SIEM、rules/suppress 和通知运营页面
-仍未实现；渠道关闭、没有启用渠道或缺少 transport 时不创建 dispatcher，也不会伪造
+NOTIFY-01a 的 outbox 核心、NOTIFY-01b 的渠道管理/统一 HTTPS 网关适配器和 NOTIFY-01c 的
+SIEM transport 已实现并通过 Mock/故障测试；邮件、IM、工单当前是 HTTPS 网关契约，不是
+原生 SMTP、Graph、飞书、Teams、ServiceNow 或 Jira SDK。NOTIFY-01d 的 rules/suppress、
+聚合、升级和完整通知运营页面仍未实现；真实 SIEM/Collector/Syslog/生产证书未验收。
+渠道关闭、没有启用渠道或缺少 transport 时不创建 dispatcher，也不会伪造
 “已投递”；
 M2-D 和 M3-M6 仍未实现；当前仍没有员工对话正文审计。本状态只描述仓库中已经存在并有测试
 证据的能力。
@@ -69,8 +72,9 @@ schema v1 的 `gateway-key describe <id> --json` 和原子
 M2-C5 已补 operation/audit 查询和人工对账后端；M2-E1/APR-01a 已补审批 API、L/M/H/C
 风险、payload/binding SHA-256、非自审批、过期/撤销校验和原子一次性消费。完整管理到真实
 Magpie 策略流 E2E 已经通过。APR-01b 的 HMAC/Mock 外部回调协议和 APR-01c 的独立 OIDC
-step-up 已实现；NOTIFY-01b 已提供渠道管理和经过 SSRF/秘密扫描的 HTTPS 渠道适配器。
-但审批管理 UI、真实 OA 连接器、真实 IdP/MFA、审批箱、break-glass、SIEM、通知运营页、
+step-up 已实现；NOTIFY-01b 已提供渠道管理和经过 SSRF/秘密扫描的 HTTPS 渠道适配器，
+NOTIFY-01c 已提供固定 L0 schema 的 SIEM transport 和 dead-letters API。但审批管理 UI、
+真实 OA 连接器、真实 IdP/MFA、审批箱、break-glass、真实 SIEM 接入、通知运营页、
 真实厂商连接器、失败恢复入口、停用/吊销/轮换
 页面、完整管理写 UI 和真实身份管理链路仍未实现/未验收。
 M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3/C4-02/C4-03c 尚未完成真实企业
@@ -84,7 +88,7 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | 员工 | 浏览器 OIDC 登录、本人额度/模型/凭证/设备/同步状态只读门户、Mock/本地真实 issuer 加入、设备注册、短期 Key、通过本地 Magpie 调用企业网关、自动刷新脚本、停用后失效 | 不能只靠网页修改本机 Agent；真实企业 IdP、公司反向代理、Windows 计划任务实机、MDM 安装未验收 |
 | 管理员 | 独立管理 OIDC + MFA/ACR、会话/CSRF/IP、RBAC、组织范围，用户/部门/设备/凭证/模型/用量只读视图，正式只读模型目录，四个受控管理写 API，以及额度/模型策略写表单；策略写入会经 auth-service 自动 apply/readback，同步完成前不交付 Key，并返回 `known/pending/partial_success/unknown`；写操作已有幂等重放/冲突、`operationId`、intent/result 审计、operation/audit 查询和受控人工对账；APR-01a 已提供审批申请/决策/撤销 API、审批权限、组织范围校验和一次性消费，APR-01b 已提供 HMAC 外部审批回调适配器，APR-01c 已提供独立 step-up 和 H/C 写操作门禁 | 审批管理 UI、真实 OA 连接器、真实管理 IdP/MFA、审批箱和 break-glass 未实现/未验收；停用/吊销/轮换尚无页面写表单；查询/对账尚未接入完整页面，失败目标恢复入口、筛选/导出和看板未实现；真实 Magpie/共享卷/IdP/浏览器 E2E 未验收；不能管理 MCP/资源库 |
 | 管理员能看到的员工信息 | 姓名/邮箱/稳定 ID/部门/状态、设备/版本/心跳、凭证元数据、模型、Token/费用/错误/时间 | 不能看对话正文；当前只有 L0 用量元数据；L1/L2/L3 属于 M4 |
-| 安全/审计人员 | 只读用量和授权元数据，角色撤销在下一请求生效 | 没有正文查看、导出审批、告警阻断、SIEM、二次授权 |
+| 安全/审计人员 | 只读用量和授权元数据，角色撤销在下一请求生效；可经授权查询 SIEM 死信元数据 | 没有正文查看、导出审批、告警阻断、真实 SIEM 检索、二次授权 |
 | 全公司配置 | 管理服务从只读 `ADMIN_MODEL_CATALOG_PATH` 加载正式目录并把 group/provider 选择器展开为稳定模型 ID；auth-service 保存和同步用户级策略，gateway-control 执行原子 apply/独立回读；网关提供模型白名单、额度和 IP 白名单 | 当前没有中央 MCP 服务器、资源库、Skills/Instructions/Subagents 下发；M3 才实现；真实共享卷和企业环境未验收 |
 
 因此，当前只能把员工流程描述为“已安装本地 Magpie 的受控技术试点”，不能描述为“纯网页、
@@ -113,7 +117,8 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | APR-01b 外部审批回调适配器 | 已实现 HMAC/Mock 协议并通过测试 | 原始 body HMAC-SHA256、时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离、审批状态迁移和系统审计；回调不直接执行管理动作；真实飞书/OA/ServiceNow/Jira 连接器和生产回调演练未验证 |
 | APR-01c 独立 OIDC step-up | 已实现并通过 Mock IdP 集成测试 | 独立 OIDC Client/secret/redirect/scopes；`prompt=login`、`max_age`、essential `auth_time`；ACR/MFA、IdP `sub`/email、会话/IP/User-Agent/角色权限/组织范围摘要绑定；H/C 风险写操作和审批门禁；未配置失败关闭；logout/会话过期清理断言；真实 IdP、MFA、反向代理、浏览器和生产验收未完成 |
 | NOTIFY-01a transactional outbox | 已实现并通过 Mock/故障测试 | 8 种 L0 事件、字段白名单、稳定 `eventId`/`deliveryId`、原子提交、租约、指数退避、死信、重启恢复、deliveries 查询和受审计人工重放 |
-| NOTIFY-01b 渠道管理 | 已实现并通过 Mock/故障测试 | `email`/`im`/`webhook`/`ticketing` 渠道 API、RBAC/CSRF/step-up/理由/幂等/审计、渠道测试、按 `eventId + channelId` 去重、HMAC Webhook 和统一 HTTPS 网关适配器；邮件/IM/工单不是原生厂商 SDK；SIEM、rules/suppress、运营页和真实厂商连接未实现/验收 |
+| NOTIFY-01b 渠道管理 | 已实现并通过 Mock/故障测试 | `email`/`im`/`webhook`/`ticketing` 渠道 API、RBAC/CSRF/step-up/理由/幂等/审计、渠道测试、按 `eventId + channelId` 去重、HMAC Webhook 和统一 HTTPS 网关适配器；邮件/IM/工单不是原生厂商 SDK；rules/suppress、完整运营页和真实厂商连接未实现/验收 |
+| NOTIFY-01c SIEM transport | 已实现并通过 6 项专项及管理回归 | `http-collector`/`otlp-http`/`syslog-tls`；固定 L0 schema；HTTPS:443/TLS:6514；host allowlist、固定 DNS、私网/回环/链路本地/云元数据拒绝；HTTP/OTLP 可选 Bearer `secretRef`，Syslog 禁止 `secretRef`；默认 32 KiB 上限；critical 优先；5 分钟轮询上限；dead-letters API；新增 4 个安全事件类型；真实 SIEM/Collector/Syslog/生产证书未验收；rules/suppress、聚合、升级和完整运营 UI 未实现 |
 | M2-D 看板与运营 | 已冻结契约，未实现 | 无看板、报表、导出和完整运营写 UI；员工只读状态门户已在 C4-03d 部分交付 |
 | M3 中央 MCP/资源库 | 未实现 | 只有产品/架构设计 |
 | M4 会话内容审计 | 未实现 | 目前只有请求元数据和用量 |
@@ -186,7 +191,7 @@ admin-service
   解析，拒绝私网/回环/链路本地/云元数据地址，只接受 307/308 最多 3 跳且每跳重新校验。
   Webhook 使用 `X-Magpie-Timestamp`、`X-Magpie-Nonce`、`X-Magpie-Signature`，签名为
   `v1 = HMAC-SHA256(secret, timestamp.nonce.rawJsonBody)`。审批管理 UI、真实 OA 连接器、
-  真实 IdP/MFA、审批箱、break-glass、SIEM、rules/suppress、通知运营页面和真实厂商连接
+  真实 IdP/MFA、审批箱、break-glass、真实 SIEM 接入、rules/suppress、通知运营页面和真实厂商连接
   尚未实现/未验收。
 - auth-service 的 policy reconcile 内部接口在同一版本事务中原子更新 models 和 limits，版本
   只增加一次，并为每张活跃凭证各调用一次 gateway-control；旧快照不完整时拒绝回滚。
@@ -498,7 +503,7 @@ Get-ChildItem enterprise\admin-service\src\*.js | ForEach-Object {
 & $node --test enterprise\admin-service\test\admin-service.test.mjs enterprise\admin-service\test\model-catalog.test.mjs enterprise\admin-service\test\notification-channels.test.mjs
 ```
 
-结果：`75 passed, 0 failed`（61 项管理服务集成测试 + 7 项目录专项测试 + 7 项通知渠道专项测试）。覆盖：
+结果：`82 passed, 0 failed`（62 项管理服务集成测试 + 7 项目录专项测试 + 7 项通知渠道专项测试 + 6 项 SIEM 专项测试）。覆盖：
 
 - 未登录拒绝、管理 OIDC 登录、MFA 拒绝和 `email_verified` 拒绝。
 - 配置 ACR 时向 IdP 发送 `acr_values` 和 essential 的 `acr` claim 请求。
@@ -741,8 +746,9 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 D 仍不�
    NOTIFY-01a 已实现 outbox、租约恢复、重试、死信、deliveries 查询和死信人工重放；
    NOTIFY-01b 已实现渠道管理、渠道测试和统一 HTTPS 邮件/IM/Webhook/工单网关适配器，
    但没有真实厂商连接和生产投递验收。`operation.audit_failed` 目前只有 schema，尚无可靠
-   触发点；查询没有 cursor，`count` 仅表示当前页数量；NOTIFY-01c/d 的 SIEM、渠道规则、
-   抑制和运营页面仍未实现。渠道关闭、没有启用渠道或缺少 transport 时不创建 dispatcher。
+   触发点；查询没有 cursor，`count` 仅表示当前页数量；NOTIFY-01c 的 SIEM transport 和
+   dead-letters API 已实现，但真实接收端未验收；NOTIFY-01d 的渠道规则、抑制、聚合、升级
+   和运营页面仍未实现。渠道关闭、没有启用渠道或缺少 transport 时不创建 dispatcher。
 
 ## 6. M1 验收门槛
 
@@ -791,7 +797,7 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 D 仍不�
 6. M2-C3 已完成 Mock 验证：幂等重放/冲突、`operationId`、intent/result 审计和审计失败阻断
    均已覆盖；下一步把同一流程接入真实存储和真实管理请求链路。
 7. C4-02 受控适配器已通过 15 项 Mock/故障测试；C4-03b/C4-03c 的 auth-service 核心链路
-   已通过 25 项 auth 回归、75 项 admin 测试和 15 项 gateway-control 测试。下一步在
+   已通过 25 项 auth 回归、82 项 admin 测试和 15 项 gateway-control 测试。下一步在
    Docker 可用环境验证镜像、Compose、
    健康检查和真实共享卷故障恢复；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。
 8. M2-C5 的 `audit-logs`、`operations/{id}`、人工对账和补偿后端已通过 Mock/故障测试；
@@ -800,12 +806,13 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 D 仍不�
 9. APR-01a 已实现服务端审批和一次性消费，APR-01b 已实现 HMAC/Mock 外部审批回调适配器，
    APR-01c 已实现独立 OIDC step-up 和 H/C 门禁并通过 Mock IdP 测试；下一步完成真实
    IdP/MFA/反向代理验收，再按 APR-01d/e 接审批箱和 break-glass、接入真实 OA 连接器，
-   并继续 NOTIFY-01c/d 的 SIEM、规则和运营页。
+   并继续 NOTIFY-01d 的规则、抑制、聚合、升级和运营页；NOTIFY-01c 的真实 SIEM 接入仍需验收。
 10. NOTIFY-01a 已完成与审批/operation 业务审计同一次原子存储提交的 outbox、租约恢复、
     重试、死信和人工重放；NOTIFY-01b 已接入经过 SSRF/秘密扫描的邮件、企业 IM、
-    Webhook 和工单 HTTPS 网关适配器，并完成渠道管理/测试 API。下一步实现 SIEM、
-    rules/suppress 与运营页面，并用真实测试域验证厂商网关。没有真实厂商连接和测试域
-    验收时不得宣称生产通知闭环。
+    Webhook 和工单 HTTPS 网关适配器，并完成渠道管理/测试 API；NOTIFY-01c 已完成
+    http-collector/otlp-http/syslog-tls、固定 L0 schema 和 dead-letters API。下一步完成
+    rules/suppress 与运营页面，并用真实测试域验证厂商网关和 SIEM 接收端。没有真实厂商
+    连接和测试域验收时不得宣称生产通知闭环。
 11. 每个阶段完成后更新第 9 节，记录实际分支、commit、命令、结果、未覆盖项和秘密扫描；
    没有原始证据时继续保持“未实现/未验收”。
 
@@ -836,4 +843,5 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 D 仍不�
 | APR-01b 外部审批回调适配器 | `feat/apr-01b-external-approval` / `enterprise/admin-service/` | HMAC-SHA256 原始 body 验签、300 秒时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离、审批状态迁移和系统审计；回调不直接执行管理动作 | `node --check`；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs`；变异测试：临时关闭 HMAC 比较后目标测试失败为 `200 !== 401` | 该阶段回归 admin `61 passed, 0 failed`；HMAC/Mock 回调测试通过 | 真实飞书/OA/ServiceNow/Jira 连接器、生产回调演练、审批管理 UI、真实 IdP/MFA、审批箱和 break-glass 未实现/未验收；后续 NOTIFY-01a 已补 outbox 核心，渠道仍未实现 |
 | APR-01c 独立 OIDC step-up | `feat/apr-01c-step-up` / `enterprise/admin-service/` | 独立 OIDC Client、PKCE、`prompt=login`、`max_age`、`auth_time`、ACR/MFA、IdP `sub`/email、会话/IP/User-Agent/角色权限/组织范围绑定、H/C 门禁、未配置失败关闭、logout/会话过期清理和管理页重新认证入口 | `Get-ChildItem src\*.js \| ForEach-Object { node --check $_.FullName }`；`node --test test\admin-service.test.mjs test\model-catalog.test.mjs` | 该阶段回归 admin `61 passed, 0 failed` | 真实 IdP、真实 MFA/条件访问、反向代理、浏览器流程和 CI 生产验收未执行 |
 | NOTIFY-01a transactional outbox | `feat/notify-01a-outbox` / `enterprise/admin-service/` | 8 种 L0 审批/operation 事件；字段白名单与 `schemaVersion=1`；稳定 `eventId`/`deliveryId` 幂等；pending/leased/delivering/delivered/retry_wait/dead_letter；1/5/15/60/360 分钟退避；租约、并发串行、重启恢复；deliveries 查询和死信人工重放；审批审计/结果审计与 outbox 同一次 JSON 存储原子提交；SIGTERM 先停 dispatcher | `Get-ChildItem src\*.js \| ForEach-Object { node --check $_.FullName }`；`node --test test\admin-service.test.mjs test\model-catalog.test.mjs`；`node --test enterprise\auth-service\test\auth-service.test.mjs`；`node --test enterprise\gateway-control\test\gateway-control.test.mjs` | admin `67 passed, 0 failed`；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `107 passed, 0 failed` | 没有邮件/IM/Webhook/SIEM/工单 transport，正常启动不创建 dispatcher；没有 channels/rules/suppress/test-channel API 或运营 UI；`operation.audit_failed` 无触发点；查询无 cursor；真实渠道、生产存储和通知闭环未验收 |
+| NOTIFY-01c SIEM transport | `feat/notify-01c-siem` / `enterprise/admin-service/` | `siem` 渠道及 `http-collector`/`otlp-http`/`syslog-tls`；固定 L0 schema；HTTPS:443/TLS:6514；host allowlist、固定 DNS、私网/回环/链路本地/云元数据拒绝；HTTP/OTLP 可选 Bearer `secretRef`，Syslog 禁止 `secretRef`；默认 32 KiB 上限（可配 1-64 KiB）；critical 优先；dispatcher 轮询不超过 5 分钟；dead-letters API；新增 `security.access_denied`/`auth_failed`/`break_glass_used`/`anomaly_detected` | `node --check` 全部管理服务 JS；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs enterprise/admin-service/test/notification-channels.test.mjs enterprise/admin-service/test/notification-siem.test.mjs` | admin `82 passed, 0 failed`（62 项管理集成 + 7 项目录 + 7 项通知渠道 + 6 项 SIEM）；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `122 passed, 0 failed` | 真实 SIEM/Collector/Syslog/生产证书未验收；rules/suppress、聚合、升级和完整运营 UI 未实现 |
 | M2-D 管理运营 | 计划 `feat/m2-d-admin-operations` | 仅有完整设计；尚无完整写 UI、看板、导出和运营历史；员工只读状态页已在 C4-03d 部分交付 | 未执行 | 未测试、不可用 | 所有 M2-D 项 |

@@ -5374,11 +5374,13 @@ test("NOTIFY-01a notification APIs enforce scope, CSRF, idempotency and safe pro
 
   const eventRoot = notificationEvent({
     eventId: "evt_notify_api_root",
+    severity: "critical",
     targetOrgUnitId: "org-root",
     summary: "Root notification",
   });
   const eventSales = notificationEvent({
     eventId: "evt_notify_api_sales",
+    severity: "info",
     targetOrgUnitId: "org-sales",
     summary: "Sales notification",
   });
@@ -5405,6 +5407,19 @@ test("NOTIFY-01a notification APIs enforce scope, CSRF, idempotency and safe pro
   assert.equal(scoped.body.deliveries[0].summary, "Root notification");
   assert.ok(!JSON.stringify(scoped.body).includes("must-not-leak"));
 
+  const scopedDeadLetters = await adminGet(
+    f,
+    department.jar,
+    "/api/v1/admin/notifications/dead-letters",
+  );
+  assert.equal(scopedDeadLetters.response.status, 200);
+  assert.equal(scopedDeadLetters.body.count, 1);
+  assert.equal(scopedDeadLetters.body.criticalCount, 1);
+  assert.equal(scopedDeadLetters.body.deadLetters[0].eventId, eventRoot.eventId);
+  assert.equal(scopedDeadLetters.body.visibilityTargetSeconds, 300);
+  assert.ok(scopedDeadLetters.body.oldestCreatedAt);
+  assert.ok(!JSON.stringify(scopedDeadLetters.body).includes("must-not-leak"));
+
   const all = await adminGet(
     f,
     superJar,
@@ -5413,6 +5428,17 @@ test("NOTIFY-01a notification APIs enforce scope, CSRF, idempotency and safe pro
   assert.equal(all.response.status, 200);
   assert.equal(all.body.count, 1);
   assert.equal(all.body.limit, 1);
+
+  const allDeadLetters = await adminGet(
+    f,
+    superJar,
+    "/api/v1/admin/notifications/dead-letters",
+  );
+  assert.equal(allDeadLetters.response.status, 200);
+  assert.equal(allDeadLetters.body.count, 2);
+  assert.equal(allDeadLetters.body.criticalCount, 1);
+  assert.equal(allDeadLetters.body.deadLetters[0].eventId, eventRoot.eventId);
+  assert.equal(allDeadLetters.body.deadLetters[1].eventId, eventSales.eventId);
   const invalidStatus = await adminGet(
     f,
     superJar,
@@ -5785,4 +5811,105 @@ test("NOTIFY-01b channel APIs enforce RBAC, step-up, CSRF, idempotency and safe 
       && audit.result === "failed"
       && audit.resultCode === "transport_timeout"));
   assert.ok(!JSON.stringify(data.notificationChannels).includes("plaintext-notification-token"));
+});
+
+test("NOTIFY-01c SIEM channels are manageable through the notification channel API", {
+  timeout: 30000,
+}, async (t) => {
+  const requests = [];
+  const f = await fixture({
+    notificationChannelsEnabled: true,
+    notificationAllowlist: "siem.example.test",
+    adminServerOptions: {
+      notificationChannelEnv: {
+        MAGPIE_SIEM_COLLECTOR_TOKEN: "{{SECRET_siemcollectortoken}}-test-only-padding",
+      },
+      notificationDnsResolver: async () => [{ address: "8.8.8.8", family: 4 }],
+      notificationRequestImpl: async (request) => {
+        requests.push(request);
+        return { statusCode: 202, headers: {}, body: "" };
+      },
+    },
+  });
+  t.after(() => f.close());
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const createPath = "/api/v1/admin/notifications/channels";
+  const created = await adminPost(
+    f,
+    jar,
+    createPath,
+    {
+      name: "SOC HTTP collector",
+      type: "siem",
+      provider: "http-collector",
+      eventTypes: ["security.break_glass_used", "security.anomaly_detected"],
+      secretRef: "MAGPIE_SIEM_COLLECTOR_TOKEN",
+      config: {
+        endpoint: "https://siem.example.test/events",
+        timeoutMs: 1000,
+      },
+      reason: "Register the SOC collector",
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "notify-siem-channel-create" },
+  );
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.channel.type, "siem");
+  assert.equal(created.body.channel.provider, "http-collector");
+  assert.equal(created.body.channel.secretConfigured, true);
+  assert.ok(!JSON.stringify(created.body).includes("test-only-padding"));
+
+  const channelPath = `${createPath}/${created.body.channel.channelId}`;
+  const tested = await adminPost(
+    f,
+    jar,
+    `${channelPath}/test`,
+    { reason: "Verify collector connectivity" },
+    current.body.csrfToken,
+    { "idempotency-key": "notify-siem-channel-test" },
+  );
+  assert.equal(tested.response.status, 200, JSON.stringify(tested.body));
+  assert.equal(tested.body.ok, true);
+  assert.equal(tested.body.test.resultCode, "transport_ok");
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].url.hostname, "siem.example.test");
+  assert.deepEqual(requests[0].addresses, [{ address: "8.8.8.8", family: 4 }]);
+  assert.equal(
+    requests[0].headers.authorization,
+    "Bearer {{SECRET_siemcollectortoken}}-test-only-padding",
+  );
+  const payload = JSON.parse(requests[0].body);
+  assert.equal(payload.schemaVersion, 1);
+  assert.equal(payload.event.eventType, "operation.failed");
+  assert.equal(payload.event.severity, "warning");
+  assert.equal(payload.event.targetId, created.body.channel.channelId);
+  assert.equal(requests[0].body.includes("summary"), false);
+  assert.equal(requests[0].body.includes("actorEmail"), false);
+
+  const listed = await adminGet(f, jar, createPath);
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.channels.length, 1);
+  assert.equal(listed.body.channels[0].type, "siem");
+  assert.equal(listed.body.channels[0].lastTest.status, "succeeded");
+  assert.ok(!JSON.stringify(listed.body).includes("test-only-padding"));
+
+  const unsafe = await adminPost(
+    f,
+    jar,
+    createPath,
+    {
+      name: "Unsafe SOC collector",
+      type: "siem",
+      provider: "http-collector",
+      eventTypes: ["security.break_glass_used"],
+      config: { endpoint: "http://siem.example.test/events" },
+      reason: "Verify protocol validation",
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "notify-siem-channel-unsafe" },
+  );
+  assert.equal(unsafe.response.status, 400);
+  assert.equal(unsafe.body.error.code, "invalid_notification_channel");
 });

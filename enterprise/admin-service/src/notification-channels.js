@@ -2,16 +2,26 @@ import crypto from "node:crypto";
 import dns from "node:dns/promises";
 import https from "node:https";
 import net from "node:net";
+import tls from "node:tls";
 import {
   NOTIFICATION_EVENT_TYPES,
   publicNotificationDelivery,
 } from "./notification-schema.js";
+import {
+  DEFAULT_SIEM_MAX_EVENT_BYTES,
+  assertSiemEventSize,
+  httpCollectorPayload,
+  otlpLogsPayload,
+  syslogOctetFrame,
+  syslogRfc5424,
+} from "./notification-siem.js";
 
 export const NOTIFICATION_CHANNEL_TYPES = Object.freeze([
   "email",
   "im",
   "webhook",
   "ticketing",
+  "siem",
 ]);
 
 export const NOTIFICATION_CHANNEL_PROVIDERS = Object.freeze({
@@ -19,6 +29,7 @@ export const NOTIFICATION_CHANNEL_PROVIDERS = Object.freeze({
   im: ["feishu", "teams", "slack", "generic"],
   webhook: ["generic"],
   ticketing: ["servicenow", "jira", "feishu", "generic"],
+  siem: ["http-collector", "otlp-http", "syslog-tls"],
 });
 
 const CHANNEL_TYPES = new Set(NOTIFICATION_CHANNEL_TYPES);
@@ -36,6 +47,9 @@ const FORBIDDEN_KEYS = new Set([
   "secretvalue",
   "token",
   "tokenhash",
+  "gatewaykey",
+  "oidctoken",
+  "servicetoken",
 ]);
 const MAX_NAME_LENGTH = 100;
 const MAX_RECIPIENTS = 20;
@@ -43,6 +57,7 @@ const DEFAULT_TIMEOUT_MS = 5000;
 const DEFAULT_MAX_RESPONSE_BYTES = 64 * 1024;
 const DEFAULT_MAX_REDIRECTS = 3;
 const MAX_ENDPOINT_LENGTH = 2048;
+const SYSLOG_PORT = "6514";
 
 function safeText(value, maxLength = 320) {
   return String(value ?? "")
@@ -86,14 +101,16 @@ function normalizeEndpoint(value, name, options = {}) {
   } catch {
     throw new Error(`${name} must be an absolute HTTPS URL`);
   }
-  if (parsed.protocol !== "https:") {
-    throw new Error(`${name} must use HTTPS`);
+  const protocol = options.protocol || "https:";
+  const allowedPorts = options.allowedPorts || ["443"];
+  if (parsed.protocol !== protocol) {
+    throw new Error(`${name} must use ${protocol === "tls:" ? "TLS" : "HTTPS"}`);
   }
   if (parsed.username || parsed.password) {
     throw new Error(`${name} must not contain credentials`);
   }
-  if (parsed.port && parsed.port !== "443") {
-    throw new Error(`${name} must use port 443`);
+  if (parsed.port && !allowedPorts.includes(parsed.port)) {
+    throw new Error(`${name} must use port ${allowedPorts.join(" or ")}`);
   }
   if (!options.allowQuery && (parsed.search || parsed.hash)) {
     throw new Error(`${name} must not contain a query string or fragment`);
@@ -106,6 +123,21 @@ function normalizeEndpoint(value, name, options = {}) {
   }
   parsed.hash = "";
   return parsed.toString();
+}
+
+function endpointOptionsForChannel(type, provider) {
+  if (type === "siem" && provider === "syslog-tls") {
+    return {
+      protocol: "tls:",
+      allowedPorts: [SYSLOG_PORT],
+      protocols: ["tls:"],
+    };
+  }
+  return {
+    protocol: "https:",
+    allowedPorts: ["443"],
+    protocols: ["https:"],
+  };
 }
 
 function normalizeRef(value, name) {
@@ -167,13 +199,14 @@ function normalizeRecipients(value) {
 function normalizeChannelConfig(type, provider, value, options = {}) {
   const input = requirePlainObject(value, "config");
   const output = {};
+  const endpointOptions = endpointOptionsForChannel(type, provider);
   const hasEndpoint = input.endpoint != null && safeText(input.endpoint);
   const endpointRef = normalizeRef(input.endpointRef, "config.endpointRef");
   if (hasEndpoint && endpointRef) {
     throw new Error("config.endpoint and config.endpointRef are mutually exclusive");
   }
   if (hasEndpoint) {
-    output.endpoint = normalizeEndpoint(input.endpoint, "config.endpoint");
+    output.endpoint = normalizeEndpoint(input.endpoint, "config.endpoint", endpointOptions);
   } else if (endpointRef) {
     output.endpointRef = endpointRef;
   } else {
@@ -214,6 +247,28 @@ function normalizeChannelConfig(type, provider, value, options = {}) {
   if (type === "im") {
     output.channelLabel = safeText(input.channelLabel, 100);
   }
+  if (type === "siem") {
+    output.provider = provider;
+    if (provider === "otlp-http") {
+      output.serviceName = safeText(input.serviceName || "magpie-enterprise-admin", 128);
+      if (!/^[A-Za-z0-9._-]+$/.test(output.serviceName)) {
+        throw new Error("config.serviceName contains unsupported characters");
+      }
+    }
+    if (provider === "syslog-tls") {
+      output.hostname = safeText(input.hostname || "magpie-enterprise", 255);
+      output.appName = safeText(input.appName || "magpie-ent", 48);
+      if (!/^[A-Za-z0-9._-]+$/.test(output.hostname)
+          || !/^[A-Za-z0-9._-]+$/.test(output.appName)) {
+        throw new Error("config syslog hostname or appName contains unsupported characters");
+      }
+      const facility = input.facility == null ? 10 : Number(input.facility);
+      if (!Number.isSafeInteger(facility) || facility < 0 || facility > 23) {
+        throw new Error("config.facility must be an integer from 0 to 23");
+      }
+      output.facility = facility;
+    }
+  }
   return output;
 }
 
@@ -234,6 +289,9 @@ function normalizeChannelInput(input, options = {}) {
   const secretRef = normalizeRef(value.secretRef, "secretRef");
   if (type === "webhook" && !secretRef) {
     throw new Error("secretRef is required for a signed webhook");
+  }
+  if (type === "siem" && provider === "syslog-tls" && secretRef) {
+    throw new Error("secretRef is not supported for syslog over TLS");
   }
   const config = normalizeChannelConfig(type, provider, value.config, options);
   if (endpointRequiresAllowlist(config, options.allowlist)) {
@@ -339,6 +397,10 @@ function publicChannelConfig(config) {
     "projectKey",
     "queue",
     "channelLabel",
+    "serviceName",
+    "hostname",
+    "appName",
+    "facility",
   ]) {
     if (config[key] === undefined) continue;
     output[key] = Array.isArray(config[key])
@@ -372,7 +434,11 @@ export function validateNotificationChannelStore(data) {
         || !Array.isArray(channel.eventTypes)
         || channel.eventTypes.length === 0
         || channel.eventTypes.some((eventType) => !EVENT_TYPES.has(eventType))
-        || (channel.secretRef && !SECRET_REF_PATTERN.test(channel.secretRef))) {
+        || (channel.secretRef && !SECRET_REF_PATTERN.test(channel.secretRef))
+        || (channel.type === "webhook" && !channel.secretRef)
+        || (channel.type === "siem"
+          && channel.provider === "syslog-tls"
+          && channel.secretRef)) {
       throw new Error("admin store notificationChannels contains invalid channel metadata");
     }
     for (const key of ["name", "createdAt", "updatedAt", "createdBy", "updatedBy"]) {
@@ -398,7 +464,25 @@ export function validateNotificationChannelStore(data) {
       throw new Error("admin store notification channel endpoint reference is invalid");
     }
     if (channel.config.endpoint) {
-      normalizeEndpoint(channel.config.endpoint, "notification channel endpoint");
+      normalizeEndpoint(
+        channel.config.endpoint,
+        "notification channel endpoint",
+        endpointOptionsForChannel(channel.type, channel.provider),
+      );
+    }
+    if (channel.type === "siem" && channel.provider === "otlp-http") {
+      if (!/^[A-Za-z0-9._-]{1,128}$/.test(String(channel.config.serviceName || ""))) {
+        throw new Error("admin store notification channel OTLP serviceName is invalid");
+      }
+    }
+    if (channel.type === "siem" && channel.provider === "syslog-tls") {
+      if (!/^[A-Za-z0-9._-]{1,255}$/.test(String(channel.config.hostname || ""))
+          || !/^[A-Za-z0-9._-]{1,48}$/.test(String(channel.config.appName || ""))
+          || !Number.isSafeInteger(channel.config.facility)
+          || channel.config.facility < 0
+          || channel.config.facility > 23) {
+        throw new Error("admin store notification channel syslog metadata is invalid");
+      }
     }
   }
   for (const [testId, result] of Object.entries(data.notificationChannelTests || {})) {
@@ -583,10 +667,14 @@ export async function validateOutboundUrl(rawUrl, options = {}) {
   } catch {
     throw Object.assign(new Error("outbound URL is invalid"), { code: "transport_invalid_url" });
   }
-  if (parsed.protocol !== "https:"
+  const protocols = options.protocols || ["https:"];
+  const allowedPorts = options.allowedPorts || ["443"];
+  const defaultPort = parsed.protocol === "tls:" ? SYSLOG_PORT : "443";
+  const effectivePort = parsed.port || defaultPort;
+  if (!protocols.includes(parsed.protocol)
       || parsed.username
       || parsed.password
-      || (parsed.port && parsed.port !== "443")) {
+      || !allowedPorts.includes(effectivePort)) {
     throw Object.assign(new Error("outbound URL is not allowed"), {
       code: "transport_url_rejected",
     });
@@ -743,6 +831,49 @@ export async function secureHttpsRequest(options) {
   });
 }
 
+export async function secureTlsSyslog(options) {
+  const validated = await validateOutboundUrl(options.url, {
+    allowlist: options.allowlist,
+    dnsResolver: options.dnsResolver,
+    protocols: ["tls:"],
+    allowedPorts: [SYSLOG_PORT],
+  });
+  const frame = syslogOctetFrame(options.message);
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (error, value) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(value);
+    };
+    const connect = options.connectImpl || tls.connect;
+    const socket = connect({
+      host: validated.parsed.hostname,
+      port: Number(validated.parsed.port || SYSLOG_PORT),
+      servername: validated.parsed.hostname,
+      rejectUnauthorized: true,
+      lookup: pinnedLookup(validated.addresses),
+    }, () => {
+      socket.write(frame, "utf8", (error) => {
+        if (error) {
+          finish(error);
+          socket.destroy();
+          return;
+        }
+        socket.destroy();
+        finish(null, { ok: true, protocol: "syslog-tls" });
+      });
+    });
+    socket.setTimeout(options.timeoutMs || DEFAULT_TIMEOUT_MS, () => {
+      socket.destroy(Object.assign(new Error("syslog request timed out"), {
+        code: "transport_timeout",
+      }));
+    });
+    socket.on("error", (error) => finish(error));
+  });
+}
+
 function channelEventPayload(delivery) {
   return {
     schemaVersion: 1,
@@ -825,7 +956,7 @@ function resolveSecret(ref, env, required = false) {
   return value;
 }
 
-function resolveEndpoint(channel, env) {
+function resolveEndpoint(channel, env, options = {}) {
   const ref = channel.config.endpointRef;
   const raw = ref ? String(env?.[ref] || "") : channel.config.endpoint;
   if (!raw) {
@@ -841,10 +972,13 @@ function resolveEndpoint(channel, env) {
       code: "transport_invalid_url",
     });
   }
-  if (parsed.protocol !== "https:"
+  const protocols = options.protocols || ["https:"];
+  const allowedPorts = options.allowedPorts || ["443"];
+  const defaultPort = parsed.protocol === "tls:" ? SYSLOG_PORT : "443";
+  if (!protocols.includes(parsed.protocol)
       || parsed.username
       || parsed.password
-      || (parsed.port && parsed.port !== "443")) {
+      || !allowedPorts.includes(parsed.port || defaultPort)) {
     throw Object.assign(new Error("notification channel endpoint is not allowed"), {
       code: "transport_url_rejected",
     });
@@ -860,9 +994,11 @@ export class NotificationChannelTransport {
     this.emailRecipientDomains = options.emailRecipientDomains || [];
     this.timeoutMs = options.timeoutMs || DEFAULT_TIMEOUT_MS;
     this.maxResponseBytes = options.maxResponseBytes || DEFAULT_MAX_RESPONSE_BYTES;
+    this.maxSiemEventBytes = options.maxSiemEventBytes || DEFAULT_SIEM_MAX_EVENT_BYTES;
     this.maxRedirects = options.maxRedirects ?? DEFAULT_MAX_REDIRECTS;
     this.dnsResolver = options.dnsResolver;
     this.requestImpl = options.requestImpl;
+    this.syslogConnectImpl = options.syslogConnectImpl;
     this.now = options.now || (() => new Date());
   }
 
@@ -889,7 +1025,13 @@ export class NotificationChannelTransport {
   }
 
   async sendChannelEvent(channel, delivery) {
-    const endpoint = resolveEndpoint(channel, this.env);
+    if (channel.type === "siem") {
+      return this.sendSiemEvent(channel, delivery);
+    }
+    const endpoint = resolveEndpoint(channel, this.env, endpointOptionsForChannel(
+      channel.type,
+      channel.provider,
+    ));
     const secret = resolveSecret(
       channel.secretRef,
       this.env,
@@ -949,6 +1091,65 @@ export class NotificationChannelTransport {
     return {
       ok: true,
       statusCode: response.statusCode,
+    };
+  }
+
+  async sendSiemEvent(channel, delivery) {
+    const endpointOptions = endpointOptionsForChannel(channel.type, channel.provider);
+    const endpoint = resolveEndpoint(channel, this.env, endpointOptions);
+    if (channel.provider === "syslog-tls") {
+      const message = syslogRfc5424(delivery, channel.config);
+      assertSiemEventSize(message, this.maxSiemEventBytes);
+      return secureTlsSyslog({
+        url: endpoint,
+        message,
+        allowlist: this.allowlist,
+        timeoutMs: channel.config.timeoutMs || this.timeoutMs,
+        dnsResolver: this.dnsResolver,
+        connectImpl: this.syslogConnectImpl,
+      });
+    }
+
+    const secret = resolveSecret(channel.secretRef, this.env, false);
+    const payload = channel.provider === "otlp-http"
+      ? otlpLogsPayload(delivery, { serviceName: channel.config.serviceName })
+      : httpCollectorPayload(delivery);
+    const body = JSON.stringify(payload);
+    assertSiemEventSize(body, this.maxSiemEventBytes);
+    const headers = {
+      "content-type": "application/json; charset=utf-8",
+      "user-agent": "magpie-enterprise-siem/1",
+      "x-magpie-event-id": String(delivery.eventId || ""),
+      "x-magpie-delivery-id": String(delivery.deliveryId || ""),
+      "x-magpie-channel-id": String(channel.channelId),
+    };
+    if (secret) headers.authorization = `Bearer ${secret}`;
+    const response = await secureHttpsRequest({
+      url: endpoint,
+      method: "POST",
+      headers,
+      body,
+      allowlist: this.allowlist,
+      timeoutMs: channel.config.timeoutMs || this.timeoutMs,
+      maxResponseBytes: this.maxResponseBytes,
+      maxRedirects: this.maxRedirects,
+      dnsResolver: this.dnsResolver,
+      requestImpl: this.requestImpl,
+    });
+    if (response.statusCode < 200 || response.statusCode >= 300) {
+      throw Object.assign(new Error("SIEM collector rejected the event"), {
+        statusCode: response.statusCode,
+        code: response.statusCode === 429
+          ? "transport_rate_limited"
+          : response.statusCode >= 500
+            ? "transport_server_error"
+            : "transport_rejected",
+      });
+    }
+    return {
+      ok: true,
+      statusCode: response.statusCode,
+      protocol: channel.provider,
     };
   }
 

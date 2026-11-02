@@ -269,7 +269,7 @@ export function loadConfig(env = process.env) {
         "ADMIN_NOTIFICATION_OUTBOX_POLL_SECONDS",
         30,
         1,
-        3600,
+        300,
       ) * 1000,
       leaseMs: integer(
         env,
@@ -319,6 +319,13 @@ export function loadConfig(env = process.env) {
           3,
           0,
           3,
+        ),
+        maxSiemEventBytes: integer(
+          env,
+          "ADMIN_NOTIFICATION_SIEM_MAX_EVENT_BYTES",
+          32 * 1024,
+          1024,
+          64 * 1024,
         ),
       },
     },

@@ -7,6 +7,10 @@ export const NOTIFICATION_EVENT_TYPES = Object.freeze([
   "operation.failed",
   "operation.partial_success",
   "operation.audit_failed",
+  "security.access_denied",
+  "security.auth_failed",
+  "security.break_glass_used",
+  "security.anomaly_detected",
 ]);
 
 export const NOTIFICATION_STATUSES = Object.freeze([

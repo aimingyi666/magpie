@@ -69,6 +69,7 @@ import {
   publicNotificationChannel,
   updateNotificationChannel,
 } from "./notification-channels.js";
+import { SIEM_CRITICAL_VISIBILITY_TARGET_MS } from "./notification-siem.js";
 
 const MAX_BODY = 16 * 1024;
 const DEFAULT_USAGE_WINDOW_DAYS = 7;
@@ -1109,6 +1110,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         emailRecipientDomains: notificationChannelSettings.emailRecipientDomains || [],
         timeoutMs: notificationChannelSettings.httpTimeoutMs,
         maxResponseBytes: notificationChannelSettings.httpMaxResponseBytes,
+        maxSiemEventBytes: notificationChannelSettings.maxSiemEventBytes,
         maxRedirects: notificationChannelSettings.httpMaxRedirects,
         dnsResolver: options.notificationDnsResolver,
         requestImpl: options.notificationRequestImpl,
@@ -2772,6 +2774,30 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     };
   }
 
+  async function listNotificationDeadLetters(session, searchParams) {
+    const query = notificationQuery(searchParams);
+    const result = await requirePermission(session, "notifications.read");
+    const deliveries = await store.read((data) => Object.values(data.notificationDeliveries)
+      .filter((delivery) => delivery.status === "dead_letter")
+      .filter((delivery) => notificationDeliveryVisible(result.access, delivery))
+      .sort((left, right) => {
+        const severityOrder = { critical: 0, warning: 1, info: 2 };
+        const bySeverity = (severityOrder[left.severity] ?? 3)
+          - (severityOrder[right.severity] ?? 3);
+        if (bySeverity !== 0) return bySeverity;
+        return String(left.createdAt || "").localeCompare(String(right.createdAt || ""));
+      })
+      .slice(0, query.limit)
+      .map(publicNotificationDelivery));
+    return {
+      deadLetters: deliveries,
+      count: deliveries.length,
+      criticalCount: deliveries.filter((delivery) => delivery.severity === "critical").length,
+      oldestCreatedAt: deliveries[0]?.createdAt || "",
+      visibilityTargetSeconds: SIEM_CRITICAL_VISIBILITY_TARGET_MS / 1000,
+    };
+  }
+
   async function replayNotificationDelivery(req, res, deliveryId) {
     const current = await currentSession(req);
     if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
@@ -4392,6 +4418,13 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
       json(res, 200, await listNotificationDeliveries(current.session, url.searchParams));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/notifications/dead-letters") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, await listNotificationDeadLetters(current.session, url.searchParams));
       return;
     }
 

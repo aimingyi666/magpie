@@ -31,7 +31,7 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 测试：只允许 describe/apply/健康检查、独立 Bearer 服务令牌、固定 argv、10 秒超时、
 64 KiB 上限、写入后独立回读和 `pending` 保守状态。C4-02 的 Docker/Compose 尚未实机
 验收，admin-service 经 auth-service 间接调用，尚未直接接入。**C4-03a** 正式只读模型目录已实现，并通过 7 项目录专项；
-当前管理服务 `75/75`（61 项管理服务集成、7 项目录专项、7 项通知渠道专项）；
+当前管理服务 `82/82`（62 项管理服务集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；
 `GET /api/v1/admin/models` 已使用正式目录，`ADMIN_MODELS` 仅保留兼容显示。C4-03a 仍待真实
 Compose/只读挂载/digest 验收；
 auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b** 的用户级策略核心已实现：版本化 `gatewayPolicy`、
@@ -53,7 +53,8 @@ Client、`prompt=login`、`max_age`、`auth_time`、ACR/MFA、会话/IP/UA/角�
 的渠道管理 API 和统一 HTTPS 渠道适配器已实现并通过专项/故障测试，支持 `email`/`im`/
 `webhook`/`ticketing`、HMAC Webhook、host allowlist、DNS 固定解析和私网/重定向防护。
 邮件/IM/工单是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/ServiceNow/Jira SDK；
-`NOTIFY-01c/d` 的 SIEM、渠道规则/抑制和运营页仍未实现。默认禁用渠道，未启用渠道或没有
+`NOTIFY-01c` 的 SIEM transport、固定 L0 schema 和 dead-letters API 已实现；真实 SIEM
+接收端、`NOTIFY-01d` 的渠道规则/抑制、聚合、升级和运营页仍未实现/验收。默认禁用渠道，未启用渠道或没有
 transport 时不会创建 dispatcher，也不会伪造“已投递”。`APR-01d/e` 的审批箱和 break-glass、
 真实 OA/IdP 连接器、真实厂商网关和生产投递仍未实现或验收。业务请求不得同步等待外部通知
 渠道，管理页也不能在真实 IdP、MFA、反向代理和生产验收完成前宣称生产可用。
