@@ -38,6 +38,16 @@ export {
   verifySignedPackage,
 } from "./package.js";
 export {
+  LOCAL_MCP_HELPER_SCHEMA_VERSION,
+  LocalMcpHelper,
+} from "./helper.js";
+export {
+  DEFAULT_HELPER_LOCK_STALE_MS,
+  DEFAULT_MAX_BODY_BYTES,
+  LOCAL_MCP_SERVER_SCHEMA_VERSION,
+  createLocalMcpServer,
+} from "./server.js";
+export {
   buildSandboxCommand,
 } from "./sandbox.js";
 export {

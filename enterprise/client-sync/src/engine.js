@@ -833,6 +833,51 @@ export class ClientSyncEngine {
     };
   }
 
+  async readActiveResource(resourceId) {
+    assertSafeSegment(resourceId, "resourceId");
+    await ensureRoot(this.rootDir);
+    const state = await readClientSyncState(this.rootDir);
+    const record = state.resources.find((item) => item.resourceId === resourceId);
+    if (!record) {
+      throw new ClientSyncError("resource_not_installed", "resource is not active");
+    }
+    const directory = await releasePath(this.rootDir, record);
+    await assertNoSymlinkAncestors(this.rootDir, directory);
+    const metadataPath = path.join(directory, MANIFEST_FILE);
+    const contentPath = path.join(directory, CONTENT_FILE);
+    for (const target of [directory, metadataPath, contentPath]) {
+      const stat = await lstatOrNull(target);
+      if (!stat || stat.isSymbolicLink()) {
+        throw new ClientSyncError("content_invalid", "active resource is missing or unsafe");
+      }
+    }
+    const metadataStat = await fs.lstat(metadataPath);
+    const contentStat = await fs.lstat(contentPath);
+    if (!metadataStat.isFile()
+        || metadataStat.size > MAX_MANIFEST_BYTES
+        || !contentStat.isFile()
+        || contentStat.size > this.maxResourceBytes) {
+      throw new ClientSyncError("content_invalid", "active resource files are invalid");
+    }
+    let manifest;
+    try {
+      manifest = validateManifestShape(JSON.parse(await fs.readFile(metadataPath, "utf8")));
+    } catch (error) {
+      if (error instanceof ClientSyncError) throw error;
+      throw new ClientSyncError("content_invalid", "active resource metadata is invalid");
+    }
+    const content = await fs.readFile(contentPath);
+    verifyResource(this.keys, manifest, content);
+    if (!recordsMatch(record, desiredRecord(manifest))) {
+      throw new ClientSyncError("metadata_mismatch", "active resource metadata does not match state");
+    }
+    return {
+      manifest: { ...manifest, assignments: [...manifest.assignments] },
+      content,
+      record: { ...record },
+    };
+  }
+
   async setRecommendedEnabled(resourceId, enabled) {
     if (typeof enabled !== "boolean") {
       throw new ClientSyncError("invalid_config", "enabled must be a boolean");

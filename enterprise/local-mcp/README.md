@@ -6,8 +6,17 @@ code runs, applies enterprise publisher/capability/network/secret/tool policy,
 launches the package with Node's permission model, and records append-only
 metadata audits and bounded health counters.
 
-This package is a runtime core. It is not yet connected to the employee helper,
-admin console, browser flow, Windows service/MDM, or a production secret broker.
+The package now includes the client-facing integration core:
+
+- `LocalMcpHelper` connects a signed client-sync resource to the local MCP
+  runtime without accepting a package id from the caller.
+- `createLocalMcpServer()` exposes the helper only on loopback with a Bearer
+  token, a bounded JSON API, stable error codes, and a single-helper lock.
+
+This is still a runtime and helper core, not a complete employee product. The
+installer, Windows service/MDM packaging, code signing, upgrade/rollback flow,
+admin-console integration, browser E2E, production secret broker, and real
+external OS sandbox remain unfinished.
 
 ## Security boundary
 
@@ -69,20 +78,79 @@ const result = await host.callTool(
 Package publishers use `buildSignedPackage(fields, files, privateKey)`.
 `verifySignedPackage(publicKey, input)` is available for preflight checks.
 
+## Client sync and local helper
+
+The helper uses `ClientSyncEngine.readActiveResource()` as its only source of
+active MCP package bytes. The engine re-reads state, rejects unsafe paths and
+symlinks, verifies the Ed25519 manifest signature and content digest, and
+checks that the on-disk manifest still matches the active state record.
+
+During sync, pass the helper validator into the engine so only `mcp` resources
+are installed into the local runtime:
+
+```js
+import { ClientSyncEngine } from "@magpie-enterprise/client-sync";
+import { LocalMcpHelper } from "@magpie-enterprise/local-mcp";
+
+let helper;
+const syncEngine = new ClientSyncEngine({
+  // ...the normal client-sync options...
+  validateInstalled: (resource) => helper.validateClientResource(resource),
+});
+helper = new LocalMcpHelper({ clientSync: syncEngine, host });
+
+await helper.synchronize();
+const status = await helper.snapshot();
+```
+
+The helper never trusts a caller-supplied `packageId`, `releaseId`, path, or
+secret. It resolves those identities from the verified active resource and
+fails closed when the resource is inactive, drifted, not `kind: "mcp"`,
+missing, tampered with, or not installed in the local runtime. `snapshot()`
+returns only bounded identities, versions, health counters, and stable error
+codes; it does not return resource bodies, secrets, private keys, or absolute
+paths.
+
+The local HTTP server accepts only `127.0.0.1` or `::1`, checks the peer
+address again on every request, and binds its lock file under the configured
+local MCP root. `/healthz` is public. The remaining routes require
+`Authorization: Bearer <opaque helper token>`:
+
+```text
+GET  /api/v1/local-mcp/status
+GET  /api/v1/local-mcp/resources/:resourceId/tools
+POST /api/v1/local-mcp/resources/:resourceId/tools/:toolName/call
+```
+
+The call body is `{ "args": { ... }, "approval": { ... } }`; `approval` is
+optional and must be an object. Unknown fields are rejected. The default body
+limit is 256 KiB (configurable from 1 to 1024 KiB), responses use
+`cache-control: no-store` and `x-content-type-options: nosniff`, and no CORS
+permission is granted. A second helper using the same lock fails with
+`helper_locked` (HTTP 409); `close()` is idempotent.
+
 ## Tests
 
 ```powershell
 & 'D:\Environment\node-v26.12.1\node.exe' --test .\enterprise\local-mcp\test\*.test.mjs
 ```
 
-Tests use isolated temporary roots and local child processes only. They do not
-read production audit, health, usage, session, agent, or secret files.
+Current result: **37 passed, 0 failed** (21 runtime, 7 helper integration, and
+9 HTTP server tests). They use isolated temporary roots, in-memory test
+helpers, and local child processes only. They do not read production audit,
+health, usage, session, agent, or secret files.
+
+The tests prove the individual contracts with mock client-sync and runtime
+adapters. They do not prove a full
+`ClientSyncEngine + LocalMcpHost + HTTP server` end-to-end flow, a real
+employee install, or a production OS boundary.
 
 ## Not yet production-ready
 
-- Local helper/agent configuration integration and administrator visibility.
+- Local helper installer, Windows service/MDM packaging, code signing,
+  upgrade/rollback, target-agent configuration, and administrator visibility.
 - Real OIDC, approval service, Secret Broker, KMS/HSM, and enterprise IdP.
-- Windows ACL/MDM enforcement, code signing, installer rollback, and upgrades.
+- Windows ACL enforcement and a signed, recoverable installer.
 - A proven external OS sandbox for network, clipboard, desktop, native, and
   broad filesystem controls.
 - Docker/VM isolation, browser E2E, shared-volume concurrency, HA, and

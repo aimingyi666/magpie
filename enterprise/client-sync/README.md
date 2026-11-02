@@ -1,10 +1,11 @@
 # Magpie Enterprise client sync
 
 状态：**M3-C-1 客户端同步控制面已接入。同步引擎、短期同步凭证、desired-state、
-设备上报、管理员 JSON 查询 API 和客户端 HTTP 传输适配器已实现，并通过 24 项单元/Mock
-测试；管理台资源/漂移页、本地 helper 产品入口、Windows ACL、MDM、目标 Agent 文件映射
-和企业生产验收仍未完成；M3-D 运行时核心已在 `enterprise/local-mcp` 实现，但 helper
-集成和生产验收未完成，M4-M6 仍未实现。**
+设备上报、管理员 JSON 查询 API、客户端 HTTP 传输适配器和已验证 active 资源读取接口
+已实现，并通过 26 项单元/Mock 测试；本地 MCP helper/HTTP server 集成核心已在
+`enterprise/local-mcp` 实现并通过 37 项专项测试。管理台资源/漂移页、本地 helper
+安装器/Windows 服务、Windows ACL、MDM、目标 Agent 文件映射和生产验收仍未完成；
+M4-M6 仍未实现。**
 
 这个包提供本机 Magpie/helper 所需的企业资源同步核心：
 
@@ -62,6 +63,23 @@ await engine.setRecommendedEnabled("res_optional_skill", true);
 
 强制项调用会抛出 `ClientSyncError("forced_resource")`。
 
+## 读取 active 资源
+
+`readActiveResource(resourceId)` 只读取最后一次成功激活且仍与 state 记录一致的资源。
+它不会扫描 release 目录、接受调用方提供的路径，或回退到未激活版本。
+
+```js
+const active = await engine.readActiveResource("res_local_mcp_echo");
+// active.manifest: 已重新校验的签名 manifest
+// active.content:  Buffer 内容
+// active.record:   与 manifest 对应的 active state 记录
+```
+
+读取时会重新验证 manifest schema、Ed25519 签名、内容长度和 SHA-256，拒绝路径穿越、
+符号链接、缺失文件、超大文件和 state/manifest 不一致。该接口供本机 helper 使用：
+`LocalMcpHelper` 只接受 `kind === "mcp"` 的 active 资源，并从验证后的 manifest 解析
+`packageId`/`releaseId`，不信任调用方传入的包身份。
+
 ## 传输适配器和控制面
 
 当前仓库已经提供员工设备可用的控制面链路：
@@ -95,11 +113,12 @@ await engine.setRecommendedEnabled("res_optional_skill", true);
 & 'D:\Environment\node-v26.12.1\node.exe' --test enterprise/client-sync/test/*.test.mjs
 ```
 
-当前结果：**24 passed, 0 failed**。其中同步引擎核心 16 项、HTTP 传输适配器 8 项。
+当前结果：**26 passed, 0 failed**。其中同步引擎核心 18 项、HTTP 传输适配器 8 项。
 
 测试覆盖有效安装、manifest/内容篡改、失败回滚、离线、强制/推荐与推荐转强制、
 漂移、路径穿越、未知 key、符号链接、坏缓存、release 冲突、并发锁、Secret 不落状态、
-最低版本、超大 manifest、状态写入失败报告一致性、重复资源和同步周期上限。测试只使用
+最低版本、超大 manifest、状态写入失败报告一致性、重复资源、active 资源重新验签和
+同步周期上限。测试只使用
 临时目录和内存/Fetch Mock，不访问真实用户目录或网络。传输测试覆盖凭证签发、401 重签、
 304 缓存、超时、响应体上限、报告字段白名单和错误保持。
 

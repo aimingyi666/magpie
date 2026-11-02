@@ -498,3 +498,76 @@ test("the maximum periodic sync interval is five minutes", () => {
     (error) => error instanceof ClientSyncError && error.code === "invalid_config",
   );
 });
+
+test("readActiveResource returns only a re-verified active release", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const resource = signedResource(identity, {
+    content: "# Verified active release\n",
+  });
+  const engine = engineFor(root, identity, async () => desired([resource]));
+  assert.equal((await engine.syncOnce()).status, "synced");
+
+  const active = await engine.readActiveResource(resource.manifest.resourceId);
+  assert.deepEqual(active.manifest, resource.manifest);
+  assert.deepEqual(active.content, resource.content);
+  assert.equal(active.record.releaseId, resource.manifest.releaseId);
+  assert.equal(active.record.kind, "instructions");
+
+  await assert.rejects(
+    () => engine.readActiveResource("res_not_active"),
+    (error) => error instanceof ClientSyncError && error.code === "resource_not_installed",
+  );
+  await assert.rejects(
+    () => engine.readActiveResource("../escape"),
+    (error) => error instanceof ClientSyncError && error.code === "path_traversal",
+  );
+});
+
+test("readActiveResource fails closed after content or path tampering", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const resource = signedResource(identity);
+  const engine = engineFor(root, identity, async () => desired([resource]));
+  assert.equal((await engine.syncOnce()).status, "synced");
+
+  const contentPath = path.join(
+    root,
+    "releases",
+    resource.manifest.resourceId,
+    resource.manifest.releaseId,
+    "content",
+  );
+  fs.writeFileSync(contentPath, "tampered after activation\n");
+  await assert.rejects(
+    () => engine.readActiveResource(resource.manifest.resourceId),
+    (error) => error instanceof ClientSyncError && error.code === "content_invalid",
+  );
+
+  const symlinkRoot = temporaryRoot(t);
+  const symlinkEngine = engineFor(symlinkRoot, identity, async () => desired([resource]));
+  assert.equal((await symlinkEngine.syncOnce()).status, "synced");
+  const symlinkContent = path.join(
+    symlinkRoot,
+    "releases",
+    resource.manifest.resourceId,
+    resource.manifest.releaseId,
+    "content",
+  );
+  const outside = path.join(path.dirname(symlinkRoot), "outside-content");
+  fs.writeFileSync(outside, resource.content);
+  fs.rmSync(symlinkContent);
+  try {
+    fs.symlinkSync(outside, symlinkContent, "file");
+  } catch (error) {
+    if (["EPERM", "EACCES", "UNKNOWN"].includes(error.code)) {
+      t.skip(`symbolic links unavailable: ${error.code}`);
+      return;
+    }
+    throw error;
+  }
+  await assert.rejects(
+    () => symlinkEngine.readActiveResource(resource.manifest.resourceId),
+    (error) => error instanceof ClientSyncError && error.code === "content_invalid",
+  );
+});

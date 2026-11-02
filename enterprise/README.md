@@ -40,8 +40,9 @@ MCP 端点、工具级 allow/deny、健康检查、上游凭据隔离和元数�
 auth-service 已通过 26 项测试；admin-service 已通过 109 项测试（82 项管理服务集成测试 +
 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
 已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 14 项
-单元/Mock 集成测试；client-sync 已通过 24 项单元/Mock 集成测试（16 核心 + 8 传输）；
-当前合计 203 项通过、0 失败。
+单元/Mock 集成测试；client-sync 已通过 26 项单元/Mock 集成测试（18 核心 + 8 传输）；
+local-mcp 已通过 37 项隔离单元/Mock 测试（21 运行时 + 7 helper + 9 HTTP server）；
+当前合计 242 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -61,7 +62,9 @@ APR-01c、NOTIFY-01a、NOTIFY-01b 和 NOTIFY-01c 后端已实现，但真实渠�
 是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/Slack/ServiceNow/Jira SDK，真实
 证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收。
 NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页已实现并通过 Mock/集成测试；
-M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现；M3-D 受控本地 MCP 运行时核心已实现，但本地 helper/管理台集成和生产验收尚未完成，M4-M6 仍未实现；
+M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现；M3-D 受控本地 MCP
+运行时、`LocalMcpHelper` 和回环 HTTP server 核心已实现，但安装器/Windows 服务、管理台
+员工产品流、真实外部沙箱和生产验收尚未完成，M4-M6 仍未实现；
 M2-D 核心已实现，生产验收未完成。M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
@@ -363,7 +366,9 @@ allow/deny、可见性和风险策略；high/critical 工具还要求短期 HMAC
 客户端 token 只存 SHA-256，上游凭据只保存环境变量名，审计不记录参数或正文。
 
 当前严格边界：M3-B 只是核心后端，尚未接入 admin-service 真实审批查询/一次性消费、管理台、
-OIDC 组织分配或员工客户端同步；M3-C-1 已有独立同步控制面和客户端核心，M3-D 受控本地 MCP 运行时核心已实现于 `enterprise/local-mcp`，但尚未接入本地 helper、管理台和生产验收。审批 nonce 和限流器只在单进程内存中，
+OIDC 组织分配或员工客户端同步；M3-C-1 已有独立同步控制面和客户端核心，M3-D 受控本地 MCP
+运行时及 helper/server 核心已实现于 `enterprise/local-mcp`，但尚未接入安装器/Windows 服务、
+管理台员工产品流和生产验收。审批 nonce 和限流器只在单进程内存中，
 不能多副本。注册表和审计是分开的持久化写入，审计落盘失败可能发生在状态提交之后；client
 签发场景会留下无法取回明文 token 的孤立 client，必须吊销后重新签发。生产部署需要共享事务
 存储或审计 intent/补偿状态机、不可篡改审计、KMS/HSM、mTLS、真实 MCP/IdP 和浏览器 E2E。
@@ -379,7 +384,9 @@ manifest、资源内容、长度和 SHA-256，在 staging 中 fsync 并复验后
 
 核心同时实现 forced/recommended 策略、最低客户端版本、`inspect()` 漂移检测、进程锁、
 状态文件 `0600` 原子写入和脱敏报告，并拒绝路径穿越、符号链接、坏缓存、重复资源/版本/
-hash、未知签名 key 和超大 manifest。测试：
+hash、未知签名 key 和超大 manifest。`readActiveResource()` 只返回仍与 active state
+一致且重新通过签名/长度/SHA-256 校验的资源，供 local MCP helper 消费。专项当前
+26 项测试通过（18 核心 + 8 传输）：
 
 ```bash
 node --test enterprise/client-sync/test/*.test.mjs
@@ -418,12 +425,23 @@ Windows ACL/MDM 和生产验收。
 SHA-256 文件摘要和公钥指纹；staging/fsync/复验/原子 rename 安装与并发锁；Node permission
 model、`shell: false`、受限环境及发布者/工具/风险/文件/网络/秘密/解释器策略；高风险工具
 审批绑定包 digest 和工具名；HTTPS Secret Broker 短期租约；JSON-RPC 超时、响应上限和工具
-目录一致性检查；fail-closed 审计及有界健康计数。本核心通过 21 项隔离单元/Mock 测试。
+目录一致性检查；fail-closed 审计及有界健康计数。
 
-严格边界：尚未接入本地 helper、目标 Agent 配置和管理台员工产品流；真实 OIDC、审批服务、
-Secret Broker、KMS/HSM、Windows ACL/MDM、代码签名、安装升级/回滚和已证明的外部 OS 沙箱
-仍需验收。Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把
-M3-D 运行时核心写成产品化或生产可用。
+本切片新增 `LocalMcpHelper` 和 `createLocalMcpServer()`：helper 通过
+`ClientSyncEngine.readActiveResource()` 读取 active `kind: "mcp"` 资源，重新验签后从
+manifest 解析包身份，不接受调用方提交的 `packageId`/路径；在同步阶段可作为
+`validateInstalled` 回调安装签名 MCP 包。HTTP server 只允许 `127.0.0.1`/`::1`，`/healthz`
+公开，其余路由要求至少 16 字节 Bearer token；提供 status、tools 和 call 三个固定接口，
+默认 256 KiB body 上限、固定 JSON 字段、稳定错误码、文件锁、无 CORS 和 `no-store`。
+snapshot 不返回正文、Secret、私钥或绝对路径。本包当前通过 37 项隔离单元/Mock 测试
+（21 运行时 + 7 helper + 9 HTTP server）。
+
+严格边界：helper/server 目前是接口级集成核心，测试分别使用 Mock client-sync、Mock helper
+和 Mock runtime，没有 `ClientSyncEngine + LocalMcpHost + HTTP server` 的完整 E2E；安装器/
+Windows 服务/MDM、代码签名、升级回滚、目标 Agent 配置和管理台员工产品流仍未实现；真实
+OIDC、审批服务、Secret Broker、KMS/HSM、Windows ACL 和已证明的外部 OS 沙箱仍需验收。
+Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把 M3-D
+运行时核心写成产品化或生产可用。
 
 ## 5. 当前员工与管理员流程（只列已实现）
 
@@ -474,8 +492,9 @@ M3-D 运行时核心写成产品化或生产可用。
    远程 MCP 注册、统一企业 MCP 端点、工具级策略、健康检查、上游凭据隔离和元数据审计核心；
    M3-C-1 已提供设备同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端同步核心，
    包括强制/推荐、原子安装和漂移检测；M3-C-2 已接入只读资源/漂移页。但资源发布/回滚 UI、
-   审批联动、本地 helper 产品流和目标 Agent 文件映射仍未实现；受控本地 MCP 属于 M3-D，
-   运行时核心已实现，但尚未接入本地 helper 和管理台。
+   审批联动、本地 helper 安装器/产品流和目标 Agent 文件映射仍未实现；受控本地 MCP 属于
+   M3-D，运行时、helper 和回环 HTTP server 核心已实现，但尚未接入安装器、Windows 服务和
+   管理台员工产品流。
 8. 管理员不能直接读取或改写员工本机 Agent 配置。后续中央策略也必须通过本地 Magpie/helper
    的受控同步接口落地，浏览器不能获得任意本机文件写权限。
 

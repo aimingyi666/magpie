@@ -1,10 +1,10 @@
 # Magpie Enterprise client sync design
 
-状态：**M3-C-1 客户端同步控制面，24 项单元/Mock 测试通过。同步引擎、短期同步凭证、
-desired-state、设备上报、管理员 JSON 查询 API 和客户端 HTTP 传输适配器已实现；管理台
-资源/漂移页、本地 helper 产品入口、Windows ACL、MDM、目标 Agent 文件映射和企业生产
-环境验收仍未完成；M3-D 运行时核心已在 `enterprise/local-mcp` 实现，但 helper 集成和
-生产验收未完成，M4-M6 仍未实现。**
+状态：**M3-C-1 客户端同步控制面，26 项单元/Mock 测试通过。同步引擎、短期同步凭证、
+desired-state、设备上报、管理员 JSON 查询 API、客户端 HTTP 传输适配器和已验证 active
+资源读取接口已实现；本地 MCP helper/HTTP server 集成核心已在
+`enterprise/local-mcp` 实现。管理台资源/漂移页、本地 helper 安装器/Windows 服务、
+Windows ACL、MDM、目标 Agent 文件映射和生产环境验收仍未完成；M4-M6 仍未实现。**
 
 ## 1. 目标与信任边界
 
@@ -180,6 +180,11 @@ rootDir/
 状态写入流程是“临时文件 + fsync + rename”。同步失败时会更新 `desired` 和
 `lastError` 以显示漂移，但 active `resources` 仍指向最后一次完整验证并激活的版本。
 
+`readActiveResource(resourceId)` 是可执行文件到本机 helper 的受限读取边界。它只接受
+安全 `resourceId`，只从 `state.json` 的 active 记录定位 release，拒绝符号链接祖先和
+目标文件，重新校验 manifest、Ed25519 签名、内容长度、SHA-256 以及磁盘 manifest 与
+state 记录的一致性。读取失败使用稳定错误码，不返回任意 release 目录内容。
+
 ## 6. 事务与失败语义
 
 一次 `syncOnce()` 的顺序：
@@ -245,7 +250,9 @@ rootDir/
 - 员工端 OIDC/设备令牌换取短期同步凭证的 API。
 - HTTP 下载、证书固定、代理、重试和条件请求；这些属于传输适配器。
 - Skills/Subagents 的目标 Agent 文件映射与一键配置。
-- MCP 本地进程启动、沙箱、Secret Reference 和健康检查；这些属于 M3-D。
+- MCP 本地进程启动、沙箱、Secret Reference 和健康检查；这些属于 M3-D，已由
+  `enterprise/local-mcp` 的 helper/server 核心消费本包的 `readActiveResource()`。
+- 本地 helper 安装器、Windows 服务/MDM、代码签名、升级回滚和目标 Agent 文件映射。
 - 管理台设备版本/漂移列表和灰度发布；控制面 desired-state 与设备上报 API 已实现，
   但目前只有管理员 JSON 查询 API，没有对应管理 UI。
 - 删除策略、磁盘配额、内容压缩、增量 patch 和多副本共享状态。
@@ -262,7 +269,8 @@ rootDir/
 & 'D:\Environment\node-v26.12.1\node.exe' --test enterprise/client-sync/test/*.test.mjs
 ```
 
-当前结果：**16 passed, 0 failed**。这证明签名 desired-state、原子安装、失败保留旧版本、
-离线缓存、强制/推荐策略、漂移检测、路径/符号链接防护、并发锁和状态秘密隔离，不等于
-员工端 API、管理台、浏览器 E2E、Windows 文件 ACL、MDM、目标 Agent 文件映射、真实企业
-IdP 或生产部署已经验收。
+当前结果：**26 passed, 0 failed**（同步引擎核心 18 项 + HTTP 传输适配器 8 项）。
+这证明签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、
+路径/符号链接防护、并发锁、状态秘密隔离和 active 资源重新验签，不等于
+`ClientSyncEngine + LocalMcpHost + HTTP server` 完整 E2E、helper 安装器、管理台、
+浏览器 E2E、Windows 文件 ACL、MDM、目标 Agent 文件映射、真实企业 IdP 或生产部署已经验收。

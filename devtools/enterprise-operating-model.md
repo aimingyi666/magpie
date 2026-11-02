@@ -62,16 +62,16 @@ Mock/集成核心；M2-D 核心已实现，生产验收尚未完成。M3-A 的 `
 并通过 11 项核心测试；M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据隔离
 和元数据审计核心已实现，并通过 14 项测试；M3-C-1 的设备短期同步凭证、desired-state、
 设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器已实现，resource-service 15 项
-（11 核心 + 4 控制面）和 client-sync 24 项（16 核心 + 8 传输）测试通过；M3-C-2 已实现
-admin-service 只读资源/同步报告 API 和管理页面板，admin-service 109 项、local-mcp 21 项
-通过；既有企业回归 203 项，本地/Mock 回归合计 224 项。M3-A/M3-B 尚未接入 admin-service 真实审批、可写管理台和
+（11 核心 + 4 控制面）和 client-sync 26 项（18 核心 + 8 传输）测试通过；M3-C-2 已实现
+admin-service 只读资源/同步报告 API 和管理页面板，admin-service 109 项、local-mcp 37 项
+通过；企业七套回归合计 242 项。M3-A/M3-B 尚未接入 admin-service 真实审批、可写管理台和
 OIDC 组织分配；M3-C-1/M3-C-2 已接入员工端同步 API 和管理页只读资源/漂移视图，但资源
-发布/回滚 UI、审批联动、本地 helper、目标 Agent 文件映射、Windows ACL/MDM、真实 IdP、
-浏览器 E2E、Compose 实机、灰度/自动回滚和生产验收未完成；M3-D 运行时核心已实现，但本地 helper/管理台集成和生产验收未完成，M4-M6 未实现。
+发布/回滚 UI、审批联动、本地 helper 安装器/产品流、目标 Agent 文件映射、Windows ACL/MDM、真实 IdP、
+浏览器 E2E、Compose 实机、灰度/自动回滚和生产验收未完成；M3-D 运行时、helper 和回环 HTTP server 核心已实现，但管理台员工产品流、安装器/Windows 服务和生产验收未完成，M4-M6 未实现。
 M3-B 的审批 nonce/限流器仅单进程，注册表、
 审计和幂等不是同一事务。
 真实企业 IdP、Docker Compose、真实共享卷、Windows 计划任务、反向代理、
-生产部署中的操作审计查询、M3-B 远程 MCP 验收、M3-C-1/M3-D 本地 helper 产品流、会话正文审计、安全运营和 HA
+生产部署中的操作审计查询、M3-B 远程 MCP 验收、M3-C-1/M3-D 本地 helper 安装器/员工产品流、会话正文审计、安全运营和 HA
 尚未完成生产验收。当前只能定位为“可演示、可受控技术试点”，不能称为“企业生产版完成”。
 
 ## 1. 项目目标和范围冻结
