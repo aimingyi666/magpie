@@ -22,6 +22,8 @@ const ACTION_RISK = Object.freeze({
   "user.disable": "H",
   "device.revoke": "H",
   "user.policy.models": "H",
+  "usage.export.create": "H",
+  "audit.export.create": "H",
   "operation.reconcile": "C",
 });
 
@@ -91,6 +93,18 @@ export function normalizedApprovalPayload(action, value = {}) {
       parentOperationId: String(value.parentOperationId || ""),
       reconciliationAction: String(value.reconciliationAction || ""),
       evidenceRef: String(value.evidenceRef || ""),
+    };
+  }
+  if (action === "usage.export.create" || action === "audit.export.create") {
+    return {
+      exportType: String(value.exportType || ""),
+      orgUnitId: String(value.orgUnitId || ""),
+      from: String(value.from || ""),
+      to: String(value.to || ""),
+      filters: value.filters && typeof value.filters === "object"
+        && !Array.isArray(value.filters)
+        ? canonicalValue(value.filters)
+        : {},
     };
   }
   if ([

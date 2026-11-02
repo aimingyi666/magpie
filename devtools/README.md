@@ -31,7 +31,7 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 测试：只允许 describe/apply/健康检查、独立 Bearer 服务令牌、固定 argv、10 秒超时、
 64 KiB 上限、写入后独立回读和 `pending` 保守状态。C4-02 的 Docker/Compose 尚未实机
 验收，admin-service 经 auth-service 间接调用，尚未直接接入。**C4-03a** 正式只读模型目录已实现，并通过 7 项目录专项；
-当前管理服务 `82/82`（62 项管理服务集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；
+当前管理服务 `86/86`（66 项管理服务集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；
 `GET /api/v1/admin/models` 已使用正式目录，`ADMIN_MODELS` 仅保留兼容显示。C4-03a 仍待真实
 Compose/只读挂载/digest 验收；
 auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b** 的用户级策略核心已实现：版本化 `gatewayPolicy`、
@@ -39,10 +39,11 @@ auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b**
 均通过 auth-service `25/25`。C4-03c 的额度/模型管理 API、幂等签发、issuance journal、
 apply/独立回读、同步后交付、失败补偿和启动恢复核心已实现并通过 Mock/故障测试；
 C4-03d 部分实现：管理页已有额度/模型写表单和完整证据链状态，员工页已有本人额度/模型/
-凭证/设备只读门户；失败恢复入口、停用/吊销/轮换页面、operation/audit 查询和人工对账仍
-未实现。C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实限额/
-模型拒绝、多凭证部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销
-和恢复同步；M2-C5 查询/对账后端已实现，M2-D 和 M3-M6 仍未实现。
+凭证/设备只读门户；M2-D 已补基础停用/吊销/轮换、审批、operation/audit 查询、人工对账
+和 CSV 导出页面，但仍缺浏览器 E2E、失败恢复入口和完整运营体验。C4-04 完整管理到真实
+Magpie 策略流 E2E 已通过，覆盖双设备独立 Key、真实限额/模型拒绝、多凭证部分失败、
+refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复同步。M2-D 核心已实现，
+Mock/集成测试通过；生产验收尚未完成；M3-M6 仍未实现。
 C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
 宣称管理员已经可以在生产自助调额或授予模型。
 `APR-01a/b` 的服务端审批、职责分离、一次性消费和 HMAC/Mock 外部审批回调，
@@ -70,10 +71,10 @@ transport 时不会创建 dispatcher，也不会伪造“已投递”。`APR-01d
   -> C4-03c：额度/模型管理 API、issuance journal、同步后交付和无孤儿补偿（核心已完成；待真实环境验收）
   -> C4-03d：页面/运营真实状态、失败凭证和对账入口（部分完成）
   -> C4-04：完整管理到真实 Magpie 策略流 E2E（已完成；待 Docker/共享卷和真实 IdP 验收）
-  -> C5：operations/audit-logs/reconcile
+  -> C5：operations/audit-logs/reconcile（后端和基础页面已完成）
   -> APR-01a/b/c：审批绑定/一次性消费、外部审批、step-up（代码和 Mock 测试已完成）
   -> NOTIFY-01a/b [core done] / 01c：outbox、渠道 API/HTTPS transport、SIEM
-  -> M2-D：管理台写操作、看板和授权导出
+  -> M2-D：管理台写操作、基础页面和授权导出（核心已完成；生产验收待完成）
   -> APR-01d/e + NOTIFY-01d：内置审批、break-glass、通知运营页
   -> M3-M6
 ```

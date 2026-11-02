@@ -263,6 +263,17 @@ export function loadConfig(env = process.env) {
       maxFields: integer(env, "ADMIN_USAGE_MAX_FIELDS", 256, 16, 1024),
       maxRangeDays: integer(env, "ADMIN_USAGE_MAX_RANGE_DAYS", 366, 1, 3660),
     },
+    exports: {
+      ttlSeconds: integer(env, "ADMIN_EXPORT_TTL_SECONDS", 900, 60, 86400),
+      maxBytes: integer(
+        env,
+        "ADMIN_EXPORT_MAX_BYTES",
+        5 * 1024 * 1024,
+        64 * 1024,
+        32 * 1024 * 1024,
+      ),
+      maxRecords: integer(env, "ADMIN_EXPORT_MAX_RECORDS", 100000, 1, 1000000),
+    },
     notifications: {
       pollIntervalMs: integer(
         env,

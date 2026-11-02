@@ -836,6 +836,9 @@ async function fixture(options = {}) {
       ADMIN_USAGE_MAX_RECORDS: options.maxRecords || "1000000",
       ADMIN_USAGE_MAX_FIELDS: options.maxFields || "256",
       ADMIN_USAGE_MAX_RANGE_DAYS: "366",
+      ADMIN_EXPORT_TTL_SECONDS: options.exportTtlSeconds || "900",
+      ADMIN_EXPORT_MAX_BYTES: options.exportMaxBytes || String(5 * 1024 * 1024),
+      ADMIN_EXPORT_MAX_RECORDS: options.exportMaxRecords || "100000",
       ADMIN_NOTIFICATION_CHANNELS_ENABLED:
         options.notificationChannelsEnabled ? "true" : "false",
       ADMIN_NOTIFICATION_OUTBOUND_ALLOWLIST:
@@ -1278,6 +1281,21 @@ function adminPatch(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
   return adminRequest(f, jar, "PATCH", pathname, body, csrfToken, extraHeaders);
 }
 
+async function downloadExport(f, jar, pathname, token, headers = {}) {
+  const response = await fetch(`${f.base}${pathname}`, {
+    headers: {
+      ...(jar ? { cookie: jar.header() } : {}),
+      ...(token ? { authorization: `Bearer ${token}` } : {}),
+      ...headers,
+    },
+  });
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return {
+    response,
+    body: new TextDecoder("utf-8", { ignoreBOM: true }).decode(bytes),
+  };
+}
+
 function assertNoWriteSecrets(value, f, jar) {
   const serialized = JSON.stringify(value);
   for (const forbidden of [
@@ -1629,6 +1647,7 @@ test("M2-B read-only data is attributed and filtered by organization scope", { t
     matchedRecords: 4,
     unattributedRecords: 1,
     outsideScopeRecords: 0,
+    filteredOutRecords: 0,
   });
   assert.deepEqual(
     summary.body.dimensions.department.map((group) => [group.orgUnitId, group.requests]),
@@ -1709,6 +1728,7 @@ test("M2-B read-only data is attributed and filtered by organization scope", { t
     matchedRecords: 3,
     unattributedRecords: 1,
     outsideScopeRecords: 1,
+    filteredOutRecords: 0,
   });
   assert.deepEqual(
     scopedSummary.body.dimensions.department.map((group) => [group.orgUnitId, group.requests]),
@@ -2881,8 +2901,8 @@ test("M2-C5 operation details enforce permissions and organization scope", { tim
     jar,
     "/api/v1/admin/operations/op_detail_missing_target",
   );
-  assert.equal(missingTarget.response.status, 404);
-  assert.equal(missingTarget.body.error.code, "operation_target_unavailable");
+  assert.equal(missingTarget.response.status, 200);
+  assert.equal(missingTarget.body.operation.operationId, "op_detail_missing_target");
 
   await bindRole(f, current.body.user.id, "department_admin", "org-root");
   const ownScope = await adminGet(f, jar, `/api/v1/admin/operations/${aliceOperation.id}`);
@@ -3587,9 +3607,11 @@ test("approval risk levels and canonical digests are stable", () => {
       "user.disable",
       "device.revoke",
       "user.policy.models",
+      "usage.export.create",
+      "audit.export.create",
       "operation.reconcile",
     ].map(riskForAction),
-    ["L", "M", "M", "H", "H", "H", "C"],
+    ["L", "M", "M", "H", "H", "H", "H", "H", "C"],
   );
   assert.equal(riskForAction("unknown.action"), "");
 
@@ -3640,6 +3662,521 @@ test("approval risk levels and canonical digests are stable", () => {
   assert.notEqual(
     approvalBindingDigest(binding),
     approvalBindingDigest({ ...binding, targetOrgUnitId: "org-sales" }),
+  );
+});
+
+test("M2-D exports require a bound approval, step-up, CSRF, and idempotency", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture({ usageContent: usageLines() });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const request = {
+    exportType: "usage",
+    orgUnitId: "*",
+    from: new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
+    to: new Date(Date.now() + 3600 * 1000).toISOString(),
+    filters: { provider: "deepseek" },
+  };
+  const reason = "Independent usage export review";
+  const pathname = "/api/v1/admin/usage/export";
+
+  const missingCsrf = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...request, reason, approvalId: "apr_missing" },
+    "",
+    { "idempotency-key": "export-missing-csrf" },
+  );
+  assert.equal(missingCsrf.response.status, 403);
+  assert.equal(missingCsrf.body.error.code, "csrf_invalid");
+
+  const missingApproval = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...request, reason },
+    current.body.csrfToken,
+    { "idempotency-key": "export-missing-approval" },
+  );
+  assert.equal(missingApproval.response.status, 400);
+  assert.equal(missingApproval.body.error.code, "approval_required");
+
+  const approval = await requestApproval(f, jar, current, {
+    action: "usage.export.create",
+    reason,
+    ...request,
+  });
+  assert.equal(approval.riskLevel, "H");
+  assert.match(approval.targetId, /^exp_[a-f0-9]{64}$/);
+
+  const selfDecision = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/approvals/${approval.approvalId}/decisions`,
+    { decision: "approve", reason: "Requester cannot self-approve" },
+    current.body.csrfToken,
+  );
+  assert.equal(selfDecision.response.status, 403);
+  assert.equal(selfDecision.body.error.code, "approval_separation_required");
+  await decideApproval(f, approver, approval.approvalId);
+
+  const noStepUpJar = await adminLogin(f, new CookieJar(), undefined, {
+    stepUp: false,
+  });
+  const noStepUpCurrent = await me(f, noStepUpJar);
+  const missingStepUp = await adminPost(
+    f,
+    noStepUpJar,
+    pathname,
+    { ...request, reason, approvalId: approval.approvalId },
+    noStepUpCurrent.body.csrfToken,
+    { "idempotency-key": "export-missing-step-up" },
+  );
+  assert.equal(missingStepUp.response.status, 403);
+  assert.equal(missingStepUp.body.error.code, "step_up_required");
+
+  const missingIdempotency = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...request, reason, approvalId: approval.approvalId },
+    current.body.csrfToken,
+  );
+  assert.equal(missingIdempotency.response.status, 400);
+  assert.equal(missingIdempotency.body.error.code, "idempotency_key_required");
+
+  const targetMismatchApproval = await requestApproval(f, jar, current, {
+    action: "usage.export.create",
+    reason,
+    ...request,
+  });
+  await decideApproval(f, approver, targetMismatchApproval.approvalId);
+  const targetMismatch = await adminPost(
+    f,
+    jar,
+    pathname,
+    {
+      ...request,
+      from: new Date(Date.parse(request.from) + 1000).toISOString(),
+      reason,
+      approvalId: targetMismatchApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "export-target-mismatch" },
+  );
+  assert.equal(targetMismatch.response.status, 403);
+  assert.equal(targetMismatch.body.error.code, "approval_target_mismatch");
+
+  const payloadMismatchApproval = await requestApproval(f, jar, current, {
+    action: "usage.export.create",
+    reason,
+    ...request,
+  });
+  await decideApproval(f, approver, payloadMismatchApproval.approvalId);
+  const payloadMismatch = await adminPost(
+    f,
+    jar,
+    pathname,
+    {
+      ...request,
+      reason: "Changed after independent approval",
+      approvalId: payloadMismatchApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "export-payload-mismatch" },
+  );
+  assert.equal(payloadMismatch.response.status, 409);
+  assert.equal(payloadMismatch.body.error.code, "approval_payload_mismatch");
+
+  const headers = { "idempotency-key": "export-usage-success" };
+  const created = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...request, reason, approvalId: approval.approvalId },
+    current.body.csrfToken,
+    headers,
+  );
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.replayed, false);
+  assert.equal(created.body.export.kind, "usage");
+  assert.equal(created.body.export.rowCount, 3);
+  assert.equal(created.body.export.status, "ready");
+  assert.match(created.body.downloadToken, /^[A-Za-z0-9_-]+$/);
+  assert.equal(JSON.stringify(created.body).includes("\uFEFFtime,userId"), false);
+
+  const replayed = await adminPost(
+    f,
+    jar,
+    pathname,
+    { ...request, reason, approvalId: approval.approvalId },
+    current.body.csrfToken,
+    headers,
+  );
+  assert.equal(replayed.response.status, 200, JSON.stringify(replayed.body));
+  assert.equal(replayed.body.replayed, true);
+  assert.equal(replayed.body.export.exportId, created.body.export.exportId);
+  assert.equal(replayed.body.downloadToken, created.body.downloadToken);
+
+  const conflict = await adminPost(
+    f,
+    jar,
+    pathname,
+    {
+      ...request,
+      filters: { provider: "openai" },
+      reason,
+      approvalId: approval.approvalId,
+    },
+    current.body.csrfToken,
+    headers,
+  );
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.error.code, "idempotency_conflict");
+
+  const data = await readAdminData(f);
+  assert.equal(Object.keys(data.adminExports).length, 1);
+  assert.equal(data.approvalRequests[approval.approvalId].status, "consumed");
+  assert.equal(
+    (await fs.readFile(f.config.storePath, "utf8")).includes(created.body.downloadToken),
+    false,
+  );
+});
+
+test("M2-D usage and audit CSV exports contain metadata only and neutralize formulas", {
+  timeout: 30000,
+}, async (t) => {
+  const now = Date.now();
+  const usageContent = `${JSON.stringify({
+    t: new Date(now - 3600 * 1000).toISOString(),
+    callerKeyId: "key-alice-new",
+    callerKeyName: "Alice",
+    agent: "=1+1",
+    provider: "@SUM(A1:A2)",
+    req: "deepseek/deepseek-chat",
+    status: 200,
+    in: 10,
+    out: 5,
+    cost: 0.01,
+    prompt: "PROMPT-MUST-NOT-EXPORT",
+    response: "RESPONSE-MUST-NOT-EXPORT",
+  })}\n`;
+  const f = await fixture({ usageContent });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const from = new Date(now - 2 * 3600 * 1000).toISOString();
+  const to = new Date(now + 3600 * 1000).toISOString();
+
+  const usageRequest = {
+    exportType: "usage",
+    orgUnitId: "*",
+    from,
+    to,
+    filters: {},
+  };
+  const usageApproval = await requestApproval(f, jar, current, {
+    action: "usage.export.create",
+    reason: "Export usage metadata for reconciliation",
+    ...usageRequest,
+  });
+  await decideApproval(f, approver, usageApproval.approvalId);
+  const usageExport = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/usage/export",
+    {
+      ...usageRequest,
+      reason: "Export usage metadata for reconciliation",
+      approvalId: usageApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "export-usage-csv-safe" },
+  );
+  assert.equal(usageExport.response.status, 201, JSON.stringify(usageExport.body));
+  const usageDownload = await downloadExport(
+    f,
+    jar,
+    usageExport.body.export.downloadPath,
+    usageExport.body.downloadToken,
+  );
+  assert.equal(usageDownload.response.status, 200);
+  assert.match(usageDownload.response.headers.get("content-type"), /^text\/csv/);
+  assert.match(usageDownload.response.headers.get("content-disposition"), /attachment/);
+  assert.equal(usageDownload.response.headers.get("cache-control"), "no-store");
+  assert.ok(usageDownload.body.startsWith("\uFEFFtime,userId,email,department"));
+  assert.ok(usageDownload.body.includes("\r\n"));
+  assert.ok(usageDownload.body.includes("'=1+1"));
+  assert.ok(usageDownload.body.includes("'@SUM(A1:A2)"));
+  for (const forbidden of [
+    "callerKeyId",
+    "key-alice-new",
+    "callerKeyName",
+    "PROMPT-MUST-NOT-EXPORT",
+    "RESPONSE-MUST-NOT-EXPORT",
+    f.secrets.serviceToken,
+    f.secrets.oidcClientSecret,
+    f.secrets.accessToken,
+    jar.cookies.get(f.config.sessionCookieName),
+  ]) {
+    assert.equal(usageDownload.body.includes(forbidden), false, `CSV must not contain ${forbidden}`);
+  }
+
+  await seedAdminOperation(f, {
+    id: "op_audit_export_private",
+    createdAt: new Date(now - 30 * 60 * 1000).toISOString(),
+    reason: "Audit metadata export review",
+    beforeSummary: {
+      prompt: "BEFORE-MUST-NOT-EXPORT",
+      response: "AFTER-MUST-NOT-EXPORT",
+    },
+    responseBody: {
+      result: { state: "failed", privateDetail: "RESULT-MUST-NOT-EXPORT" },
+    },
+  });
+  const auditRequest = {
+    exportType: "audit",
+    orgUnitId: "*",
+    from,
+    to,
+    filters: { operationId: "op_audit_export_private" },
+  };
+  const auditApproval = await requestApproval(f, jar, current, {
+    action: "audit.export.create",
+    reason: "Export audit metadata for compliance review",
+    ...auditRequest,
+  });
+  await decideApproval(f, approver, auditApproval.approvalId);
+  const auditExport = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/audit/export",
+    {
+      ...auditRequest,
+      reason: "Export audit metadata for compliance review",
+      approvalId: auditApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "export-audit-csv-safe" },
+  );
+  assert.equal(auditExport.response.status, 201, JSON.stringify(auditExport.body));
+  const auditDownload = await downloadExport(
+    f,
+    jar,
+    auditExport.body.export.downloadPath,
+    auditExport.body.downloadToken,
+  );
+  assert.equal(auditDownload.response.status, 200);
+  assert.ok(auditDownload.body.startsWith(
+    "\uFEFFtime,operationId,actorSubjectId,actorEmail,action,phase",
+  ));
+  assert.ok(
+    auditDownload.body.includes("op_audit_export_private"),
+    `audit CSV should include the seeded operation: ${auditDownload.body}`,
+  );
+  assert.ok(
+    auditDownload.body.includes("Audit metadata export review"),
+    `audit CSV should include the operation reason: ${auditDownload.body}`,
+  );
+  for (const forbidden of [
+    "beforeSummary",
+    "afterSummary",
+    "BEFORE-MUST-NOT-EXPORT",
+    "AFTER-MUST-NOT-EXPORT",
+    "RESULT-MUST-NOT-EXPORT",
+    f.secrets.serviceToken,
+    f.secrets.oidcClientSecret,
+    f.secrets.accessToken,
+    jar.cookies.get(f.config.sessionCookieName),
+  ]) {
+    assert.equal(auditDownload.body.includes(forbidden), false, `CSV must not contain ${forbidden}`);
+  }
+});
+
+test("M2-D export downloads are one-time, session-bound, and expire closed", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture({ usageContent: usageLines() });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f);
+  const request = {
+    exportType: "usage",
+    orgUnitId: "*",
+    from: new Date(Date.now() - 6 * 3600 * 1000).toISOString(),
+    to: new Date(Date.now() + 3600 * 1000).toISOString(),
+    filters: {},
+  };
+  const reason = "Exercise the one-time export download boundary";
+  const approval = await requestApproval(f, jar, current, {
+    action: "usage.export.create",
+    reason,
+    ...request,
+  });
+  await decideApproval(f, approver, approval.approvalId);
+  const created = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/usage/export",
+    { ...request, reason, approvalId: approval.approvalId },
+    current.body.csrfToken,
+    { "idempotency-key": "export-download-lifecycle-1" },
+  );
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  const pathname = created.body.export.downloadPath;
+  const token = created.body.downloadToken;
+
+  const noBearer = await downloadExport(f, jar, pathname, "");
+  assert.equal(noBearer.response.status, 401);
+  assert.equal(JSON.parse(noBearer.body).error.code, "export_token_required");
+  const queryToken = await downloadExport(
+    f,
+    jar,
+    `${pathname}?token=${encodeURIComponent(token)}`,
+    "",
+  );
+  assert.equal(queryToken.response.status, 401);
+  assert.equal(JSON.parse(queryToken.body).error.code, "export_token_required");
+  const noSession = await downloadExport(f, null, pathname, token);
+  assert.equal(noSession.response.status, 401);
+  assert.equal(JSON.parse(noSession.body).error.code, "not_signed_in");
+
+  const secondSession = await adminLogin(f, new CookieJar());
+  const wrongSession = await downloadExport(f, secondSession, pathname, token);
+  assert.equal(wrongSession.response.status, 403);
+  assert.equal(JSON.parse(wrongSession.body).error.code, "export_token_invalid");
+  const wrongActor = await downloadExport(f, approver.jar, pathname, token);
+  assert.equal(wrongActor.response.status, 403);
+  assert.equal(JSON.parse(wrongActor.body).error.code, "export_token_invalid");
+
+  const downloaded = await downloadExport(f, jar, pathname, token);
+  assert.equal(downloaded.response.status, 200);
+  assert.ok(downloaded.body.startsWith("\uFEFFtime,userId,email"));
+  const consumed = await downloadExport(f, jar, pathname, token);
+  assert.equal(consumed.response.status, 410);
+  assert.equal(JSON.parse(consumed.body).error.code, "export_consumed");
+
+  const expiringRequest = { ...request, filters: { provider: "deepseek" } };
+  const expiringReason = "Exercise expired export handling";
+  const expiringApproval = await requestApproval(f, jar, current, {
+    action: "usage.export.create",
+    reason: expiringReason,
+    ...expiringRequest,
+  });
+  await decideApproval(f, approver, expiringApproval.approvalId);
+  const expiringExport = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/usage/export",
+    {
+      ...expiringRequest,
+      reason: expiringReason,
+      approvalId: expiringApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "export-download-lifecycle-2" },
+  );
+  assert.equal(expiringExport.response.status, 201, JSON.stringify(expiringExport.body));
+  const expiredAt = new Date(Date.now() - 1000).toISOString();
+  await f.admin.store.mutate((data) => {
+    const record = data.adminExports[expiringExport.body.export.exportId];
+    record.status = "expired";
+    record.expiresAt = expiredAt;
+    for (const tokenRecord of Object.values(data.adminExportTokens)) {
+      if (tokenRecord.exportId === record.id) tokenRecord.expiresAt = expiredAt;
+    }
+  });
+  const expired = await downloadExport(
+    f,
+    jar,
+    expiringExport.body.export.downloadPath,
+    expiringExport.body.downloadToken,
+  );
+  assert.equal(expired.response.status, 410);
+  assert.equal(JSON.parse(expired.body).error.code, "export_expired");
+
+  const data = await readAdminData(f);
+  assert.equal(data.adminExports[created.body.export.exportId].status, "consumed");
+  assert.equal(data.adminExports[expiringExport.body.export.exportId].status, "expired");
+  assert.equal(
+    data.adminSystemAuditLogs.filter((audit) => audit.action === "export.downloaded").length,
+    1,
+  );
+});
+
+test("M2-D admin UI and operation listings expose scoped controls without inline scripts", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture({ usageContent: usageLines() });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const now = new Date().toISOString();
+  await seedAdminOperation(f, {
+    id: "op_platform_export_ops",
+    createdAt: now,
+    targetId: "usr_alice",
+  });
+  await seedAdminOperation(f, {
+    id: "op_sales_export_ops",
+    createdAt: new Date(Date.now() - 1000).toISOString(),
+    targetId: "usr_carol",
+    actorSubjectId: "adm_other",
+  });
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  const all = await adminGet(f, jar, "/api/v1/admin/operations?limit=200");
+  assert.equal(all.response.status, 200);
+  assert.deepEqual(
+    all.body.operations.map((operation) => operation.operationId).sort(),
+    ["op_platform_export_ops", "op_sales_export_ops"],
+  );
+  const paginated = await adminGet(f, jar, "/api/v1/admin/operations?limit=1");
+  assert.equal(paginated.response.status, 200);
+  assert.equal(paginated.body.operations.length, 1);
+  assert.match(paginated.body.nextCursor, /\./);
+  const filtered = await adminGet(
+    f,
+    jar,
+    "/api/v1/admin/operations?targetId=usr_alice&status=failed&limit=1",
+  );
+  assert.equal(filtered.response.status, 200);
+  assert.equal(filtered.body.operations.length, 1);
+  assert.equal(filtered.body.operations[0].operationId, "op_platform_export_ops");
+
+  const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  for (const expected of [
+    "Approved metadata export",
+    "Request matching approval",
+    "Create export",
+    "Load operations",
+    "Load audit metadata",
+    'src="/admin/app.js"',
+  ]) {
+    assert.ok(html.includes(expected), `admin page should include ${expected}`);
+  }
+  assert.ok(!/<script(?![^>]*\bsrc=)/i.test(html));
+  assert.ok(!/\son[a-z]+\s*=/i.test(html));
+  assertNoWriteSecrets(html, f, jar);
+
+  await bindRole(f, current.body.user.id, "department_admin", "org-root");
+  const scoped = await adminGet(f, jar, "/api/v1/admin/operations?limit=200");
+  assert.equal(scoped.response.status, 200);
+  assert.deepEqual(
+    scoped.body.operations.map((operation) => operation.operationId),
+    ["op_platform_export_ops"],
   );
 });
 

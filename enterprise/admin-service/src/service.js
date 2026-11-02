@@ -40,6 +40,7 @@ import {
 } from "./security.js";
 import {
   APPROVAL_POLICY_VERSION,
+  APPROVAL_STATUSES,
   approvalBindingDigest,
   approvalConsumptionFailure,
   approvalIsExpired,
@@ -77,6 +78,10 @@ const MAX_TIMESERIES_POINTS = 10000;
 const DEFAULT_AUDIT_LIMIT = 50;
 const MAX_AUDIT_LIMIT = 200;
 const MAX_AUDIT_CURSOR = 4096;
+const DEFAULT_OPERATION_LIMIT = 50;
+const MAX_OPERATION_LIMIT = 200;
+const MAX_OPERATION_CURSOR = 4096;
+const MAX_EXPORT_TOKEN_BYTES = 512;
 const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
 const ADMIN_APP_JS = await fs.readFile(new URL("./admin-app.js", import.meta.url), "utf8");
 
@@ -87,6 +92,8 @@ const OPERATION_PERMISSIONS = Object.freeze({
   "credential.rotate": "credentials.rotate",
   "user.policy.quota": "quota.write",
   "user.policy.models": "models.write",
+  "usage.export.create": "usage.export",
+  "audit.export.create": "audit.export",
   "operation.reconcile": "operations.reconcile",
 });
 
@@ -97,6 +104,8 @@ const APPROVAL_ACTION_TARGETS = Object.freeze({
   "credential.rotate": { targetType: "credential", permission: "credentials.rotate" },
   "user.policy.quota": { targetType: "user", permission: "quota.write" },
   "user.policy.models": { targetType: "user", permission: "models.write" },
+  "usage.export.create": { targetType: "export", permission: "usage.export" },
+  "audit.export.create": { targetType: "export", permission: "audit.export" },
   "operation.reconcile": { targetType: "operation", permission: "operations.reconcile" },
 });
 
@@ -586,11 +595,14 @@ function finiteWindow(searchParams, maxRangeDays) {
   };
 }
 
-function table(headers, rows) {
+function table(headers, rows, options = {}) {
   if (rows.length === 0) return "<p>No records.</p>";
+  const htmlColumns = new Set(options.htmlColumns || []);
   const head = headers.map((value) => `<th>${escapeHtml(value)}</th>`).join("");
   const body = rows
-    .map((row) => `<tr>${row.map((value) => `<td>${escapeHtml(value)}</td>`).join("")}</tr>`)
+    .map((row) => `<tr>${row.map((value, index) => (
+      `<td>${htmlColumns.has(index) ? String(value) : escapeHtml(value)}</td>`
+    )).join("")}</tr>`)
     .join("");
   return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
 }
@@ -698,7 +710,8 @@ function usageSource(result, recordsInWindow, unattributedRecords) {
     recordsInWindow,
     matchedRecords: result.matched.length,
     unattributedRecords,
-    outsideScopeRecords: recordsInWindow - result.matched.length - unattributedRecords,
+    outsideScopeRecords: result.outsideScopeRecords || 0,
+    filteredOutRecords: result.filteredOutRecords || 0,
   };
 }
 
@@ -931,9 +944,23 @@ function policyEditor(user, evidence, operation, access) {
 function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
   const roles = access.roles.length > 0 ? access.roles.join(", ") : "No active role";
   const scopes = access.scopeOrgUnitIds.length > 0 ? access.scopeOrgUnitIds.join(", ") : "None";
+  const can = (permission) => access.permissions.includes(permission);
   const orgRows = orgUnits.length > 0
     ? orgUnits.map((org) => `<li><strong>${escapeHtml(org.name)}</strong> <code>${escapeHtml(org.path)}</code></li>`).join("")
     : "<li>No organization scope</li>";
+  const orgOptions = [
+    ...(hasGlobalScope(access) ? ['<option value="*">Entire enterprise</option>'] : []),
+    ...orgUnits.map((org) => (
+      `<option value="${escapeHtml(org.id)}">${escapeHtml(org.name)} · ${escapeHtml(org.path)}</option>`
+    )),
+  ].join("");
+  const rowAction = (label, action, targetType, targetId, permission) => (
+    can(permission)
+      ? `<button type="button" class="row-action" data-write-action="${escapeHtml(action)}" `
+        + `data-target-type="${escapeHtml(targetType)}" data-target-id="${escapeHtml(targetId)}">`
+        + `${escapeHtml(label)}</button>`
+      : ""
+  );
   const usage = overview.usage;
   const editors = overview.users.map((user) => {
     const operation = overview.operationsByUser[user.id] || null;
@@ -962,31 +989,224 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
   const stepUpAction = stepUp.startUrl
     ? ` <a href="${escapeHtml(stepUp.startUrl)}">Re-authenticate</a>.`
     : "";
+  const approvalActions = [
+    ["user.disable", "Disable user", can("users.disable")],
+    ["device.revoke", "Revoke device", can("devices.revoke")],
+    ["credential.rotate", "Rotate credential", can("credentials.rotate")],
+    ["user.policy.quota", "Change quota", can("quota.write")],
+    ["user.policy.models", "Change models", can("models.write")],
+    ["usage.export.create", "Create usage export", can("usage.export")],
+    ["audit.export.create", "Create audit export", can("audit.export")],
+    ["operation.reconcile", "Reconcile operation", can("operations.reconcile")],
+  ].filter((entry) => entry[2]);
+  const exportKinds = [
+    ["usage", "Usage metadata", can("usage.export")],
+    ["audit", "Audit metadata", can("audit.export")],
+  ].filter((entry) => entry[2]);
+  const operationPermissions = [
+    "users.disable",
+    "devices.revoke",
+    "credentials.rotate",
+    "quota.write",
+    "models.write",
+    "usage.export",
+    "audit.export",
+    "operations.reconcile",
+  ];
+  const canReadOperations = operationPermissions.some(can);
+  const usageExplorer = can("usage.read")
+    ? `<form id="usage-filter" class="toolbar">
+        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z"></label>
+        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z"></label>
+        <label>User <input name="userId" maxlength="128"></label>
+        <label>Department <select name="departmentId"><option value="">All visible</option>${orgOptions}</select></label>
+        <label>Agent <input name="agent" maxlength="160"></label>
+        <label>Model <input name="model" maxlength="240"></label>
+        <label>Provider <input name="provider" maxlength="160"></label>
+        <label>Caller key <input name="callerKeyId" maxlength="240"></label>
+        <label>HTTP status <input name="status" inputmode="numeric"></label>
+        <button type="submit">Refresh usage</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="usage-summary" class="grid" aria-live="polite"></div>
+      <div id="usage-chart" class="chart" aria-label="Usage request trend"></div>`
+    : `<p class="notice">Your role cannot read usage metadata.</p>`;
+  const approvalRequest = approvalActions.length > 0
+    ? `<form id="approval-request-form" class="stack-form">
+        <h3>Create approval request</h3>
+        <p>Export target IDs are derived from the query. Other actions require a target ID.</p>
+        <label>Action
+          <select name="action">${approvalActions.map(([value, label]) => (
+            `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
+          )).join("")}</select>
+        </label>
+        <label>Target ID <input name="targetId" maxlength="128"></label>
+        <label>Reason <input name="reason" maxlength="500" required></label>
+        <label>Business payload (JSON)
+          <textarea name="payload" rows="5" placeholder='{"orgUnitId":"org-platform","from":"2026-10-01T00:00:00Z","to":"2026-10-02T00:00:00Z","filters":{}}'>{}</textarea>
+        </label>
+        <button type="submit">Request independent approval</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
+  const approvalList = can("approvals.read")
+    ? `<form id="approval-filter" class="toolbar">
+        <label>Status
+          <select name="status">
+            <option value="">All states</option>
+            <option value="requested">Requested</option>
+            <option value="approved">Approved</option>
+            <option value="rejected">Rejected</option>
+            <option value="revoked">Revoked</option>
+            <option value="consumed">Consumed</option>
+          </select>
+        </label>
+        <label>Action <input name="action" maxlength="128"></label>
+        <label>Target type
+          <select name="targetType">
+            <option value="">All targets</option>
+            <option value="user">User</option>
+            <option value="device">Device</option>
+            <option value="credential">Credential</option>
+            <option value="operation">Operation</option>
+            <option value="export">Export</option>
+          </select>
+        </label>
+        <label>Requester subject <input name="requesterSubjectId" maxlength="128"></label>
+        <button type="submit">Load approvals</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="approval-list" aria-live="polite"></div>`
+    : `<p class="notice">Your role cannot read approval requests.</p>`;
+  const approvalDecision = approvalActions.length > 0
+    ? `<form id="approval-decision-form" class="stack-form">
+        <h3>Decide selected approval</h3>
+        <p id="approval-selection">No approval selected.</p>
+        <label>Decision
+          <select name="decision"><option value="approve">Approve</option><option value="reject">Reject</option></select>
+        </label>
+        <label>Decision reason <input name="reason" maxlength="500" required></label>
+        <button type="submit">Record decision</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
+  const approvalRevoke = can("approvals.revoke")
+    ? `<form id="approval-revoke-form" class="stack-form">
+        <h3>Revoke selected approval</h3>
+        <p id="approval-revoke-selection">No approval selected.</p>
+        <label>Revocation reason <input name="reason" maxlength="500" required></label>
+        <button type="submit">Revoke approval</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
+  const exportPanel = exportKinds.length > 0
+    ? `<form id="export-form" class="stack-form">
+        <h3>Approved metadata export</h3>
+        <p>Exports require an approved request, recent authentication, organization scope, and a one-time download token.</p>
+        <label>Dataset
+          <select name="kind">${exportKinds.map(([value, label]) => (
+            `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
+          )).join("")}</select>
+        </label>
+        <label>Organization scope <select name="orgUnitId" required>${orgOptions}</select></label>
+        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z" required></label>
+        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z" required></label>
+        <label>Filters (JSON) <textarea name="filters" rows="3">{}</textarea></label>
+        <label>Reason <input name="reason" maxlength="500" required></label>
+        <label>Approved approval ID <input name="approvalId" maxlength="128" required></label>
+        <label>Idempotency key <input name="idempotencyKey" maxlength="200" placeholder="Leave blank to generate one"></label>
+        <div class="button-row">
+          <button type="button" id="export-request-approval">Request matching approval</button>
+          <button type="submit">Create export</button>
+        </div>
+        <p class="write-result" role="status" aria-live="polite"></p>
+        <div id="export-result" aria-live="polite"></div>
+      </form>`
+    : `<p class="notice">Your role cannot export usage or audit metadata.</p>`;
+  const operationPanel = canReadOperations
+    ? `<form id="operation-filter" class="toolbar">
+        <label>Operation ID <input name="operationId" maxlength="128"></label>
+        <label>Actor subject <input name="actorSubjectId" maxlength="128"></label>
+        <label>Action <input name="action" maxlength="128"></label>
+        <label>Target type
+          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option></select>
+        </label>
+        <label>Status <input name="status" maxlength="64"></label>
+        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z"></label>
+        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z"></label>
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load operations</button>
+        <button type="button" id="operation-next" hidden>Next page</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="operation-list" aria-live="polite"></div>
+      <section class="detail-panel">
+        <h3>Operation detail</h3>
+        <pre id="operation-detail">Select an operation to inspect its safe metadata.</pre>
+      </section>
+      <form id="reconcile-form" class="stack-form">
+        <h3>Reconcile selected operation</h3>
+        <p id="reconcile-selection">No operation selected.</p>
+        <label>Reconciliation action
+          <select name="action"><option value="retry_desired">Retry desired state</option><option value="rollback_previous">Roll back previous state</option><option value="confirm_applied">Confirm applied</option><option value="confirm_not_applied">Confirm not applied</option></select>
+        </label>
+        <label>Evidence reference <input name="evidenceRef" maxlength="500"></label>
+        <label>Reason <input name="reason" maxlength="500" required></label>
+        <label>Approved approval ID <input name="approvalId" maxlength="128" required></label>
+        <button type="submit">Reconcile</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : `<p class="notice">Your role cannot read management operations.</p>`;
+  const auditPanel = can("audit.read")
+    ? `<form id="audit-filter" class="toolbar">
+        <label>Operation ID <input name="operationId" maxlength="128"></label>
+        <label>Actor subject <input name="actorSubjectId" maxlength="128"></label>
+        <label>Action <input name="action" maxlength="128"></label>
+        <label>Target type
+          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option></select>
+        </label>
+        <label>Result <input name="result" maxlength="64"></label>
+        <label>Phase <input name="phase" maxlength="32"></label>
+        <label>Organization <select name="orgUnitId"><option value="">All visible</option>${orgOptions}</select></label>
+        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z"></label>
+        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z"></label>
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load audit metadata</button>
+        <button type="button" id="audit-next" hidden>Next page</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="audit-list" aria-live="polite"></div>`
+    : `<p class="notice">Your role cannot read audit metadata.</p>`;
   return `<!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="csrf-token" content="${escapeHtml(csrfToken)}">
+  <meta name="admin-permissions" content="${escapeHtml(access.permissions.join(" "))}">
   <meta name="step-up-state" content="${escapeHtml(stepUp.state)}">
   <meta name="step-up-start-url" content="${escapeHtml(stepUp.startUrl)}">
   <title>Magpie Enterprise Admin</title>
   <style>
     :root{--ink:#172018;--paper:#f4f0e4;--card:#fffdf6;--line:#d7cfb9;--accent:#b93c2b;--ok:#17643a;--warn:#9a5b00;--danger:#9e2518}
     *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top right,#e6d9b8,transparent 38%),var(--paper);color:var(--ink);font:17px/1.55 Georgia,serif}
-    main{width:min(960px,calc(100% - 32px));margin:6vh auto;padding:clamp(24px,5vw,56px);background:var(--card);border:1px solid var(--line);box-shadow:14px 14px 0 #dbca9d}
+    main{width:min(1180px,calc(100% - 32px));margin:5vh auto;padding:clamp(24px,5vw,56px);background:var(--card);border:1px solid var(--line);box-shadow:14px 14px 0 #dbca9d}
     h1{font-size:clamp(38px,7vw,74px);line-height:.92;margin:0 0 12px;letter-spacing:-.04em}
-    h2{font-size:22px;margin:36px 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px}
+    h2{font-size:22px;margin:36px 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px}h3{font-size:18px;margin:0 0 8px}
     .eyebrow{text-transform:uppercase;letter-spacing:.18em;font:700 12px/1.4 Georgia,serif;color:var(--accent)}
     .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.box{border:1px solid var(--line);padding:18px;background:#faf5e7}
     code{background:#ece3cc;padding:2px 6px;overflow-wrap:anywhere}ul{padding-left:22px}
     .figure{font-size:38px;line-height:1;margin:8px 0 0}.notice{border-left:4px solid var(--accent);padding:10px 14px;background:#faf5e7}
     .table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font:14px/1.4 Georgia,serif}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
     button{appearance:none;border:0;background:var(--ink);color:white;padding:12px 18px;font:700 14px/1 Georgia,serif;cursor:pointer}
+    button:disabled{opacity:.55;cursor:wait}.row-action{padding:7px 10px;font-size:12px;margin:2px}.button-row{display:flex;gap:10px;flex-wrap:wrap}
     .policy-editor{margin:14px 0;border:1px solid var(--line);background:#faf5e7;padding:14px}.policy-editor summary{cursor:pointer;font-weight:700}
     .editor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}.editor-grid form{border-top:1px solid var(--line);padding-top:12px}
-    label{display:grid;gap:6px;margin:10px 0;font-weight:700}input,textarea{width:100%;border:1px solid var(--line);background:var(--card);padding:10px;font:15px/1.4 ui-monospace,monospace}
+    label{display:grid;gap:6px;margin:10px 0;font-weight:700}input,textarea,select{width:100%;border:1px solid var(--line);background:var(--card);padding:10px;font:15px/1.4 ui-monospace,monospace}
     .write-result{min-height:3em;border-left:4px solid var(--line);padding:8px 12px}.write-result[data-tone="error"]{border-color:var(--danger)}.write-result[data-tone="unknown"]{border-color:var(--warn)}.write-result[data-tone="result"]{border-color:var(--ok)}
+    .toolbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px 14px;align-items:end;border:1px solid var(--line);padding:14px;background:#faf5e7}.toolbar .write-result{grid-column:1/-1}
+    .stack-form{border:1px solid var(--line);padding:16px;background:#faf5e7;margin:14px 0}.detail-panel{border-left:4px solid var(--line);padding:8px 14px;background:#faf5e7}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 ui-monospace,monospace}
+    .chart{min-height:150px;margin:16px 0;border:1px solid var(--line);padding:12px;background:#faf5e7}.chart svg{display:block;width:100%;height:auto}.status{display:inline-block;padding:2px 7px;border:1px solid currentColor;font-size:12px}.status[data-tone="ok"]{color:var(--ok)}.status[data-tone="warn"]{color:var(--warn)}.status[data-tone="danger"]{color:var(--danger)}
   </style>
 </head>
 <body><main>
@@ -997,11 +1217,16 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
     <section class="box"><h2>Roles</h2><p>${escapeHtml(roles)}</p></section>
     <section class="box"><h2>Organization scope</h2><p><code>${escapeHtml(scopes)}</code></p></section>
   </div>
+  <h2>Usage explorer</h2>${usageExplorer}
+  <h2>Approvals</h2>${approvalRequest}${approvalList}${approvalDecision}${approvalRevoke}
+  <h2>Exports</h2>${exportPanel}
+  <h2>Operations</h2>${operationPanel}
+  <h2>Audit metadata</h2>${auditPanel}
   <h2>Usage overview</h2>${usageBox}
   <h2>Users</h2>
   <p class="notice">${escapeHtml(overview.usersError || "Current organization-scoped identities.")}</p>
   ${table(
-    ["Name", "Email", "Status", "Department", "Policy", "Quota", "Models", "Sync"],
+    ["Name", "Email", "Status", "Department", "Policy", "Quota", "Models", "Sync", "Action"],
     overview.users.map((user) => [
       user.name,
       user.email,
@@ -1015,22 +1240,36 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         overview.credentials,
         overview.operationsByUser[user.id] || null,
       ).label,
+      user.status === "active"
+        ? rowAction("Disable", "user.disable", "user", user.id, "users.disable")
+        : rowAction("Enable", "user.enable", "user", user.id, "users.disable"),
     ]),
+    { htmlColumns: [8] },
   )}
+  <form id="operation-write-form" class="stack-form">
+    <h3>Apply selected account, device, or credential action</h3>
+    <p id="operation-write-selection">Select a row action above.</p>
+    <label>Reason <input name="reason" maxlength="500" required></label>
+    <label>Approved approval ID (required for high-risk actions) <input name="approvalId" maxlength="128"></label>
+    <button type="submit">Apply action</button>
+    <p class="write-result" role="status" aria-live="polite"></p>
+  </form>
   <h2>Policy operations</h2>
   <p class="notice">Only a complete evidence chain permits the verified state. Pending, partial, and unknown results are never converted into success by this page.</p>
   ${editors || "<p>No users available in your organization scope.</p>"}
   <h2>Devices</h2>
   <p class="notice">${escapeHtml(overview.devicesError || "No device token or Gateway Key is exposed.")}</p>
   ${table(
-    ["Device", "Platform", "Status", "Last seen", "Key ID"],
+    ["Device", "Platform", "Status", "Last seen", "Key ID", "Action"],
     overview.devices.map((device) => [
       device.name,
       device.platform,
       device.status,
       device.lastSeenAt || "",
       device.gatewayKeyId || "",
+      rowAction("Revoke", "device.revoke", "device", device.id, "devices.revoke"),
     ]),
+    { htmlColumns: [5] },
   )}
   <h2>Models</h2>
   <p class="notice">${escapeHtml(
@@ -1051,7 +1290,7 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
   <h2>Credentials</h2>
   <p class="notice">${escapeHtml(overview.credentialsError || "Gateway Key metadata only.")}</p>
   ${table(
-    ["Key ID", "Device", "Status", "Policy", "Policy sync", "Last synced", "Last error", "Expires"],
+    ["Key ID", "Device", "Status", "Policy", "Policy sync", "Last synced", "Last error", "Expires", "Action"],
     overview.credentials.map((credential) => [
       credential.id,
       credential.deviceName || credential.deviceId,
@@ -1061,7 +1300,9 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
       credential.lastPolicySyncedAt || credential.lastPolicyAttemptedAt || "",
       credential.lastPolicyErrorCode || "",
       credential.expiresAt || "",
+      rowAction("Rotate", "credential.rotate", "credential", credential.id, "credentials.rotate"),
     ]),
+    { htmlColumns: [8] },
   )}
   <h2>Visible organization units</h2><ul>${orgRows}</ul>
   <h2>Session</h2>
@@ -1321,6 +1562,108 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     return definition;
   }
 
+  function exportKindForAction(action) {
+    if (action === "usage.export.create") return "usage";
+    if (action === "audit.export.create") return "audit";
+    return "";
+  }
+
+  function cleanExportFilterValue(value, name) {
+    if (typeof value === "number") {
+      if (!Number.isFinite(value)) {
+        throw new HttpError(400, "invalid_export_filter", `${name} is invalid`);
+      }
+      return value;
+    }
+    if (typeof value !== "string") {
+      throw new HttpError(400, "invalid_export_filter", `${name} is invalid`);
+    }
+    const normalized = value.trim();
+    if ([...normalized].length > 256 || /[\u0000-\u001f\u007f]/.test(normalized)) {
+      throw new HttpError(400, "invalid_export_filter", `${name} is invalid`);
+    }
+    return normalized;
+  }
+
+  function normalizedExportFilters(kind, value) {
+    if (value == null) return {};
+    if (typeof value !== "object" || Array.isArray(value)) {
+      throw new HttpError(400, "invalid_export_filter", "filters must be an object");
+    }
+    const allowed = kind === "usage"
+      ? new Set([
+        "userId",
+        "departmentId",
+        "agent",
+        "model",
+        "provider",
+        "callerKeyId",
+        "status",
+      ])
+      : new Set([
+        "operationId",
+        "actorSubjectId",
+        "action",
+        "targetType",
+        "targetId",
+        "result",
+        "phase",
+      ]);
+    const entries = Object.entries(value);
+    if (entries.length > 20) {
+      throw new HttpError(400, "invalid_export_filter", "Too many export filters");
+    }
+    const output = {};
+    for (const [key, entry] of entries) {
+      if (!/^[A-Za-z][A-Za-z0-9]{0,63}$/.test(key) || !allowed.has(key)) {
+        throw new HttpError(400, "invalid_export_filter", `filters.${key} is not supported`);
+      }
+      const normalized = cleanExportFilterValue(entry, `filters.${key}`);
+      if (normalized !== "") output[key] = normalized;
+    }
+    return canonicalValue(output);
+  }
+
+  function normalizedExportRequest(action, value = {}) {
+    const kind = exportKindForAction(action);
+    if (!kind) {
+      throw new HttpError(400, "invalid_export_type", "The export action is not supported");
+    }
+    const exportType = String(value.exportType || kind).trim().toLowerCase();
+    if (exportType !== kind) {
+      throw new HttpError(400, "invalid_export_type", "exportType does not match the action");
+    }
+    const orgUnitId = cleanIdentifier(
+      value.orgUnitId,
+      "orgUnitId",
+      "invalid_export_scope",
+    );
+    const fromValue = String(value.from || "").trim();
+    const toValue = String(value.to || "").trim();
+    const fromTime = Date.parse(fromValue);
+    const toTime = Date.parse(toValue);
+    if (!Number.isFinite(fromTime) || !Number.isFinite(toTime) || fromTime >= toTime) {
+      throw new HttpError(400, "invalid_time_range", "from and to must be an ascending time range");
+    }
+    if (toTime - fromTime > config.usage.maxRangeDays * 24 * 3600 * 1000) {
+      throw new HttpError(400, "time_range_too_large", "The requested time range is too large");
+    }
+    return {
+      exportType: kind,
+      orgUnitId,
+      from: new Date(fromTime).toISOString(),
+      to: new Date(toTime).toISOString(),
+      filters: normalizedExportFilters(kind, value.filters),
+    };
+  }
+
+  function exportTargetId(action, request) {
+    return `exp_${sha256(JSON.stringify(canonicalValue({
+      action,
+      ...request,
+    })))}`;
+  }
+
   function approvalBusinessPayload(action, body) {
     if (action === "user.policy.quota") {
       if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 0) {
@@ -1373,6 +1716,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         ),
       };
     }
+    if (action === "usage.export.create" || action === "audit.export.create") {
+      return normalizedExportRequest(action, body);
+    }
     return {};
   }
 
@@ -1419,6 +1765,42 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         targetId: parent.targetId,
         targetOrgUnitId,
         target: targetResult.target,
+      };
+    }
+    if (action === "usage.export.create" || action === "audit.export.create") {
+      const request = normalizedExportRequest(action, payload);
+      const expectedTargetId = exportTargetId(action, request);
+      if (expectedTargetId !== targetId) {
+        throw new HttpError(
+          400,
+          "invalid_export_target",
+          "targetId does not match the export query",
+        );
+      }
+      const sessionAccess = await requirePermission(session, definition.permission);
+      if (request.orgUnitId === "*") {
+        if (!hasGlobalScope(sessionAccess.access)) {
+          throw new HttpError(403, "forbidden_scope", "Global export scope is not allowed");
+        }
+      } else {
+        const org = sessionAccess.data.orgUnits[request.orgUnitId];
+        if (!org || org.status !== "active") {
+          throw new HttpError(400, "invalid_export_scope", "orgUnitId is not active");
+        }
+        if (!sessionAccess.access.scopeOrgUnitIds.includes("*")
+            && !sessionAccess.access.scopeOrgUnitIds.includes(request.orgUnitId)) {
+          throw new HttpError(403, "forbidden_scope", "The export scope is outside your access");
+        }
+      }
+      return {
+        targetType: "export",
+        targetId: expectedTargetId,
+        targetOrgUnitId: request.orgUnitId,
+        target: {
+          id: expectedTargetId,
+          exportType: request.exportType,
+          orgUnitId: request.orgUnitId,
+        },
       };
     }
     const targetResult = await writeTarget(
@@ -1524,7 +1906,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           ),
         };
       }
-      const targetOrgUnit = data.orgUnits[approval.targetOrgUnitId];
+      const targetOrgUnit = approval.targetOrgUnitId === "*"
+        ? { status: "active" }
+        : data.orgUnits[approval.targetOrgUnitId];
       if (!targetOrgUnit || targetOrgUnit.status !== "active") {
         return {
           error: new ApprovalCallbackError(
@@ -1673,9 +2057,28 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     if (!approvalRequiredForAction(action)) {
       throw new HttpError(400, "approval_not_required", "This action does not require approval");
     }
-    const targetId = cleanIdentifier(body.targetId, "targetId", "invalid_request");
     const reason = cleanReason(body.reason);
     const payload = approvalBusinessPayload(action, body);
+    let targetId;
+    if (action === "usage.export.create" || action === "audit.export.create") {
+      targetId = exportTargetId(action, payload);
+      if (body.targetId != null && String(body.targetId).trim()) {
+        const suppliedTargetId = cleanIdentifier(
+          body.targetId,
+          "targetId",
+          "invalid_request",
+        );
+        if (suppliedTargetId !== targetId) {
+          throw new HttpError(
+            400,
+            "invalid_export_target",
+            "targetId does not match the export query",
+          );
+        }
+      }
+    } else {
+      targetId = cleanIdentifier(body.targetId, "targetId", "invalid_request");
+    }
     const target = await resolveApprovalTarget(current.session, action, targetId, payload);
     await requireStepUp(current, req, action);
     const expected = approvalExpectedBinding({
@@ -1730,6 +2133,67 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       });
     });
     json(res, 201, { approval: publicApproval(approval) });
+  }
+
+  function approvalQuery(searchParams) {
+    const one = (name, maxLength = 256) => {
+      const value = String(searchParams.get(name) || "").trim();
+      if ([...value].length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new HttpError(400, "invalid_approval_filter", `${name} is invalid`);
+      }
+      return value;
+    };
+    const rawLimit = one("limit", 20);
+    if (rawLimit && !/^[1-9]\d*$/.test(rawLimit)) {
+      throw new HttpError(400, "invalid_limit", "limit must be a positive integer");
+    }
+    const limit = rawLimit ? Number(rawLimit) : DEFAULT_OPERATION_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit > MAX_OPERATION_LIMIT) {
+      throw new HttpError(400, "invalid_limit", `limit must not exceed ${MAX_OPERATION_LIMIT}`);
+    }
+    const status = one("status", 64);
+    if (status && !APPROVAL_STATUSES.includes(status)) {
+      throw new HttpError(400, "invalid_approval_filter", "status is not supported");
+    }
+    const action = one("action", 128);
+    if (action) approvalActionDefinition(action);
+    const targetType = one("targetType", 32);
+    if (targetType
+        && !["user", "device", "credential", "operation", "export"].includes(targetType)) {
+      throw new HttpError(400, "invalid_approval_filter", "targetType is not supported");
+    }
+    return {
+      status,
+      action,
+      targetType,
+      requesterSubjectId: one("requesterSubjectId", 128),
+      limit,
+    };
+  }
+
+  async function listApprovals(req, res, searchParams) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    const result = await requirePermission(current.session, "approvals.read");
+    const query = approvalQuery(searchParams);
+    const approvals = await store.read((data) => Object.values(data.approvalRequests)
+      .filter((approval) => {
+        if (query.status && approval.status !== query.status) return false;
+        if (query.action && approval.action !== query.action) return false;
+        if (query.targetType && approval.targetType !== query.targetType) return false;
+        if (query.requesterSubjectId
+            && approval.requesterSubjectId !== query.requesterSubjectId) return false;
+        return organizationScopeAllows(result.access, approval.targetOrgUnitId);
+      })
+      .sort((left, right) => String(right.createdAt || "")
+        .localeCompare(String(left.createdAt || ""))
+        || String(right.id || "").localeCompare(String(left.id || "")))
+      .slice(0, query.limit)
+      .map((approval) => publicApproval(
+        structuredClone(approval),
+        structuredClone(approvalDecisionList(data, approval.id)),
+      )));
+    json(res, 200, { approvals });
   }
 
   async function getApproval(req, res, approvalId) {
@@ -2188,17 +2652,27 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   function safeOperationSummary(value) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const result = value.responseBody?.result;
+    const reconciliationState = explicitReconciliationState(value)
+      || (operationRequiresReconciliation(value) ? "pending" : "not_required");
     return {
       operationId: String(value.id || ""),
       action: String(value.action || ""),
+      targetType: String(value.targetType || ""),
       targetId: String(value.targetId || ""),
+      targetOrgUnitId: String(value.targetOrgUnitId || ""),
+      actorSubjectId: String(value.actorSubjectId || ""),
+      actorEmail: String(value.actorEmail || ""),
+      reason: String(value.reason || ""),
+      approvalId: String(value.approvalId || ""),
       status: String(value.status || "unknown"),
       state: String(result?.state || value.status || "unknown"),
       createdAt: String(value.createdAt || ""),
       updatedAt: String(value.updatedAt || ""),
       completedAt: String(value.completedAt || ""),
       errorCode: String(value.errorCode || ""),
+      retryable: operationRetryable(value),
       requiresReconciliation: Boolean(result?.requiresReconciliation),
+      reconciliationState,
       credentials: safePolicyCredentialSummary(result?.credentials),
     };
   }
@@ -2214,6 +2688,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       action: String(operation.action || ""),
       targetType: String(operation.targetType || ""),
       targetId: String(operation.targetId || ""),
+      targetOrgUnitId: String(operation.targetOrgUnitId || ""),
       state: operationState(operation),
       errorCode: String(operation.errorCode || ""),
       retryable: operationRetryable(operation),
@@ -2239,6 +2714,219 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       parentOperationId: String(operation.parentOperationId || ""),
       beforeSummary: safeAuditValue(operation.beforeSummary),
       afterSummary: safeAuditValue(result || {}),
+    };
+  }
+
+  function operationSnapshotOrgUnitId(operation) {
+    const targetOrgUnitId = String(operation?.targetOrgUnitId || "");
+    if (targetOrgUnitId) return targetOrgUnitId;
+    const scopes = safeStringList(operation?.scopeOrgUnitIds);
+    return scopes.length === 1 && scopes[0] !== "*" ? scopes[0] : "";
+  }
+
+  function historicalScopeAllows(data, access, targetOrgUnitId, scopeOrgUnitIds) {
+    const scopes = safeStringList(scopeOrgUnitIds);
+    if (targetOrgUnitId) {
+      return targetOrgUnitId === "*"
+        ? access.scopeOrgUnitIds.includes("*")
+        : access.scopeOrgUnitIds.includes("*")
+          || access.scopeOrgUnitIds.includes(targetOrgUnitId);
+    }
+    if (scopes.includes("*")) return access.scopeOrgUnitIds.includes("*");
+    return scopes.some((scope) => access.scopeOrgUnitIds.includes("*")
+      || access.scopeOrgUnitIds.includes(scope));
+  }
+
+  function operationHistoryOrgUnitId(data, maps, operation) {
+    const snapshot = operationSnapshotOrgUnitId(operation);
+    if (snapshot) return snapshot;
+    const userId = targetUserId(maps, operation.targetType, operation.targetId);
+    if (userId) {
+      const current = activeUserOrgUnit(data, userId);
+      if (current) return current;
+    }
+    const scopes = safeStringList(operation.scopeOrgUnitIds);
+    return scopes.includes("*") ? "*" : (scopes.length === 1 ? scopes[0] : "");
+  }
+
+  async function operationReadContext(session, operation) {
+    const permission = OPERATION_PERMISSIONS[operation.action];
+    if (!permission) {
+      throw new HttpError(
+        409,
+        "operation_action_unsupported",
+        "The operation action is not supported",
+      );
+    }
+    const result = await requirePermission(session, permission);
+    const maps = await auditTargetMaps();
+    const targetOrgUnitId = operationHistoryOrgUnitId(result.data, maps, operation);
+    if (!historicalScopeAllows(
+      result.data,
+      result.access,
+      targetOrgUnitId,
+      operation.scopeOrgUnitIds,
+    )) {
+      throw new HttpError(
+        403,
+        "forbidden_scope",
+        "This operation is outside your organization history scope",
+      );
+    }
+    return result;
+  }
+
+  function operationQuery(searchParams) {
+    const one = (name, maxLength = 256) => {
+      const value = String(searchParams.get(name) || "").trim();
+      if ([...value].length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new HttpError(400, "invalid_operation_filter", `${name} is invalid`);
+      }
+      return value;
+    };
+    const timestamp = (name) => {
+      const value = one(name, 80);
+      if (!value) return "";
+      const parsed = Date.parse(value);
+      if (!Number.isFinite(parsed)) {
+        throw new HttpError(400, "invalid_time_range", `${name} must be a valid timestamp`);
+      }
+      return new Date(parsed).toISOString();
+    };
+    const rawLimit = one("limit", 20);
+    if (rawLimit && !/^[1-9]\d*$/.test(rawLimit)) {
+      throw new HttpError(400, "invalid_limit", "limit must be a positive integer");
+    }
+    const limit = rawLimit ? Number(rawLimit) : DEFAULT_OPERATION_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit > MAX_OPERATION_LIMIT) {
+      throw new HttpError(400, "invalid_limit", `limit must not exceed ${MAX_OPERATION_LIMIT}`);
+    }
+    const from = timestamp("from");
+    const to = timestamp("to");
+    if (from && to && Date.parse(from) > Date.parse(to)) {
+      throw new HttpError(400, "invalid_time_range", "from must not be after to");
+    }
+    const targetType = one("targetType", 32);
+    if (targetType
+        && !["user", "device", "credential", "operation", "export"].includes(targetType)) {
+      throw new HttpError(400, "invalid_operation_filter", "targetType is not supported");
+    }
+    const normalized = {
+      operationId: one("operationId", 128),
+      actorSubjectId: one("actorSubjectId", 128),
+      action: one("action", 128),
+      targetType,
+      targetId: one("targetId", 128),
+      status: one("status", 64),
+      from,
+      to,
+      limit,
+    };
+    return {
+      ...normalized,
+      cursor: one("cursor", MAX_OPERATION_CURSOR),
+      queryHash: sha256(JSON.stringify(canonicalValue(normalized))),
+    };
+  }
+
+  function operationCursorSignature(payload) {
+    return crypto.createHmac("sha256", config.sessionSecret)
+      .update(payload)
+      .digest("base64url");
+  }
+
+  function encodeOperationCursor(query, session, operation) {
+    const payload = Buffer.from(JSON.stringify({
+      v: 1,
+      sub: session.subjectId,
+      qh: query.queryHash,
+      t: String(operation.createdAt || ""),
+      id: String(operation.id || ""),
+    })).toString("base64url");
+    return `${payload}.${operationCursorSignature(payload)}`;
+  }
+
+  function decodeOperationCursor(cursor, query, session) {
+    if (!cursor) return null;
+    const parts = cursor.split(".");
+    if (parts.length !== 2 || !parts[0] || !parts[1]) {
+      throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    }
+    if (!safeEqual(parts[1], operationCursorSignature(parts[0]))) {
+      throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    }
+    let parsed;
+    try {
+      parsed = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+    } catch {
+      throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    }
+    if (parsed?.v !== 1
+        || parsed.sub !== session.subjectId
+        || parsed.qh !== query.queryHash
+        || typeof parsed.t !== "string"
+        || typeof parsed.id !== "string"
+        || !parsed.id) {
+      throw new HttpError(400, "invalid_cursor", "cursor does not match this query");
+    }
+    const time = Date.parse(parsed.t);
+    if (!Number.isFinite(time)) throw new HttpError(400, "invalid_cursor", "cursor is invalid");
+    return { time, createdAt: new Date(time).toISOString(), id: parsed.id };
+  }
+
+  function compareOperations(left, right) {
+    const timeOrder = String(right.createdAt || "").localeCompare(String(left.createdAt || ""));
+    if (timeOrder !== 0) return timeOrder;
+    return String(right.id || "").localeCompare(String(left.id || ""));
+  }
+
+  async function operationPage(session, searchParams) {
+    const query = operationQuery(searchParams);
+    const cursor = decodeOperationCursor(query.cursor, query, session);
+    const maps = await auditTargetMaps();
+    const visible = await store.read((data) => {
+      const access = effectiveAccess(data, session.subjectId);
+      return Object.values(data.adminOperations)
+        .filter((operation) => {
+          if (query.operationId && operation.id !== query.operationId) return false;
+          if (query.actorSubjectId && operation.actorSubjectId !== query.actorSubjectId) {
+            return false;
+          }
+          if (query.action && operation.action !== query.action) return false;
+          if (query.targetType && operation.targetType !== query.targetType) return false;
+          if (query.targetId && operation.targetId !== query.targetId) return false;
+          if (query.status && operationState(operation) !== query.status
+              && operation.status !== query.status) {
+            return false;
+          }
+          if (query.from && String(operation.createdAt || "") < query.from) return false;
+          if (query.to && String(operation.createdAt || "") >= query.to) return false;
+          if (cursor && (
+            String(operation.createdAt || "") > cursor.createdAt
+            || (String(operation.createdAt || "") === cursor.createdAt
+              && String(operation.id || "") >= cursor.id)
+          )) {
+            return false;
+          }
+          const permission = OPERATION_PERMISSIONS[operation.action];
+          if (!permission || !access.permissions.includes(permission)) return false;
+          return historicalScopeAllows(
+            data,
+            access,
+            operationHistoryOrgUnitId(data, maps, operation),
+            operation.scopeOrgUnitIds,
+          );
+        })
+        .map((operation) => structuredClone(operation))
+        .sort(compareOperations);
+    });
+    const page = visible.slice(0, query.limit);
+    const nextCursor = visible.length > query.limit && page.length > 0
+      ? encodeOperationCursor(query, session, page[page.length - 1])
+      : "";
+    return {
+      operations: page.map(safeOperationSummary),
+      nextCursor,
     };
   }
 
@@ -2279,11 +2967,16 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       targetType: one("targetType", 32),
       targetId: one("targetId", 128),
       result: one("result", 64),
+      phase: one("phase", 32),
+      orgUnitId: one("orgUnitId", 128),
       from,
       to,
       limit,
     };
-    if (normalized.targetType && !["user", "device", "credential"].includes(normalized.targetType)) {
+    if (normalized.targetType
+        && !["user", "device", "credential", "operation", "export"].includes(
+          normalized.targetType,
+        )) {
       throw new HttpError(400, "invalid_audit_filter", "targetType is not supported");
     }
     return {
@@ -2361,6 +3054,38 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     return "";
   }
 
+  function organizationScopeAllows(access, targetOrgUnitId) {
+    if (!targetOrgUnitId) return false;
+    if (targetOrgUnitId === "*") return access.scopeOrgUnitIds.includes("*");
+    return access.scopeOrgUnitIds.includes("*")
+      || access.scopeOrgUnitIds.includes(targetOrgUnitId);
+  }
+
+  function orgUnitWithinQuery(data, queryOrgUnitId, targetOrgUnitId) {
+    if (!queryOrgUnitId || queryOrgUnitId === "*") return true;
+    if (!targetOrgUnitId) return false;
+    if (targetOrgUnitId === queryOrgUnitId) return true;
+    const queryOrg = data.orgUnits[queryOrgUnitId];
+    const targetOrg = data.orgUnits[targetOrgUnitId];
+    if (!queryOrg || !targetOrg) return false;
+    return String(targetOrg.path || "").startsWith(`${queryOrg.path}/`);
+  }
+
+  function auditRecordOrgUnitId(data, maps, record, fallbackOrgUnitId = "") {
+    if (record.targetOrgUnitId) return String(record.targetOrgUnitId);
+    const operation = data.adminOperations[record.operationId];
+    if (operation) {
+      const snapshot = operationHistoryOrgUnitId(data, maps, operation);
+      if (snapshot) return snapshot;
+    }
+    const userId = targetUserId(maps, record.targetType, record.targetId);
+    if (userId) {
+      const current = activeUserOrgUnit(data, userId);
+      if (current) return current;
+    }
+    return fallbackOrgUnitId;
+  }
+
   function safeAuditRecord(record) {
     return {
       id: String(record.id || ""),
@@ -2376,6 +3101,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       action: String(record.action || ""),
       targetType: String(record.targetType || ""),
       targetId: String(record.targetId || ""),
+      targetOrgUnitId: String(record.targetOrgUnitId || ""),
       beforeSummary: safeAuditValue(record.beforeSummary),
       afterSummary: safeAuditValue(record.afterSummary),
       result: String(record.result || ""),
@@ -2616,6 +3342,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       action: operation.action,
       targetType: operation.targetType,
       targetId: operation.targetId,
+      targetOrgUnitId: String(operation.targetOrgUnitId || ""),
       beforeSummary: structuredClone(operation.beforeSummary),
       afterSummary: phase === "result" ? structuredClone(options.afterSummary || {}) : {},
       result,
@@ -3304,7 +4031,18 @@ export async function createEnterpriseAdminServer(config, options = {}) {
 
   async function auditLogPage(session, searchParams) {
     const query = auditQuery(searchParams);
-    const result = await requirePermission(session, "audit.read");
+    const result = await requirePermission(
+      session,
+      "audit.read",
+      query.orgUnitId && query.orgUnitId !== "*" ? query.orgUnitId : "",
+    );
+    if (query.orgUnitId === "*" && !hasGlobalScope(result.access)) {
+      throw new HttpError(403, "forbidden_scope", "Global audit scope is not allowed");
+    }
+    if (query.orgUnitId && query.orgUnitId !== "*"
+        && !result.data.orgUnits[query.orgUnitId]) {
+      throw new HttpError(400, "invalid_audit_filter", "orgUnitId is not available");
+    }
     const maps = await auditTargetMaps();
     const cursor = decodeAuditCursor(query.cursor, query, session);
     const visible = await store.read((data) => {
@@ -3317,11 +4055,18 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         if (query.targetType && record.targetType !== query.targetType) continue;
         if (query.targetId && record.targetId !== query.targetId) continue;
         if (query.result && record.result !== query.result) continue;
+        if (query.phase && record.phase !== query.phase) continue;
         if (query.from && String(record.timestamp || "") < query.from) continue;
         if (query.to && String(record.timestamp || "") > query.to) continue;
-        const userId = targetUserId(maps, record.targetType, record.targetId);
-        if (!userId) continue;
-        if (!userInScope(result.data, result.access, userId)) continue;
+        const orgUnitId = auditRecordOrgUnitId(
+          data,
+          maps,
+          record,
+          query.orgUnitId === "*" ? "*" : query.orgUnitId,
+        );
+        if (!organizationScopeAllows(result.access, orgUnitId)) continue;
+        if (query.orgUnitId
+            && !orgUnitWithinQuery(data, query.orgUnitId, orgUnitId)) continue;
         if (cursor && (
           String(record.timestamp || "") > cursor.timestamp
           || (String(record.timestamp || "") === cursor.timestamp && String(record.id || "") >= cursor.id)
@@ -3340,6 +4085,574 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       auditLogs: page.map(safeAuditRecord),
       nextCursor,
     };
+  }
+
+  function csvCell(value) {
+    let text = value == null ? "" : String(value);
+    if (typeof value === "string" && /^[=+\-@]/.test(text)) text = `'${text}`;
+    if (/[",\r\n]/.test(text) || /^\s|\s$/.test(text)) {
+      return `"${text.replaceAll('"', '""')}"`;
+    }
+    return text;
+  }
+
+  function csvContent(headers, rows) {
+    return `\uFEFF${[headers, ...rows]
+      .map((row) => row.map(csvCell).join(","))
+      .join("\r\n")}\r\n`;
+  }
+
+  function exportFileName(kind, createdAt) {
+    const stamp = createdAt.replace(/[-:]/g, "").replace(/\.\d{3}Z$/, "Z");
+    return `magpie-${kind}-${stamp}.csv`;
+  }
+
+  function publicExportRecord(record) {
+    return {
+      exportId: String(record.id || ""),
+      kind: String(record.kind || ""),
+      status: String(record.status || ""),
+      fileName: String(record.fileName || ""),
+      contentType: String(record.contentType || ""),
+      rowCount: Number(record.rowCount || 0),
+      byteLength: Number(record.byteLength || 0),
+      createdAt: String(record.createdAt || ""),
+      expiresAt: String(record.expiresAt || ""),
+      consumedAt: String(record.consumedAt || ""),
+      downloadPath: `/api/v1/admin/exports/${encodeURIComponent(record.id)}/download`,
+    };
+  }
+
+  function exportToken(exportId, sessionHash, actorSubjectId) {
+    return crypto.createHmac("sha256", config.sessionSecret)
+      .update(`${exportId}\u0000${sessionHash}\u0000${actorSubjectId}`)
+      .digest("base64url");
+  }
+
+  function assertExportSize(content, rowCount) {
+    if (rowCount > config.exports.maxRecords) {
+      throw new HttpError(
+        413,
+        "export_too_large",
+        "The export exceeds the configured record limit",
+      );
+    }
+    if (Buffer.byteLength(content, "utf8") > config.exports.maxBytes) {
+      throw new HttpError(
+        413,
+        "export_too_large",
+        "The export exceeds the configured byte limit",
+      );
+    }
+  }
+
+  async function usageExportContent(session, request) {
+    const params = new URLSearchParams({
+      from: request.from,
+      to: request.to,
+    });
+    for (const [key, value] of Object.entries(request.filters)) {
+      if (value !== "") params.set(key, String(value));
+    }
+    const report = await usageReport(session, params, false);
+    const rows = report.matched.map(({ record, user }) => {
+      const orgUnitId = activeUserOrgUnit(report.data, user.id);
+      const department = orgUnitId ? report.data.orgUnits[orgUnitId]?.path || "" : "";
+      return [
+        new Date(record.time).toISOString(),
+        user.id,
+        user.email,
+        department,
+        record.agent,
+        record.provider,
+        record.model,
+        record.status,
+        record.inputTokens
+          + record.outputTokens
+          + record.cacheReadTokens
+          + record.cacheWriteTokens,
+        record.costUsd == null ? "" : record.costUsd,
+        record.rejected ? "true" : "false",
+        record.handedOn ? "true" : "false",
+      ];
+    });
+    const content = csvContent([
+      "time",
+      "userId",
+      "email",
+      "department",
+      "agent",
+      "provider",
+      "model",
+      "status",
+      "tokens",
+      "cost",
+      "rejected",
+      "handedOn",
+    ], rows);
+    assertExportSize(content, rows.length);
+    return { content, rowCount: rows.length };
+  }
+
+  async function auditExportContent(session, request) {
+    const result = await requirePermission(
+      session,
+      "audit.export",
+      request.orgUnitId === "*" ? "" : request.orgUnitId,
+    );
+    if (request.orgUnitId === "*" && !hasGlobalScope(result.access)) {
+      throw new HttpError(403, "forbidden_scope", "Global audit scope is not allowed");
+    }
+    if (request.orgUnitId !== "*" && !result.data.orgUnits[request.orgUnitId]) {
+      throw new HttpError(400, "invalid_audit_filter", "orgUnitId is not available");
+    }
+    const maps = await auditTargetMaps();
+    const records = await store.read((data) => data.adminAuditLogs
+      .filter((record) => {
+        for (const key of [
+          "operationId",
+          "actorSubjectId",
+          "action",
+          "targetType",
+          "targetId",
+          "result",
+          "phase",
+        ]) {
+          if (!request.filters[key]) continue;
+          const value = key === "actorSubjectId"
+            ? record.actorSubjectId || record.actorSubject
+            : record[key];
+          if (value !== request.filters[key]) return false;
+        }
+        if (String(record.timestamp || "") < request.from
+            || String(record.timestamp || "") > request.to) {
+          return false;
+        }
+        const orgUnitId = auditRecordOrgUnitId(
+          data,
+          maps,
+          record,
+          request.orgUnitId === "*" ? "*" : request.orgUnitId,
+        );
+        return organizationScopeAllows(result.access, orgUnitId)
+          && orgUnitWithinQuery(data, request.orgUnitId, orgUnitId);
+      })
+      .sort(compareAuditRecords)
+      .map((record) => structuredClone(record)));
+    const rows = records.map((record) => [
+      record.timestamp,
+      record.operationId || "",
+      record.actorSubjectId || record.actorSubject || "",
+      record.actorEmail || "",
+      record.action || "",
+      record.phase || "",
+      record.targetType || "",
+      record.targetId || "",
+      record.targetOrgUnitId || "",
+      record.result || "",
+      record.errorCode || "",
+      record.approvalId || "",
+      record.parentOperationId || "",
+      record.reason || "",
+    ]);
+    const content = csvContent([
+      "time",
+      "operationId",
+      "actorSubjectId",
+      "actorEmail",
+      "action",
+      "phase",
+      "targetType",
+      "targetId",
+      "targetOrgUnitId",
+      "result",
+      "errorCode",
+      "approvalId",
+      "parentOperationId",
+      "reason",
+    ], rows);
+    assertExportSize(content, rows.length);
+    return { content, rowCount: rows.length };
+  }
+
+  function replayExport(res, current, existing, replayed) {
+    if (existing.exportRecord.sessionHash !== current.sidHash
+        || existing.exportRecord.actorSubjectId !== current.session.subjectId) {
+      throw new HttpError(
+        403,
+        "export_session_mismatch",
+        "This export belongs to a different management session",
+      );
+    }
+    if (existing.exportRecord.status === "consumed") {
+      throw new HttpError(410, "export_consumed", "This export was already downloaded");
+    }
+    if (existing.exportRecord.status === "expired"
+        || Date.parse(existing.exportRecord.expiresAt) <= Date.now()) {
+      throw new HttpError(410, "export_expired", "This export has expired");
+    }
+    const token = exportToken(
+      existing.exportRecord.id,
+      current.sidHash,
+      current.session.subjectId,
+    );
+    if (!existing.tokenRecord
+        || existing.tokenRecord.tokenHash !== sha256(token)
+        || existing.tokenRecord.consumedAt) {
+      throw new HttpError(503, "storage_unavailable", "The export token is unavailable");
+    }
+    json(res, replayed ? 200 : 201, {
+      ok: true,
+      replayed,
+      export: publicExportRecord(existing.exportRecord),
+      downloadToken: token,
+    });
+  }
+
+  async function performExport(req, res, requestId, action) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    if (!approvalId) throw new HttpError(400, "approval_required", "approvalId is required");
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    const request = normalizedExportRequest(action, body);
+    const definition = approvalActionDefinition(action);
+    await requirePermission(
+      current.session,
+      definition.permission,
+      request.orgUnitId === "*" ? "" : request.orgUnitId,
+    );
+    if (request.orgUnitId === "*") {
+      const access = await requirePermission(current.session, definition.permission);
+      if (!hasGlobalScope(access.access)) {
+        throw new HttpError(403, "forbidden_scope", "Global export scope is not allowed");
+      }
+    } else {
+      const target = await store.read((data) => data.orgUnits[request.orgUnitId] || null);
+      if (!target || target.status !== "active") {
+        throw new HttpError(400, "invalid_export_scope", "orgUnitId is not active");
+      }
+    }
+    await requireStepUp(current, req, action);
+
+    const targetId = exportTargetId(action, request);
+    const requestFingerprint = writeRequestFingerprint(
+      action,
+      "export",
+      targetId,
+      reason,
+      approvalId,
+      request,
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const existing = await store.read((data) => {
+      const entry = data.adminExportRequests[idempotencyKeyHash];
+      if (!entry) {
+        if (data.adminIdempotency[idempotencyKeyHash]) {
+          throw new HttpError(
+            409,
+            "idempotency_conflict",
+            "Idempotency-Key was already used for a different request",
+          );
+        }
+        return null;
+      }
+      const exportRecord = data.adminExports[entry.exportId];
+      if (!exportRecord) {
+        throw new HttpError(
+          503,
+          "storage_unavailable",
+          "The idempotency record points to a missing export",
+        );
+      }
+      if (entry.requestFingerprint !== requestFingerprint) {
+        const conflict = new HttpError(
+          409,
+          "idempotency_conflict",
+          "Idempotency-Key was already used for a different request",
+        );
+        conflict.operationId = entry.operationId;
+        throw conflict;
+      }
+      const tokenRecord = data.adminExportTokens[sha256(exportToken(
+        exportRecord.id,
+        current.sidHash,
+        current.session.subjectId,
+      ))];
+      return {
+        exportRecord: structuredClone(exportRecord),
+        tokenRecord: tokenRecord ? structuredClone(tokenRecord) : null,
+      };
+    });
+    if (existing) {
+      replayExport(res, current, existing, true);
+      return;
+    }
+
+    const generated = request.exportType === "usage"
+      ? await usageExportContent(current.session, request)
+      : await auditExportContent(current.session, request);
+    let outcome;
+    try {
+      outcome = await store.mutate((data) => {
+        const raced = data.adminExportRequests[idempotencyKeyHash];
+        if (raced) {
+          const exportRecord = data.adminExports[raced.exportId];
+          if (!exportRecord || raced.requestFingerprint !== requestFingerprint) {
+            throw new HttpError(
+              409,
+              "idempotency_conflict",
+              "Idempotency-Key was already used for a different request",
+            );
+          }
+          const tokenRecord = data.adminExportTokens[sha256(exportToken(
+            exportRecord.id,
+            current.sidHash,
+            current.session.subjectId,
+          ))];
+          return {
+            replayed: true,
+            exportRecord: structuredClone(exportRecord),
+            tokenRecord: tokenRecord ? structuredClone(tokenRecord) : null,
+          };
+        }
+        if (data.adminIdempotency[idempotencyKeyHash]) {
+          throw new HttpError(
+            409,
+            "idempotency_conflict",
+            "Idempotency-Key was already used for a different request",
+          );
+        }
+
+        const now = new Date();
+        const createdAt = now.toISOString();
+        const exportId = `exp_${crypto.randomUUID()}`;
+        const expiresAt = new Date(
+          now.getTime() + config.exports.ttlSeconds * 1000,
+        ).toISOString();
+        const operation = {
+          id: `op_${crypto.randomUUID()}`,
+          requestId,
+          idempotencyKeyHash,
+          requestFingerprint,
+          actorSubjectId: current.session.subjectId,
+          actorEmail: current.session.email,
+          roles: [...effectiveAccess(data, current.session.subjectId).roles],
+          scopeOrgUnitIds: [...effectiveAccess(
+            data,
+            current.session.subjectId,
+          ).scopeOrgUnitIds],
+          action,
+          targetType: "export",
+          targetId,
+          targetOrgUnitId: request.orgUnitId,
+          reason,
+          approvalId,
+          beforeSummary: {
+            id: targetId,
+            exportType: request.exportType,
+            orgUnitId: request.orgUnitId,
+            from: request.from,
+            to: request.to,
+            filters: request.filters,
+          },
+          status: "succeeded",
+          createdAt,
+          updatedAt: createdAt,
+          dependencyInvokedAt: createdAt,
+          completedAt: createdAt,
+          intentAuditId: "",
+          resultAuditId: "",
+          responseStatus: 201,
+          responseBody: null,
+          errorCode: "",
+          sourceIp: String(req.socket.remoteAddress || ""),
+          userAgentHash: sha256(String(req.headers["user-agent"] || "")),
+        };
+        const expected = approvalExpectedBinding({
+          requesterSubjectId: current.session.subjectId,
+          action,
+          targetType: "export",
+          targetId,
+          targetOrgUnitId: request.orgUnitId,
+          riskLevel: riskForAction(action),
+          reason,
+          payload: request,
+        });
+        reserveApprovalForOperation(data, approvalId, expected, operation);
+
+        const token = exportToken(
+          exportId,
+          current.sidHash,
+          current.session.subjectId,
+        );
+        if (Buffer.byteLength(token, "utf8") > MAX_EXPORT_TOKEN_BYTES) {
+          throw new Error("Derived export token exceeds the supported size");
+        }
+        const tokenHash = sha256(token);
+        const exportRecord = {
+          id: exportId,
+          kind: request.exportType,
+          status: "ready",
+          actorSubjectId: current.session.subjectId,
+          actorEmail: current.session.email,
+          sessionHash: current.sidHash,
+          scopeOrgUnitId: request.orgUnitId,
+          fileName: exportFileName(request.exportType, createdAt),
+          contentType: "text/csv; charset=utf-8",
+          content: generated.content,
+          rowCount: generated.rowCount,
+          byteLength: Buffer.byteLength(generated.content, "utf8"),
+          createdAt,
+          expiresAt,
+          consumedAt: "",
+        };
+        operation.responseBody = {
+          ok: true,
+          requestId,
+          operationId: operation.id,
+          action,
+          targetId,
+          result: {
+            state: "succeeded",
+            exportId,
+            exportType: request.exportType,
+            rowCount: generated.rowCount,
+            byteLength: exportRecord.byteLength,
+            expiresAt,
+          },
+        };
+        const intent = auditRecord(operation, "intent", "pending");
+        data.adminOperations[operation.id] = operation;
+        const result = auditRecord(operation, "result", "succeeded", {
+          afterSummary: operation.responseBody.result,
+        });
+        operation.intentAuditId = intent.id;
+        operation.resultAuditId = result.id;
+        data.adminAuditLogs.push(intent, result);
+        consumeApprovalForOperation(data, approvalId, operation, "succeeded");
+        data.adminExports[exportId] = exportRecord;
+        data.adminExportTokens[tokenHash] = {
+          tokenHash,
+          exportId,
+          actorSubjectId: current.session.subjectId,
+          sessionHash: current.sidHash,
+          expiresAt,
+          consumedAt: "",
+        };
+        data.adminExportRequests[idempotencyKeyHash] = {
+          requestHash: idempotencyKeyHash,
+          exportId,
+          operationId: operation.id,
+          requestFingerprint,
+          createdAt,
+        };
+        data.adminIdempotency[idempotencyKeyHash] = {
+          operationId: operation.id,
+          requestFingerprint,
+          createdAt,
+          exportId,
+        };
+        notificationOutbox.enqueueOperation(data, operation, {
+          occurredAt: createdAt,
+          state: "succeeded",
+        });
+        return {
+          replayed: false,
+          exportRecord: structuredClone(exportRecord),
+          tokenRecord: structuredClone(data.adminExportTokens[tokenHash]),
+        };
+      });
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      throw new HttpError(503, "audit_unavailable", "The export could not be committed");
+    }
+    if (outcome.replayed) {
+      replayExport(res, current, outcome, true);
+      return;
+    }
+    json(res, 201, {
+      ok: true,
+      replayed: false,
+      export: publicExportRecord(outcome.exportRecord),
+      downloadToken: exportToken(
+        outcome.exportRecord.id,
+        current.sidHash,
+        current.session.subjectId,
+      ),
+    });
+  }
+
+  async function downloadExport(req, res, exportId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    const authorization = String(req.headers.authorization || "");
+    const match = /^Bearer ([A-Za-z0-9_-]+)$/.exec(authorization);
+    if (!match || Buffer.byteLength(match[1], "utf8") > MAX_EXPORT_TOKEN_BYTES) {
+      throw new HttpError(401, "export_token_required", "A Bearer export token is required");
+    }
+    const token = match[1];
+    const tokenHash = sha256(token);
+    const downloaded = await store.mutate((data) => {
+      const exportRecord = data.adminExports[exportId];
+      if (!exportRecord) {
+        throw new HttpError(404, "export_not_found", "Export not found");
+      }
+      const tokenRecord = data.adminExportTokens[tokenHash];
+      if (!tokenRecord
+          || tokenRecord.exportId !== exportId
+          || tokenRecord.sessionHash !== current.sidHash
+          || tokenRecord.actorSubjectId !== current.session.subjectId
+          || exportRecord.sessionHash !== current.sidHash
+          || exportRecord.actorSubjectId !== current.session.subjectId) {
+        throw new HttpError(403, "export_token_invalid", "The export token is not valid");
+      }
+      if (exportRecord.status === "consumed" || tokenRecord.consumedAt) {
+        throw new HttpError(410, "export_consumed", "This export was already downloaded");
+      }
+      if (exportRecord.status !== "ready"
+          || Date.parse(exportRecord.expiresAt) <= Date.now()) {
+        throw new HttpError(410, "export_expired", "This export has expired");
+      }
+      const consumedAt = new Date().toISOString();
+      exportRecord.status = "consumed";
+      exportRecord.consumedAt = consumedAt;
+      tokenRecord.consumedAt = consumedAt;
+      data.adminSystemAuditLogs.push({
+        id: `audit_${crypto.randomUUID()}`,
+        action: "export.downloaded",
+        timestamp: consumedAt,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        exportId,
+        exportType: exportRecord.kind,
+        targetOrgUnitId: exportRecord.scopeOrgUnitId,
+        rowCount: exportRecord.rowCount,
+        byteLength: exportRecord.byteLength,
+        result: "succeeded",
+      });
+      return {
+        content: exportRecord.content,
+        contentType: exportRecord.contentType,
+        fileName: exportRecord.fileName,
+        byteLength: exportRecord.byteLength,
+      };
+    });
+    const body = Buffer.from(downloaded.content, "utf8");
+    if (body.length !== downloaded.byteLength) {
+      throw new HttpError(503, "storage_unavailable", "The stored export is inconsistent");
+    }
+    res.writeHead(200, {
+      "content-type": downloaded.contentType,
+      "content-disposition": `attachment; filename="${downloaded.fileName.replaceAll('"', "")}"`,
+      "content-length": body.length,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    });
+    res.end(body);
   }
 
   async function performReconciliation(req, res, requestId, operationId) {
@@ -3907,9 +5220,63 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     json(res, 200, responseBody);
   }
 
+  function usageFilters(searchParams) {
+    const value = (names, maxLength = 256) => {
+      for (const name of names) {
+        const candidate = String(searchParams.get(name) || "").trim();
+        if (!candidate) continue;
+        if ([...candidate].length > maxLength || /[\u0000-\u001f\u007f]/.test(candidate)) {
+          throw new HttpError(400, "invalid_usage_filter", `${name} is invalid`);
+        }
+        return candidate;
+      }
+      return "";
+    };
+    const statusValue = value(["status"], 20);
+    if (statusValue && !/^\d+$/.test(statusValue)) {
+      throw new HttpError(400, "invalid_usage_filter", "status must be a number");
+    }
+    return {
+      userId: value(["userId", "user"], 128),
+      departmentId: value(["departmentId", "department", "orgUnitId"], 128),
+      agent: value(["agent"], 160),
+      model: value(["model"], 240),
+      provider: value(["provider"], 160),
+      callerKeyId: value(["callerKeyId"], 240),
+      status: statusValue ? Number(statusValue) : null,
+    };
+  }
+
+  function usageRecordMatches(result, entry, filters) {
+    if (filters.userId && entry.user.id !== filters.userId) return false;
+    if (filters.departmentId) {
+      const orgUnitId = activeUserOrgUnit(result.data, entry.user.id);
+      if (!orgUnitWithinQuery(result.data, filters.departmentId, orgUnitId)) return false;
+    }
+    if (filters.agent && entry.record.agent !== filters.agent) return false;
+    if (filters.model && entry.record.model !== filters.model) return false;
+    if (filters.provider && entry.record.provider !== filters.provider) return false;
+    if (filters.callerKeyId && entry.record.callerKeyId !== filters.callerKeyId) return false;
+    if (filters.status != null && entry.record.status !== filters.status) return false;
+    return true;
+  }
+
   async function usageReport(session, searchParams, grouped) {
     const result = await requirePermission(session, "usage.read");
     const window = finiteWindow(searchParams, config.usage.maxRangeDays);
+    const filters = usageFilters(searchParams);
+    if (filters.departmentId && filters.departmentId !== "*"
+        && !result.data.orgUnits[filters.departmentId]) {
+      throw new HttpError(400, "invalid_usage_filter", "departmentId is not available");
+    }
+    if (filters.departmentId === "*" && !hasGlobalScope(result.access)) {
+      throw new HttpError(403, "forbidden_scope", "Global department scope is not allowed");
+    }
+    if (filters.departmentId && filters.departmentId !== "*"
+        && !result.access.scopeOrgUnitIds.includes("*")
+        && !result.access.scopeOrgUnitIds.includes(filters.departmentId)) {
+      throw new HttpError(403, "forbidden_scope", "The department filter is outside your access");
+    }
     const bucket = grouped
       ? String(searchParams.get("bucket") || "day").toLowerCase()
       : "";
@@ -3932,6 +5299,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     const visible = visibleUserIds(result.data, result.access, users);
     const matched = [];
     let unattributedRecords = 0;
+    let outsideScopeRecords = 0;
+    let filteredOutRecords = 0;
     for (const record of usage.records) {
       const credential = credentialById.get(record.callerKeyId);
       const user = credential ? userById.get(credential.userId) : null;
@@ -3939,8 +5308,16 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         unattributedRecords += 1;
         continue;
       }
-      if (!visible.has(user.id)) continue;
-      matched.push({ record, credential, user });
+      if (!visible.has(user.id)) {
+        outsideScopeRecords += 1;
+        continue;
+      }
+      const entry = { record, credential, user };
+      if (!usageRecordMatches(result, entry, filters)) {
+        filteredOutRecords += 1;
+        continue;
+      }
+      matched.push(entry);
     }
 
     return {
@@ -3949,6 +5326,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       usage,
       matched,
       unattributedRecords,
+      outsideScopeRecords,
+      filteredOutRecords,
+      filters,
       userById,
       credentialById,
       bucket,
@@ -4387,6 +5767,11 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/approvals") {
+      await listApprovals(req, res, url.searchParams);
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/v1/admin/approvals") {
       await createApproval(req, res);
       return;
@@ -4657,6 +6042,23 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/usage/export") {
+      await performExport(req, res, requestId, "usage.export.create");
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/audit/export") {
+      await performExport(req, res, requestId, "audit.export.create");
+      return;
+    }
+
+    const exportDownloadMatch =
+      /^\/api\/v1\/admin\/exports\/(exp_[a-f0-9-]{36})\/download$/.exec(url.pathname);
+    if (req.method === "GET" && exportDownloadMatch) {
+      await downloadExport(req, res, exportDownloadMatch[1]);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/v1/admin/health") {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
@@ -4667,6 +6069,13 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         auth,
         modelCatalog: { ...modelCatalog.status },
       });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/operations") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, await operationPage(current.session, url.searchParams));
       return;
     }
 
@@ -4689,7 +6098,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         return stored ? structuredClone(stored) : null;
       });
       if (!operation) throw new HttpError(404, "operation_not_found", "Operation not found");
-      await operationTarget(current.session, operation);
+      await operationReadContext(current.session, operation);
+      if (operation.action === "operation.reconcile") {
+        await operationTarget(current.session, operation, "operations.reconcile");
+      }
       json(res, 200, { operation: safeOperationDetail(operation) });
       return;
     }

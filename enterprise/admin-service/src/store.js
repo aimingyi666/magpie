@@ -30,6 +30,9 @@ function emptyStore() {
     notificationChannels: {},
     notificationChannelTests: {},
     notificationChannelRequests: {},
+    adminExports: {},
+    adminExportTokens: {},
+    adminExportRequests: {},
   };
 }
 
@@ -72,6 +75,9 @@ function validateLoaded(value) {
     "notificationChannels",
     "notificationChannelTests",
     "notificationChannelRequests",
+    "adminExports",
+    "adminExportTokens",
+    "adminExportRequests",
   ]) {
     if (!value[key] || typeof value[key] !== "object" || Array.isArray(value[key])) {
       throw new Error(`admin store ${key} must be an object`);
@@ -313,6 +319,69 @@ function validateLoaded(value) {
     }
   }
   validateNotificationChannelStore(value);
+  for (const [exportId, exportRecord] of Object.entries(value.adminExports)) {
+    if (!exportRecord
+        || typeof exportRecord !== "object"
+        || Array.isArray(exportRecord)
+        || exportRecord.id !== exportId
+        || !/^exp_[a-f0-9-]{36}$/.test(exportId)
+        || !["usage", "audit"].includes(exportRecord.kind)
+        || !["ready", "consumed", "expired"].includes(exportRecord.status)) {
+      throw new Error("admin store adminExports contains an invalid export");
+    }
+    for (const key of [
+      "actorSubjectId",
+      "actorEmail",
+      "sessionHash",
+      "scopeOrgUnitId",
+      "fileName",
+      "contentType",
+      "content",
+      "createdAt",
+      "expiresAt",
+      "consumedAt",
+    ]) {
+      if (typeof exportRecord[key] !== "string") {
+        throw new Error(`admin store export ${key} is invalid`);
+      }
+    }
+    if (!/^[a-f0-9]{64}$/.test(exportRecord.sessionHash)
+        || !Number.isSafeInteger(exportRecord.rowCount)
+        || exportRecord.rowCount < 0
+        || !Number.isSafeInteger(exportRecord.byteLength)
+        || exportRecord.byteLength < 0
+        || !Number.isFinite(Date.parse(exportRecord.createdAt))
+        || !Number.isFinite(Date.parse(exportRecord.expiresAt))) {
+      throw new Error("admin store export metadata is invalid");
+    }
+  }
+  for (const [tokenHash, token] of Object.entries(value.adminExportTokens)) {
+    if (!/^[a-f0-9]{64}$/.test(tokenHash)
+        || !token
+        || typeof token !== "object"
+        || Array.isArray(token)
+        || token.tokenHash !== tokenHash
+        || !value.adminExports[token.exportId]
+        || typeof token.actorSubjectId !== "string"
+        || !token.actorSubjectId
+        || !/^[a-f0-9]{64}$/.test(String(token.sessionHash || ""))
+        || !Number.isFinite(Date.parse(token.expiresAt))
+        || typeof token.consumedAt !== "string") {
+      throw new Error("admin store adminExportTokens contains an invalid token");
+    }
+  }
+  for (const [requestHash, request] of Object.entries(value.adminExportRequests)) {
+    if (!/^[a-f0-9]{64}$/.test(requestHash)
+        || !request
+        || typeof request !== "object"
+        || Array.isArray(request)
+        || request.requestHash !== requestHash
+        || !value.adminExports[request.exportId]
+        || !/^[a-f0-9]{64}$/.test(String(request.requestFingerprint || ""))
+        || !Number.isFinite(Date.parse(request.createdAt))) {
+      throw new Error("admin store adminExportRequests contains an invalid request");
+    }
+  }
   return value;
 }
 

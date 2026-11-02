@@ -2,7 +2,7 @@
 
 独立的企业管理控制面。当前版本完成 **M2-A 管理身份底座**、**M2-B 只读治理**、
 **M2-C2 管理写接口与权限映射**、**M2-C3 幂等与 intent/result 管理审计**和
-**M2-C5 操作/审计查询与对账**、**M2-E1/APR-01a 服务端审批**，以及
+**M2-C5 操作/审计查询与对账**、**M2-D 基础运营页与 CSV 导出**、**M2-E1/APR-01a 服务端审批**，以及
 **APR-01b HMAC 外部审批回调适配器**、**APR-01c 独立 OIDC step-up**、
 **NOTIFY-01a transactional outbox** 和 **NOTIFY-01b 渠道管理/统一 HTTPS transport**：
 管理 OIDC、
@@ -16,14 +16,15 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 82 项管理测试通过（62 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项）。
+当前总计 86 项管理测试通过（66 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项）。
 auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
 CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据链成立时显示“已生效”；
 员工页已提供本人额度、模型、凭证、设备和同步状态只读门户。C5 已提供 operation 查询、
-脱敏审计分页和四种人工对账动作，对账生成子 operation 且不改写原 intent/result。
-页面 E2E、失败恢复入口和完整运营页面仍属于 D。C4-04 完整管理到真实 Magpie
+脱敏审计分页和四种人工对账动作，对账生成子 operation 且不改写原 intent/result。M2-D
+核心已把停用/吊销/轮换、审批、operation/audit 查询、对账和受限 CSV 导出接入基础管理页；
+浏览器 E2E、失败恢复入口和完整运营体验仍未完成。C4-04 完整管理到真实 Magpie
 策略流 E2E 已通过，覆盖双设备独立 Key、真实限额/模型拒绝、多凭证部分失败、refresh/rotate
 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复同步；Docker/共享卷、真实企业 IdP、
 反向代理和浏览器 E2E 仍未验收。当前是“可演示 + 受控技术试点”，不是完整管理台或企业
@@ -88,6 +89,10 @@ APR-01c 已提供独立 OIDC Client 的 step-up：`prompt=login`、`max_age`、e
   动作固定为 `retry_desired`、`rollback_previous`、`confirm_applied`、
   `confirm_not_applied`。每次对账创建子 operation 并追加 intent/result 审计，父 operation
   的状态、响应和原审计保持不变。
+- `POST /api/v1/admin/usage/export` 和 `POST /api/v1/admin/audit/export` 生成受控 CSV；
+  要求有效审批、fresh step-up、CSRF、RBAC、组织范围、理由和 `Idempotency-Key`。响应只
+  返回一次性 Bearer export token 和下载路径；`GET /api/v1/admin/exports/{id}/download`
+  还必须使用原管理员会话 Cookie，首次下载后即消费并记录 `export.downloaded` 系统审计。
 - `POST /api/v1/admin/approvals`、`GET /api/v1/admin/approvals/{id}`、
   `POST /api/v1/admin/approvals/{id}/decisions` 和
   `POST /api/v1/admin/approvals/{id}/revoke` 提供审批申请、查询、批准/拒绝和撤销。
@@ -149,8 +154,9 @@ admin-service 不能直接读写网关的 `caller-keys.json`，也不能获得�
 C4-03a 由 admin-service 加载正式目录并把 group/provider 选择器展开为稳定模型 ID；
 auth-service 和 gateway-control 只接收稳定模型 ID，不加载目录。C4-03b/C4-03c 的策略核心、
 自动 apply/readback、issuance journal、失败补偿和同步后交付已在 auth-service 接通；
-C4-03d 已补管理页额度/模型写表单、完整证据链状态和员工只读状态门户；C5 已实现 operation
-查询、脱敏审计分页和人工对账。页面 E2E、运营页面和失败恢复入口仍属于 D。C4-04 的完整
+C4-03d/C5/M2-D 已补管理页额度/模型写表单、完整证据链状态、员工只读状态门户、停用/吊销/
+轮换、审批、operation/audit 查询、人工对账和 CSV 导出。浏览器 E2E、完整运营体验和失败
+恢复入口仍未完成。C4-04 的完整
 管理到真实 Magpie 策略流 E2E 已通过，
 但 Docker/共享卷、真实企业 IdP、反向代理、浏览器和生产部署仍未验收。
 完整契约见
@@ -246,7 +252,10 @@ environment:
 展开后的稳定模型 ID，不加载模型目录。
 `ADMIN_USAGE_MAX_BYTES`、
 `ADMIN_USAGE_MAX_LINE_BYTES`、`ADMIN_USAGE_MAX_RECORDS`、`ADMIN_USAGE_MAX_FIELDS` 和
-`ADMIN_USAGE_MAX_RANGE_DAYS` 限制单次查询资源。管理容器不能写 `magpie-data`。
+`ADMIN_USAGE_MAX_RANGE_DAYS` 限制单次查询资源。受限 CSV 导出由
+`ADMIN_EXPORT_TTL_SECONDS`（默认 900 秒）、`ADMIN_EXPORT_MAX_BYTES`（默认 5 MiB）和
+`ADMIN_EXPORT_MAX_RECORDS`（默认 100000）限制下载窗口、文件大小和行数。管理容器不能写
+`magpie-data`。
 
 生产部署至少要做到：
 
@@ -288,6 +297,10 @@ approvalConsumptions
 approvalCallbackEvents
 approvalCallbackNonces
 stepUpAssertions
+adminSystemAuditLogs
+adminExports
+adminExportTokens
+adminExportRequests
 ```
 
 当前还没有角色/组织写 API，因此试点初始化时可以由受控运维流程写入 `orgUnits`、
@@ -339,8 +352,26 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 | `POST` | `/api/v1/admin/approvals/{id}/decisions` | 批准/拒绝；要求 `approvals.decide`、CSRF 和 `reason`，禁止自审批 |
 | `POST` | `/api/v1/admin/approvals/{id}/revoke` | 撤销审批；要求 `approvals.revoke`、CSRF 和 `reason` |
 | `POST` | `/api/v1/integrations/approvals/callback` | 外部审批 HMAC 回调；不使用管理会话/CSRF，只改变审批状态 |
+| `POST` | `/api/v1/admin/usage/export` | 生成用量 CSV；要求已批准审批、fresh step-up、CSRF、组织范围、理由和 `Idempotency-Key` |
+| `POST` | `/api/v1/admin/audit/export` | 生成审计 CSV；要求已批准审批、fresh step-up、CSRF、组织范围、理由和 `Idempotency-Key` |
+| `GET` | `/api/v1/admin/exports/{id}/download` | 使用响应中的一次性 Bearer export token 下载；必须同时携带同一管理员会话 Cookie |
 | `GET` | `/api/v1/admin/notifications/deliveries` | 查询 outbox 投递；要求 `notifications.read`，只返回脱敏状态；当前无 cursor，`count` 为当前页数量 |
 | `POST` | `/api/v1/admin/notifications/deliveries/{ntd_id}/retry` | 重放死信；要求 `notifications.replay`、CSRF、理由和 `Idempotency-Key`，并写系统审计 |
+
+受限 CSV 导出约定：
+
+- 创建请求必须携带已批准且未消费的 `approvalId`、fresh step-up、CSRF、`reason` 和
+  `Idempotency-Key`；审批动作、目标、组织范围、payload 摘要和策略版本必须与导出请求一致。
+- 同键同 body 幂等返回原导出记录和 token；同键异 body 返回 `409 idempotency_conflict`。
+- 创建响应返回一次性 Bearer export token；下载必须使用同一管理员会话 Cookie。查询串中的
+  token 一律拒绝。token 不写入日志或审计。
+- 首次下载后导出即消费，重复下载返回 `410 export_consumed`；超过 TTL 返回
+  `410 export_expired`。成功下载写 `export.downloaded` 系统审计。
+- CSV 使用 UTF-8 BOM、CRLF，并对以 `= + - @` 开头的单元格做公式注入防护。用量导出不包含
+  prompt/response、Key ID、Cookie、OIDC/service secret 或 token hash；审计导出只含 L0
+  metadata，不包含完整 before/after payload。
+- 配置为 `ADMIN_EXPORT_TTL_SECONDS=900`、`ADMIN_EXPORT_MAX_BYTES=5242880` 和
+  `ADMIN_EXPORT_MAX_RECORDS=100000`。当前没有 Excel、对象存储、异步大批量导出或分布式锁。
 
 稳定错误码包括 `not_signed_in`、`session_expired`、`session_idle`、`session_binding_mismatch`、
 `forbidden_role`、`forbidden_scope`、`csrf_invalid`、`mfa_required`、`email_not_verified` 和
@@ -450,7 +481,7 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\admin-service.test.mjs test\model-catalog.test.mjs test\notification-channels.test.mjs test\notification-siem.test.mjs
 ```
 
-2026-11-02 的实际结果：`82 passed, 0 failed`（62 项管理服务集成测试 + 7 项目录专项测试 +
+2026-11-02 的实际结果：`86 passed, 0 failed`（66 项管理服务集成测试 + 7 项目录专项测试 +
 7 项通知渠道专项测试 + 6 项 SIEM 专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
@@ -466,7 +497,9 @@ digest 不匹配和失败关闭。C4-03c 集成测试覆盖额度/模型 API、�
 C4-03d 页面测试覆盖 CSRF meta、静态脚本、只读角色无写表单、完整证据链才显示 verified，
 以及页面不泄漏 Gateway Key 或 token hash。M2-C5 覆盖 operation 详情权限/组织范围、审计
 过滤和 cursor 绑定、脱敏、四种对账动作、父/子 operation 关系、原审计不可改写、旧快照
-失败关闭、依赖/审计失败和幂等重放。APR-01a 覆盖风险与摘要稳定性、审批申请/决策/撤销的
+失败关闭、依赖/审计失败和幂等重放。M2-D 导出测试覆盖审批/payload/step-up 绑定、CSRF、
+组织范围、同键幂等与冲突、CSV 公式注入防护、敏感字段排除、token 不落查询串、会话绑定、
+首次下载消费、重复/过期 `410` 和 `export.downloaded` 审计。APR-01a 覆盖风险与摘要稳定性、审批申请/决策/撤销的
 CSRF/权限/组织范围/自审批拒绝、动作/目标/理由/payload/策略版本绑定、过期/撤销、一次性
 消费、并发复用和启动恢复失败关闭。APR-01b 覆盖回调配置成组校验、HMAC 原始 body 验签、
 时间窗、issuer/audience、nonce 重放、
@@ -480,9 +513,9 @@ essential `auth_time`/ACR 请求、未配置时失败关闭、站外返回路径
 人工重放、审批/结果审计与 outbox 原子提交、渠道 RBAC/CSRF/step-up/理由/幂等/审计、
 渠道投影与收件人限制、Webhook HMAC、HTTPS/allowlist/DNS 固定解析、SSRF 和重定向拒绝、
 fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。管理服务当前为
-`82 passed, 0 failed`，
+`86 passed, 0 failed`，
 auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，合计
-`122 passed, 0 failed`。
+`126 passed, 0 failed`。
 
 尚未验证：
 
@@ -491,9 +524,8 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - 浏览器、反向代理、真实 Cookie 域和公司 CA 的端到端演练。
 - C4-03a 的真实部署验收，以及真实共享卷上的用户级模型授权链路。
 - C4-03c 的 Docker/真实共享卷和生产部署验收；C4-04 已完成隔离真实 Magpie 的完整管理链路、
-  回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d 仍有
-  页面 E2E、停用/吊销/轮换页面和失败恢复入口待 D 完成；C5 的查询与对账目前只有
-  Mock/故障测试证据，尚未接入完整管理页面。
+  回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d/C5/M2-D
+  的基础页面和 CSV 导出已接入，浏览器 E2E、失败恢复入口、完整运营体验和生产验收仍未完成。
 - APR-01c 的代码和 Mock IdP 集成测试已完成；APR-01d/e 及真实管理 IdP step-up/MFA/ACR、
   真实飞书/OA/ServiceNow/Jira 适配器及生产回调演练、串并行审批箱、转交、break-glass、
   审批通知仍未实现/未验收。
@@ -517,12 +549,12 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
   单实例 JSON，尚未做多实例并发和真实 OA/IdP 验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。
 - 用量读取当前基于单个 `usage.jsonl` 文件；轮转、归档、超大文件和事件存储查询尚未验收。
-- CSV 导出、费用趋势图、完整管理写按钮和运营看板属于 M2-D；C5 已提供审计过滤/分页和
-  管理员操作查询 API，尚未接入完整页面。
+- 基础筛选、分页和受限 CSV 导出已接入 M2-D 管理页；费用趋势看板、Excel、对象存储、
+  异步大批量导出和完整运营体验仍未实现。
 - IPv6 允许列表当前只支持精确 `/128`。
 - 没有任何对话正文；完整内容审计属于 M4，必须单独授权和审计。
 - M2-C2/C3 的管理 API 已接入会话、CSRF、RBAC、组织范围、理由、幂等和 intent/result
   管理审计；C4-03c 已完成额度/模型 API 到 auth-service、gateway-control、apply/readback
   和同步后交付的 Mock/故障链路，C4-04 已通过完整管理到真实 Magpie 策略流 E2E。
-  Docker/真实共享卷、真实企业 IdP、反向代理、C4-03d 剩余页面、C5 生产验收和 D 仍未
-  完成，不能把 Mock 测试或隔离 E2E 通过描述成生产管理闭环。
+  Docker/真实共享卷、真实企业 IdP、反向代理、C4-03d 浏览器 E2E/恢复入口、C5 和
+  M2-D 生产验收仍未完成，不能把 Mock 测试或隔离 E2E 通过描述成生产管理闭环。

@@ -1,6 +1,6 @@
 # Magpie 企业版项目实施与运营手册
 
-状态：完整实施方案 v3.15（项目治理附件）
+状态：完整实施方案 v3.16（项目治理附件）
 
 日期：2026-11-02
 
@@ -33,16 +33,18 @@
 证据；C4-01 的 schema v1 机器协议已实现，并通过 Go 单测、gateway-key CLI 回归和隔离
 真实二进制冒烟；C4-02 `enterprise/gateway-control/` 受控适配器已实现，并通过 15 项
 Mock/故障测试。C4-03a 正式只读模型目录已实现，并通过 7 项目录专项；当前 admin-service
-82 项测试通过（62 项管理服务集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；C4-03b 的用户级
+86 项测试通过（66 项管理服务集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；C4-03b 的用户级
 `gatewayPolicy` 核心已在 auth-service 实现，
 覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 25 项测试通过。
 C4-03c 的管理 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿
 和启动恢复核心已实现，并通过 Mock/故障测试；C4-03d 部分实现：管理页已有额度/模型写
-表单和完整证据链状态，员工页已有本人额度、模型、凭证和设备只读门户；失败恢复入口、
-停用/吊销/轮换页面和查询/对账 UI 仍未实现。C4-04 完整管理到真实 Magpie 策略流
+表单、停用/吊销/轮换基础操作、审批、operation/audit 查询、人工对账和 CSV 导出入口，
+员工页已有本人额度、模型、凭证和设备只读门户；浏览器 E2E、失败恢复入口和完整运营体验
+仍未完成。C4-04 完整管理到真实 Magpie 策略流
 E2E 已通过，覆盖首次设置、双设备独立 Key、真实限额/模型拒绝、多凭证部分失败、
 refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复同步；M2-C5 的
-operation/audit 查询与人工对账后端已实现并通过 Mock/故障测试，但页面和生产验收未完成；
+operation/audit 查询与人工对账和 M2-D 核心已实现并通过 Mock/集成测试，基础页面已接入，
+生产验收尚未完成；
 APR-01a 的服务端审批、绑定、职责分离、一次性消费和系统审计已实现，APR-01b 的 HMAC/Mock
 外部审批回调适配器已实现并通过测试，APR-01c 的独立 OIDC step-up 已实现并通过 Mock IdP
 集成测试；NOTIFY-01a 的 transactional outbox、租约、幂等、退避、死信、重启恢复、
@@ -52,7 +54,7 @@ deliveries 查询和受审计人工重放已实现并通过 Mock/故障测试。
 厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/ServiceNow/Jira SDK。真实 OA 连接器、
 真实厂商网关、证书/租户配置、真实 IdP/MFA/反向代理和生产回调演练未验证；NOTIFY-01c
 SIEM transport 已实现并通过 6 项专项测试，但真实 SIEM/Collector/Syslog/生产证书未验收；
-APR-01d/e、NOTIFY-01d 和 M2-D 仍未实现。
+APR-01d/e 和 NOTIFY-01d 仍未实现；M2-D 核心已实现，生产验收尚未完成。
 真实企业 IdP、Docker Compose、真实共享卷、Windows 计划任务、反向代理、
 生产部署中的操作审计查询、中央 MCP/资源库、会话正文审计、安全运营和 HA 尚未完成生产
 验收。当前只能定位为“可演示、可受控技术试点”，不能称为“企业生产版完成”。
@@ -363,12 +365,12 @@ Issue、临时豁免期限和负责人。
 M2-C4 的目标不是“在管理页写一个额度数字”，而是证明用户级 `gatewayPolicy` 已经在所有
 活跃网关凭证上生效。C4-01 已完成底层机器协议和本地测试；C4-02 已完成受控适配器和
 15 项 Mock/故障测试，但 Docker/Compose、真实共享卷和健康检查尚未实机验收；C4-03a 已完成
-管理服务只读目录和 82 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
+管理服务只读目录和 86 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
 核心并通过 25 项测试；C4-03c 已完成管理 API、幂等签发、issuance journal、自动
 apply/readback、同步后交付、失败补偿和启动恢复的本地 Mock/故障链路，并通过 C4-04 的
-真实 Magpie 管理链路验证；真实共享卷和部署验收未完成。C4-03d 已完成管理页额度/模型
-写表单和员工只读状态门户，但页面 E2E、恢复入口和查询/对账 UI 未完成；M2-C5 已提供
-operation/audit 查询和人工对账后端并通过 Mock/故障测试。
+真实 Magpie 管理链路验证；真实共享卷和部署验收未完成。C4-03d/C5/M2-D 已完成管理页
+额度/模型写表单、停用/吊销/轮换基础操作、员工只读状态门户、审批、operation/audit 查询、
+人工对账和 CSV 导出，但浏览器 E2E、恢复入口、完整运营体验和生产验收未完成。
 C4-04 已通过隔离真实链路，仍需 Docker/共享卷、真实企业 IdP、反向代理和浏览器 E2E。
 后续必须按切片顺序交付，每个切片使用独立功能分支、独立 PR 和独立验收证据，
 不能把机器协议、适配器、管理 API 和真实 E2E 堆成一个无法审查的 PR。
@@ -377,10 +379,10 @@ C4-04 已通过隔离真实链路，仍需 Docker/共享卷、真实企业 IdP�
 | --- | --- | --- | --- | --- |
 | C4-01 | 已完成，本地测试通过 | `feat/m2-c4-gateway-contract` | `magpie gateway-key describe <id> --json` 和原子 `magpie gateway-key policy apply <id> --json` | schema v1、无秘密输出、文件锁内原子替换、`expectedPolicyRevision` 冲突不写文件、64 KiB 输入输出上限；Go 单测、CLI 回归和隔离真实二进制冒烟通过 |
 | C4-02 | 已完成 Mock/故障测试，待 Docker/真实卷验收 | `feat/m2-c4-gateway-control` | 独立的 `enterprise/gateway-control/` 服务 | 仅 describe/apply/健康检查；专用非 root 账号、固定 `GATEWAY_CONTROL_CONFIG_HOME`、独立 Bearer 服务令牌、无公网端口、无 Docker socket、写后独立回读、默认 10 秒超时并终止子进程；Docker/Compose、真实共享卷、mTLS 和生产环境未验收 |
-| C4-03a | 已实现，待真实部署验收 | `feat/m2-c4-gateway-policy` | admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、SHA-256 digest 和安全投影 | 7 项专项 + 54 项管理集成测试通过；坏文件、未知字段、重复 ID/group、空目录、未知引用和超 2 MiB 失败关闭；真实只读挂载/digest 重启待完成 |
+| C4-03a | 已实现，待真实部署验收 | `feat/m2-c4-gateway-policy` | admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、SHA-256 digest 和安全投影 | 7 项专项 + 66 项管理集成测试通过；坏文件、未知字段、重复 ID/group、空目录、未知引用和超 2 MiB 失败关闭；真实只读挂载/digest 重启待完成 |
 | C4-03b | 核心已实现，管理链路已接通 | `feat/m2-c4-gateway-policy` | auth-service 的 `gatewayPolicy`、旧 M1 `unknown` 迁移和首次初始化 | 25/25 测试已验证 quota/models 分步提交不伪造另一项、缺项 `policy_setup_required`、版本冲突、回读确认和员工门户脱敏；真实部署待验收 |
 | C4-03c | 核心已实现，Mock/故障测试通过 | `feat/m2-c4-gateway-policy` | 额度/模型管理 API、issuance journal、apply/readback 和同步后交付 | 版本与 `If-Match`、payload 指纹、apply/独立回读/原子持久化后才交付；失败补偿和启动恢复已有测试；真实环境待验收 |
-| C4-03d | 部分实现 | `feat/m2-c4-gateway-policy-ui` | 管理页额度/模型写表单、完整证据链状态和员工只读状态门户 | 管理页自动携带 CSRF/幂等键/理由/版本并区分 pending/partial/unknown；员工页展示本人额度、模型、凭证、设备和同步；页面 E2E、失败恢复入口、`dependency_invoked` 查询和人工对账待完成 |
+| C4-03d | 部分实现，基础页面已接入 | `feat/m2-c4-gateway-policy-ui` | 管理页额度/模型写表单、完整证据链状态、停用/吊销/轮换、审批、operation/audit 查询、人工对账、CSV 导出和员工只读状态门户 | 管理页自动携带 CSRF/幂等键/理由/版本并区分 pending/partial/unknown；员工页展示本人额度、模型、凭证、设备和同步；浏览器 E2E、失败恢复入口、完整运营体验和生产验收待完成 |
 | C4-04 | 完整管理链路 E2E 已通过，待部署验收 | `feat/m2-c4-gateway-policy-e2e` | 真实 Magpie E2E、故障注入和恢复证据 | 18 阶段覆盖管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、真实限额/模型拒绝、`partial_success`、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描；Docker/共享卷、真实 IdP、反向代理和浏览器 E2E 待验收 |
 
 固定信任边界：
@@ -630,7 +632,8 @@ usage.jsonl 日增量、审计事件日增量和留存天数
 - 至少一个部门有明确负责人、使用名单、培训计划和退出通道。
 - 备份、吊销、回滚、客服和值班责任明确。
 - 员工机、网关和控制面均无厂商 Key、长期员工 Key 或服务令牌泄露。
-- 试点范围不包含尚未完成生产环境验收的 C4-03c、C4-03d 剩余页面和 C5/D 自助管理能力。
+- C4-03c、C4-03d、C5 和 M2-D 的核心能力虽已实现，试点范围仍不包含尚未完成生产环境
+  验收的自助管理能力。
   C4-04 已通过隔离真实 Magpie E2E，但不代表 Docker/共享卷、真实企业 IdP、反向代理和生产
   网关已经验收；C4-03a 只提供管理端只读目录，不代表真实员工模型授权已在生产生效。
 
@@ -722,8 +725,8 @@ C4/C5/D、M3-M5 中本次实际启用的功能
 | 5 | 复核并归档 C4-01：机器协议、原子写入、冲突和秘密输出测试 | 平台/安全 | 重跑 Go 单测/CLI 回归/隔离真实二进制冒烟并保存证据 |
 | 6 | 复核并实机验收 C4-02：`gateway-control` Docker/Compose、真实共享卷、健康检查和故障恢复 | 平台/安全 | 镜像构建、Compose 启动、健康检查、文件锁、重启恢复和故障测试证据 |
 | 7 | 复核 C4-04 并验收 C4-03c/C4-03d 的真实部署：C4-04 已覆盖管理 API、issuance journal、同步后交付、失败补偿、双设备、限额/模型拒绝、refresh/rotate 继承和故障恢复；继续补齐页面 E2E、恢复入口和真实环境证据 | 平台/安全 | 真实 Compose 只读挂载/digest、真实共享卷、真实 IdP/代理、页面 E2E、故障恢复和审计失败测试 |
-| 8 | 完成 C5：operation/audit 查询、对账和子 operation | 平台/安全 | 失败可查询、可对账、审计不可修改 |
-| 9 | 完成 M2-D：管理写 UI、真实状态、看板和授权导出 | 前端/平台 | 页面 E2E、权限和状态验收 |
+| 8 | 复核 C5 核心并完成生产验收：operation/audit 查询、对账和子 operation | 平台/安全 | 失败可查询、可对账、审计不可修改；真实存储和权限证据 |
+| 9 | 复核 M2-D 核心并完成生产验收：基础管理写 UI、真实状态、CSV 导出和运营看板 | 前端/平台 | 浏览器 E2E、权限、状态、导出和真实负载验收 |
 | 10 | 建立员工/管理员/审计/SRE 培训和客服手册 | 产品/IT/SRE | 培训记录和 FAQ |
 | 11 | 启动 5-10 人试点，按周复盘并保留退出通道 | 产品/试点部门 | 周报、工单、指标和演练记录 |
 | 12 | 召开生产候选 go/no-go 会议 | 发起人/各负责人 | 签字、未验证项和回滚点 |

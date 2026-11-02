@@ -33,7 +33,9 @@ export const ROLES = Object.freeze({
     "resources.read",
     "resources.write",
     "usage.read",
+    "usage.export",
     "audit.read",
+    "audit.export",
     "operations.reconcile",
     "alerts.read",
     "alerts.respond",
@@ -93,7 +95,9 @@ export const ROLES = Object.freeze({
     "resources.read",
     "resources.write",
     "usage.read",
+    "usage.export",
     "audit.read",
+    "audit.export",
     "operations.reconcile",
     "alerts.read",
     "alerts.respond",
@@ -113,6 +117,7 @@ export const ROLES = Object.freeze({
 export const HIGH_RISK_PERMISSIONS = Object.freeze([
   "audit.content.read",
   "audit.export",
+  "usage.export",
   "roles.write",
   "system.write",
 ]);
