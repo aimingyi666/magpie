@@ -133,6 +133,7 @@ export function parseApprovalCallback(config, headers, rawBody, nowMs = Date.now
   const actorEmail = boundedText(body.actorEmail, "actorEmail", 320, { optional: true });
   const externalReference = boundedText(body.externalReference, "externalReference", 500);
   const reason = boundedText(body.reason, "reason", 500);
+  const stepId = boundedText(body.stepId, "stepId", 64, { optional: true });
 
   if (decision !== "approve" && decision !== "reject") {
     throw callbackError(
@@ -158,6 +159,9 @@ export function parseApprovalCallback(config, headers, rawBody, nowMs = Date.now
   if (actorEmail && !EMAIL_PATTERN.test(actorEmail)) {
     throw callbackError(400, "approval_callback_invalid", "actorEmail is invalid");
   }
+  if (stepId && !/^stp_[A-Za-z0-9_-]{1,60}$/.test(stepId)) {
+    throw callbackError(400, "approval_callback_invalid", "stepId is invalid");
+  }
 
   return {
     body: {
@@ -171,6 +175,7 @@ export function parseApprovalCallback(config, headers, rawBody, nowMs = Date.now
       actorEmail: actorEmail.toLowerCase(),
       externalReference,
       reason,
+      stepId,
     },
     eventDigest: digest(rawBody),
     nonceDigest: digest(nonce),

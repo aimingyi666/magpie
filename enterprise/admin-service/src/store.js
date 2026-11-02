@@ -1,6 +1,10 @@
 import fs from "node:fs/promises";
 import path from "node:path";
-import { APPROVAL_STATUSES } from "./approval.js";
+import {
+  APPROVAL_STATUSES,
+  APPROVAL_STEP_STATUSES,
+  ensureApprovalWorkflow,
+} from "./approval.js";
 import {
   NOTIFICATION_EVENT_TYPES,
   NOTIFICATION_SEVERITIES,
@@ -95,6 +99,7 @@ function validateLoaded(value) {
     throw new Error("admin store adminSystemAuditLogs must be an array");
   }
   const approvalStatuses = new Set(APPROVAL_STATUSES);
+  const approvalStepStatuses = new Set(APPROVAL_STEP_STATUSES);
   for (const [approvalId, approval] of Object.entries(value.approvalRequests)) {
     if (!approval || typeof approval !== "object" || Array.isArray(approval)) {
       throw new Error("admin store approvalRequests values must be objects");
@@ -132,12 +137,67 @@ function validateLoaded(value) {
     if (!Array.isArray(approval.stateHistory) || approval.stateHistory.length === 0) {
       throw new Error("admin store approval request stateHistory must be a non-empty array");
     }
+    ensureApprovalWorkflow(approval);
+    if (approval.workflowVersion !== 1
+        || !["serial", "parallel"].includes(approval.workflowKind)
+        || !Array.isArray(approval.steps)
+        || approval.steps.length === 0) {
+      throw new Error("admin store approval request has an invalid workflow");
+    }
+    const stepIds = new Set();
+    for (const step of approval.steps) {
+      if (!step
+          || typeof step !== "object"
+          || Array.isArray(step)
+          || typeof step.stepId !== "string"
+          || !/^stp_[A-Za-z0-9_-]{1,60}$/.test(step.stepId)
+          || stepIds.has(step.stepId)
+          || !["serial", "parallel"].includes(step.mode)
+          || !approvalStepStatuses.has(step.status)
+          || !Number.isSafeInteger(step.order)
+          || step.order < 1
+          || !Number.isSafeInteger(step.requiredApprovers)
+          || step.requiredApprovers < 1
+          || !Number.isSafeInteger(step.quorum)
+          || step.quorum < 1
+          || step.quorum > step.requiredApprovers) {
+        throw new Error("admin store approval request has an invalid workflow step");
+      }
+      stepIds.add(step.stepId);
+      for (const key of [
+        "eligibleSubjectIds",
+        "eligibleRoles",
+        "ineligibleSubjectIds",
+        "decidedBySubjectIds",
+      ]) {
+        if (!Array.isArray(step[key])
+            || step[key].some((item) => typeof item !== "string" || !item)) {
+          throw new Error(`admin store approval step ${key} is invalid`);
+        }
+      }
+      if (!Array.isArray(step.transferHistory)
+          || step.transferHistory.some((entry) => (
+            !entry
+            || typeof entry !== "object"
+            || Array.isArray(entry)
+            || !["fromSubjectId", "toSubjectId", "actorSubjectId", "reason", "at"]
+              .every((key) => typeof entry[key] === "string")
+          ))) {
+        throw new Error("admin store approval step transferHistory is invalid");
+      }
+    }
   }
   for (const [decisionId, decision] of Object.entries(value.approvalDecisions)) {
     if (!decision || typeof decision !== "object" || Array.isArray(decision)
         || decision.id !== decisionId
         || !value.approvalRequests[decision.approvalId]) {
       throw new Error("admin store approvalDecisions must reference a stored approval");
+    }
+    if (decision.stepId != null
+        && (typeof decision.stepId !== "string"
+          || !value.approvalRequests[decision.approvalId].steps
+            .some((step) => step.stepId === decision.stepId))) {
+      throw new Error("admin store approvalDecisions must reference a stored workflow step");
     }
   }
   for (const [approvalId, consumption] of Object.entries(value.approvalConsumptions)) {
@@ -159,7 +219,7 @@ function validateLoaded(value) {
         || !value.approvalRequests[event.approvalId]
         || !/^[a-f0-9]{64}$/.test(String(event.eventDigest || ""))
         || !/^[a-f0-9]{64}$/.test(String(event.nonceDigest || ""))
-        || !["approved", "rejected"].includes(event.outcome)) {
+        || !["approved", "rejected", "step_progressed"].includes(event.outcome)) {
       throw new Error("admin store approvalCallbackEvents contains an invalid event");
     }
     for (const key of [

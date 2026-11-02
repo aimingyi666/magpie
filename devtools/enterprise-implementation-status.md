@@ -8,7 +8,8 @@
 
 2026-11-02 方案基线更新到 v3.16。M2-C1 的 auth-service 内部写接口、M2-C2 的四个管理写
 接口和 M2-C3 的幂等/管理审计状态机已实现并通过 Mock 测试。当前
-`feat/notify-01c-siem` 分支实现了 **M2-C5** 的 operation 详情、脱敏审计分页和
+`feat/m2-e2-approval-inbox` 分支实现了 **APR-01d 审批箱**的审批视图、串行/并行步骤、
+quorum、显式 `stepId`、转交和申请人撤回，并在既有 **M2-C5** operation 详情、脱敏审计分页和
 四种人工对账动作，**M2-E1/APR-01a** 的服务端审批、绑定摘要、职责分离、一次性消费和
 审批系统审计，**APR-01b** 的 HMAC 外部审批回调适配器，以及 **APR-01c** 的独立 OIDC
 step-up；对账生成子 operation，不修改原 intent/result。APR-01c 覆盖独立 OIDC Client、
@@ -26,9 +27,9 @@ fanout 去重，以及统一 HTTPS 渠道适配器：仅允许 HTTPS:443、host 
 人工对账、用量/审计 CSV 授权导出和操作历史。导出要求已批准或已消费审批、fresh step-up、
 CSRF、RBAC、组织范围、理由、`approvalId` 和 `Idempotency-Key`，使用一次性 Bearer token、
 绑定同一管理员会话 Cookie，首次下载即消费并记录 `export.downloaded` 系统审计。
-admin-service 当前通过 **86 passed, 0 failed**（66 项管理服务
+admin-service 当前通过 **90 passed, 0 failed**（70 项管理服务
 集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项），auth-service 通过 **25 passed, 0 failed**，
-gateway-control 通过 **15 passed, 0 failed**，总计 **126 passed, 0 failed**。**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
+gateway-control 通过 **15 passed, 0 failed**，总计 **130 passed, 0 failed**。**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
 冒烟；**C4-02** `gateway-control` 受控适配器已通过 15 项 Mock/故障测试；**C4-03a**
 正式只读模型目录、**C4-03b/C4-03c** 用户级策略、幂等签发、issuance journal、自动
 apply/独立回读、失败补偿、启动恢复和同步后交付均已实现，并通过 Mock/故障测试。
@@ -42,7 +43,8 @@ operation/audit 查询、对账和 CSV 导出；浏览器 E2E、失败恢复入�
 `admin-service -> auth-service -> gateway-control -> Magpie -> Mock 上游`。Docker/Compose、
 真实共享卷、真实企业 IdP、反向代理、浏览器自动化 E2E 和生产验收仍未完成。APR-01b 已
 实现 HMAC/Mock 回调协议，但真实 OA/飞书/ServiceNow/Jira 连接器未验证；APR-01c 的
-step-up 已完成代码和 Mock IdP 集成测试，APR-01d/e 的审批箱和 break-glass 仍未实现；
+step-up 已完成代码和 Mock IdP 集成测试，APR-01d 的审批箱、串并行步骤、quorum、转交和
+撤回已部分实现；APR-01e 的 break-glass 仍未实现；
 NOTIFY-01a 的 outbox 核心、NOTIFY-01b 的渠道管理/统一 HTTPS 网关适配器和 NOTIFY-01c 的
 SIEM transport 已实现并通过 Mock/故障测试；邮件、IM、工单当前是 HTTPS 网关契约，不是
 原生 SMTP、Graph、飞书、Teams、ServiceNow 或 Jira SDK。NOTIFY-01d 的 rules/suppress、
@@ -78,8 +80,8 @@ M2-C5 已补 operation/audit 查询和人工对账后端；M2-E1/APR-01a 已补�
 风险、payload/binding SHA-256、非自审批、过期/撤销校验和原子一次性消费。完整管理到真实
 Magpie 策略流 E2E 已经通过。APR-01b 的 HMAC/Mock 外部回调协议和 APR-01c 的独立 OIDC
 step-up 已实现；NOTIFY-01b 已提供渠道管理和经过 SSRF/秘密扫描的 HTTPS 渠道适配器，
-NOTIFY-01c 已提供固定 L0 schema 的 SIEM transport 和 dead-letters API。但审批管理 UI、
-真实 OA 连接器、真实 IdP/MFA、审批箱、break-glass、真实 SIEM 接入、通知运营页、
+NOTIFY-01c 已提供固定 L0 schema 的 SIEM transport 和 dead-letters API。审批箱和基础
+多步骤管理 UI 已实现，但真实 OA 连接器、真实 IdP/MFA、break-glass、真实 SIEM 接入、通知运营页、
 真实厂商连接器、失败恢复入口、停用/吊销/轮换
 页面、完整管理写 UI 和真实身份管理链路仍未实现/未验收。
 M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3/C4-02/C4-03c 尚未完成真实企业
@@ -91,7 +93,7 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | 使用者 | 当前真实可用 | 当前不可用/不能承诺 |
 | --- | --- | --- |
 | 员工 | 浏览器 OIDC 登录、本人额度/模型/凭证/设备/同步状态只读门户、Mock/本地真实 issuer 加入、设备注册、短期 Key、通过本地 Magpie 调用企业网关、自动刷新脚本、停用后失效 | 不能只靠网页修改本机 Agent；真实企业 IdP、公司反向代理、Windows 计划任务实机、MDM 安装未验收 |
-| 管理员 | 独立管理 OIDC + MFA/ACR、会话/CSRF/IP、RBAC、组织范围，用户/部门/设备/凭证/模型/用量只读视图，正式只读模型目录，四个受控管理写 API，以及额度/模型策略写表单；策略写入会经 auth-service 自动 apply/readback，同步完成前不交付 Key，并返回 `known/pending/partial_success/unknown`；写操作已有幂等重放/冲突、`operationId`、intent/result 审计、operation/audit 查询和受控人工对账；基础停用/吊销/轮换和审批页面、用量/审计筛选及 CSV 授权导出已接入；APR-01a 已提供审批申请/决策/撤销 API、审批权限、组织范围校验和一次性消费，APR-01b 已提供 HMAC 外部审批回调适配器，APR-01c 已提供独立 step-up 和 H/C 写操作门禁 | 真实 OA 连接器、真实管理 IdP/MFA、审批箱和 break-glass 未实现/未验收；失败目标恢复入口、完整运营体验、浏览器 E2E 和看板未完成；真实 Magpie/共享卷/IdP 未验收；不能管理 MCP/资源库 |
+| 管理员 | 独立管理 OIDC + MFA/ACR、会话/CSRF/IP、RBAC、组织范围，用户/部门/设备/凭证/模型/用量只读视图，正式只读模型目录，四个受控管理写 API，以及额度/模型策略写表单；策略写入会经 auth-service 自动 apply/readback，同步完成前不交付 Key，并返回 `known/pending/partial_success/unknown`；写操作已有幂等重放/冲突、`operationId`、intent/result 审计、operation/audit 查询和受控人工对账；基础停用/吊销/轮换、审批箱、串并行步骤、quorum、转交/撤回、用量/审计筛选及 CSV 授权导出已接入；APR-01a 已提供审批申请/决策/撤销 API、审批权限、组织范围校验和一次性消费，APR-01b 已提供 HMAC 外部审批回调适配器，APR-01c 已提供独立 step-up 和 H/C 写操作门禁 | 真实 OA 连接器、真实管理 IdP/MFA、APR-01e break-glass 未实现/未验收；失败目标恢复入口、完整运营体验、浏览器 E2E 和看板未完成；真实 Magpie/共享卷/IdP 未验收；不能管理 MCP/资源库 |
 | 管理员能看到的员工信息 | 姓名/邮箱/稳定 ID/部门/状态、设备/版本/心跳、凭证元数据、模型、Token/费用/错误/时间 | 不能看对话正文；当前只有 L0 用量元数据；L1/L2/L3 属于 M4 |
 | 安全/审计人员 | 只读用量和授权元数据，角色撤销在下一请求生效；可经授权查询 SIEM 死信元数据 | 没有正文查看、导出审批、告警阻断、真实 SIEM 检索、二次授权 |
 | 全公司配置 | 管理服务从只读 `ADMIN_MODEL_CATALOG_PATH` 加载正式目录并把 group/provider 选择器展开为稳定模型 ID；auth-service 保存和同步用户级策略，gateway-control 执行原子 apply/独立回读；网关提供模型白名单、额度和 IP 白名单 | 当前没有中央 MCP 服务器、资源库、Skills/Instructions/Subagents 下发；M3 才实现；真实共享卷和企业环境未验收 |
@@ -118,7 +120,7 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | M2-C4-03d 页面与运营状态 | 部分实现 | 管理页有额度/模型写表单和完整证据链状态；员工页有本人额度、模型、凭证、设备、同步和恢复提示只读视图；M2-D 已补基础写操作、审批、查询、对账和导出页面，但页面 E2E、恢复入口和完整运营体验未完成 |
 | M2-C4-04 真实 Magpie 行为 E2E | 完整管理到真实策略流已通过 | 管理 OIDC/CSRF、quota/models 分步设置、双设备 Key、真实模型拒绝和 Token 限额、`partial_success`、refresh/rotate 策略继承、故障后 `unknown/pending_sync`、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描均已验证 |
 | M2-C5 操作/审计查询与对账 | 后端已实现并通过 Mock/故障测试；M2-D 已接入基础页面 | operation 详情、脱敏审计分页、签名 cursor、组织范围过滤和四种人工对账动作；原 operation/审计不可改写；真实审计存储、完整运营体验和生产运维演练待验收 |
-| M2-E1 APR-01a 服务端审批 | 已实现并通过 Mock/故障测试 | 24 小时有效期、L/M/H/C 风险、规范化 payload/binding SHA-256、申请/批准/拒绝/过期/撤销/预留/消费状态机、禁止自审批、一次性消费、启动恢复失败关闭和系统审计；APR-01c 的独立 step-up 已完成代码和 Mock IdP 集成测试；真实 OA 连接器、真实 IdP/MFA、审批箱和 break-glass 未实现/未验收 |
+| M2-E1 APR-01a/d 审批与审批箱 | 已实现核心并通过 Mock/故障测试 | 24 小时有效期、L/M/H/C 风险、规范化 payload/binding SHA-256、申请/批准/拒绝/过期/撤销/撤回/转交/预留/消费状态机、禁止自审批、一次性消费、启动恢复失败关闭和系统审计；审批箱支持串行/并行步骤、显式 `stepId`、quorum 和组织范围筛选；APR-01c 的独立 step-up 已完成代码和 Mock IdP 集成测试；真实 OA 连接器、真实 IdP/MFA、APR-01e break-glass 和浏览器 E2E 未实现/未验收 |
 | APR-01b 外部审批回调适配器 | 已实现 HMAC/Mock 协议并通过测试 | 原始 body HMAC-SHA256、时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离、审批状态迁移和系统审计；回调不直接执行管理动作；真实飞书/OA/ServiceNow/Jira 连接器和生产回调演练未验证 |
 | APR-01c 独立 OIDC step-up | 已实现并通过 Mock IdP 集成测试 | 独立 OIDC Client/secret/redirect/scopes；`prompt=login`、`max_age`、essential `auth_time`；ACR/MFA、IdP `sub`/email、会话/IP/User-Agent/角色权限/组织范围摘要绑定；H/C 风险写操作和审批门禁；未配置失败关闭；logout/会话过期清理断言；真实 IdP、MFA、反向代理、浏览器和生产验收未完成 |
 | NOTIFY-01a transactional outbox | 已实现并通过 Mock/故障测试 | 8 种 L0 事件、字段白名单、稳定 `eventId`/`deliveryId`、原子提交、租约、指数退避、死信、重启恢复、deliveries 查询和受审计人工重放 |
@@ -429,8 +431,9 @@ admin-service
 - 启动恢复把遗留 `reserved` 审批保守地标记为 `consumed`，防止进程重启后重复授权；审批
   申请、决策、撤销、消费和恢复均写系统审计。
 - APR-01b 已实现 HMAC/Mock 外部审批回调协议并通过测试；APR-01c 的独立 OIDC step-up
-  已完成代码和 Mock IdP 集成测试；尚未实现/未验收：审批管理 UI、真实飞书/OA/
-  ServiceNow/Jira 连接器、真实 IdP/MFA、串并行多级审批箱、转交、break-glass 和审批通知。
+  已完成代码和 Mock IdP 集成测试；APR-01d 已实现审批箱、串并行步骤、quorum、转交、撤回
+  和基础管理 UI。尚未实现/未验收：真实飞书/OA/ServiceNow/Jira 连接器、真实 IdP/MFA、
+  break-glass、浏览器审批 E2E 和审批通知。
 
 ### APR-01c 独立 OIDC step-up
 
@@ -746,9 +749,10 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 8. 多实例、共享存储、限流分布式化和高可用未实现。
 9. APR-01a 已完成审批 API、状态机、绑定校验、职责分离、一次性消费和系统审计的
    Mock/故障测试；APR-01b 的 HMAC 回调适配器已覆盖原始 body 验签、时间窗、nonce
-  防重放、issuer/audience、eventId 幂等、职责分离和系统审计。APR-01c 的独立 OIDC
-  step-up 已完成代码和 Mock IdP 集成测试；基础审批页面已实现，但真实管理 IdP/MFA、真实
-  OA 连接器、完整串并行审批箱、转交/撤回、break-glass 和生产审批演练未实现/未验收。
+   防重放、issuer/audience、eventId 幂等、职责分离和系统审计。APR-01c 的独立 OIDC
+   step-up 已完成代码和 Mock IdP 集成测试；基础审批页面已实现，APR-01d 的完整串并行
+   审批箱、quorum、转交和撤回已实现并通过 Mock/集成测试；真实管理 IdP/MFA、真实
+   OA 连接器、APR-01e break-glass 和生产审批演练未实现/未验收。
    NOTIFY-01a 已实现 outbox、租约恢复、重试、死信、deliveries 查询和死信人工重放；
    NOTIFY-01b 已实现渠道管理、渠道测试和统一 HTTPS 邮件/IM/Webhook/工单网关适配器，
    但没有真实厂商连接和生产投递验收。`operation.audit_failed` 目前只有 schema，尚无可靠
@@ -803,7 +807,7 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 6. M2-C3 已完成 Mock 验证：幂等重放/冲突、`operationId`、intent/result 审计和审计失败阻断
    均已覆盖；下一步把同一流程接入真实存储和真实管理请求链路。
 7. C4-02 受控适配器已通过 15 项 Mock/故障测试；C4-03b/C4-03c 的 auth-service 核心链路
-   已通过 25 项 auth 回归、86 项 admin 测试和 15 项 gateway-control 测试。下一步在
+   已通过 25 项 auth 回归、90 项 admin 测试和 15 项 gateway-control 测试。下一步在
    Docker 可用环境验证镜像、Compose、
    健康检查和真实共享卷故障恢复；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。
 8. M2-C5 的 `audit-logs`、`operations/{id}`、人工对账和补偿后端已通过 Mock/故障测试；
@@ -811,8 +815,9 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
    下一步在真实审计存储和运维流程中验收，并补齐浏览器 E2E、失败恢复入口、完整看板和
    异步/对象存储导出。
 9. APR-01a 已实现服务端审批和一次性消费，APR-01b 已实现 HMAC/Mock 外部审批回调适配器，
-   APR-01c 已实现独立 OIDC step-up 和 H/C 门禁并通过 Mock IdP 测试；下一步完成真实
-   IdP/MFA/反向代理验收，再按 APR-01d/e 接审批箱和 break-glass、接入真实 OA 连接器，
+   APR-01c 已实现独立 OIDC step-up 和 H/C 门禁并通过 Mock IdP 测试，APR-01d 已实现
+   审批箱、串并行步骤、quorum、转交和撤回；下一步完成真实 IdP/MFA/反向代理和浏览器 E2E
+   验收，再实现 APR-01e break-glass、接入真实 OA 连接器，
    并继续 NOTIFY-01d 的规则、抑制、聚合、升级和运营页；NOTIFY-01c 的真实 SIEM 接入仍需验收。
 10. NOTIFY-01a 已完成与审批/operation 业务审计同一次原子存储提交的 outbox、租约恢复、
     重试、死信和人工重放；NOTIFY-01b 已接入经过 SSRF/秘密扫描的邮件、企业 IM、
@@ -851,4 +856,5 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 | APR-01c 独立 OIDC step-up | `feat/apr-01c-step-up` / `enterprise/admin-service/` | 独立 OIDC Client、PKCE、`prompt=login`、`max_age`、`auth_time`、ACR/MFA、IdP `sub`/email、会话/IP/User-Agent/角色权限/组织范围绑定、H/C 门禁、未配置失败关闭、logout/会话过期清理和管理页重新认证入口 | `Get-ChildItem src\*.js \| ForEach-Object { node --check $_.FullName }`；`node --test test\admin-service.test.mjs test\model-catalog.test.mjs` | 该阶段回归 admin `61 passed, 0 failed` | 真实 IdP、真实 MFA/条件访问、反向代理、浏览器流程和 CI 生产验收未执行 |
 | NOTIFY-01a transactional outbox | `feat/notify-01a-outbox` / `enterprise/admin-service/` | 8 种 L0 审批/operation 事件；字段白名单与 `schemaVersion=1`；稳定 `eventId`/`deliveryId` 幂等；pending/leased/delivering/delivered/retry_wait/dead_letter；1/5/15/60/360 分钟退避；租约、并发串行、重启恢复；deliveries 查询和死信人工重放；审批审计/结果审计与 outbox 同一次 JSON 存储原子提交；SIGTERM 先停 dispatcher | `Get-ChildItem src\*.js \| ForEach-Object { node --check $_.FullName }`；`node --test test\admin-service.test.mjs test\model-catalog.test.mjs`；`node --test enterprise\auth-service\test\auth-service.test.mjs`；`node --test enterprise\gateway-control\test\gateway-control.test.mjs` | admin `67 passed, 0 failed`；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `107 passed, 0 failed` | 没有邮件/IM/Webhook/SIEM/工单 transport，正常启动不创建 dispatcher；没有 channels/rules/suppress/test-channel API 或运营 UI；`operation.audit_failed` 无触发点；查询无 cursor；真实渠道、生产存储和通知闭环未验收 |
 | NOTIFY-01c SIEM transport | `feat/notify-01c-siem` / `enterprise/admin-service/` | `siem` 渠道及 `http-collector`/`otlp-http`/`syslog-tls`；固定 L0 schema；HTTPS:443/TLS:6514；host allowlist、固定 DNS、私网/回环/链路本地/云元数据拒绝；HTTP/OTLP 可选 Bearer `secretRef`，Syslog 禁止 `secretRef`；默认 32 KiB 上限（可配 1-64 KiB）；critical 优先；dispatcher 轮询不超过 5 分钟；dead-letters API；新增 `security.access_denied`/`auth_failed`/`break_glass_used`/`anomaly_detected` | `node --check` 全部管理服务 JS；`node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs enterprise/admin-service/test/notification-channels.test.mjs enterprise/admin-service/test/notification-siem.test.mjs` | admin `82 passed, 0 failed`（62 项管理集成 + 7 项目录 + 7 项通知渠道 + 6 项 SIEM）；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `122 passed, 0 failed` | 真实 SIEM/Collector/Syslog/生产证书未验收；rules/suppress、聚合、升级和完整运营 UI 未实现 |
-| M2-D 管理运营 | `feat/m2-d-admin-operations` / `enterprise/admin-service/` | 基础管理写页面、审批申请/决策/撤销、operation/audit 查询、人工对账、用量/审计 CSV 授权导出、一次性下载 token 和操作历史；导出要求审批、fresh step-up、CSRF、RBAC、组织范围、理由和幂等 | `node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs enterprise/admin-service/test/notification-channels.test.mjs enterprise/admin-service/test/notification-siem.test.mjs` | admin `86 passed, 0 failed`（66 项管理集成 + 7 项目录 + 7 项通知渠道 + 6 项 SIEM）；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `126 passed, 0 failed` | 浏览器 E2E、失败恢复入口、真实数据/负载、完整运营看板、Excel、对象存储、异步大批量导出、分布式锁和生产验收未完成 |
+| M2-D 管理运营 | `feat/m2-d-admin-operations` / `enterprise/admin-service/` | 基础管理写页面、审批申请/决策/撤销、operation/audit 查询、人工对账、用量/审计 CSV 授权导出、一次性下载 token 和操作历史；导出要求审批、fresh step-up、CSRF、RBAC、组织范围、理由和幂等 | `node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs enterprise/admin-service/test/notification-channels.test.mjs enterprise/admin-service/test/notification-siem.test.mjs` | 当时阶段记录为 admin `86 passed, 0 failed`；后续 APR-01d 已把当前 admin 回归提升到 `90 passed, 0 failed` | 浏览器 E2E、失败恢复入口、真实数据/负载、完整运营看板、Excel、对象存储、异步大批量导出、分布式锁和生产验收未完成 |
+| APR-01d 审批箱与多步骤审批 | `feat/m2-e2-approval-inbox` / `enterprise/admin-service/` | 审批箱视图、串行/并行步骤、显式 `stepId`、quorum、转交、申请人撤回、外部回调 `stepId`、步骤摘要和管理页操作 | `node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs enterprise/admin-service/test/notification-channels.test.mjs enterprise/admin-service/test/notification-siem.test.mjs` | admin `90 passed, 0 failed`（70 项管理集成 + 7 项目录 + 7 项通知渠道 + 6 项 SIEM）；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `130 passed, 0 failed` | APR-01e break-glass、真实 OA/IdP/MFA、浏览器 E2E、审批通知和生产验收未完成 |

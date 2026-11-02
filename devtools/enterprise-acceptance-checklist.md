@@ -65,7 +65,7 @@
 | W-01 | 停用/启用员工 | 权限、范围、幂等、理由、CSRF、审计和依赖失败正确 | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
 | W-02 | 吊销设备 | 当前 Key 失效、刷新拒绝、设备和凭证状态正确 | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
 | W-03 | 轮换凭证 | 旧 Key 失效、新 Key 可用、失败无孤儿 Key | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
-| W-04a | 正式模型目录（C4-03a） | 只读 `ADMIN_MODEL_CATALOG_PATH`；`schemaVersion=1`、稳定模型 ID、显式 Provider 通配符、group 只引用已知模型、2 MiB 上限、目录摘要和稳定错误码 | 已实现；7 项专项和 66 项管理集成测试通过；真实 Docker/只读挂载/digest 重启未验收；auth-service 不加载目录，只接收稳定模型 ID |
+| W-04a | 正式模型目录（C4-03a） | 只读 `ADMIN_MODEL_CATALOG_PATH`；`schemaVersion=1`、稳定模型 ID、显式 Provider 通配符、group 只引用已知模型、2 MiB 上限、目录摘要和稳定错误码 | 已实现；7 项专项和 70 项管理集成测试通过；真实 Docker/只读挂载/digest 重启未验收；auth-service 不加载目录，只接收稳定模型 ID |
 | W-04b | 首次策略初始化与 `unknown` 迁移（C4-03b） | 旧 M1 只迁移为 `quotaStatus/modelStatus=unknown`；quota/models 可任意顺序首次提交但不得伪造缺项；缺项返回 `policy_setup_required`；两项完整并逐凭证回读后才 `known` | auth-service 核心已实现，`25/25` 测试通过；管理端已编排额度/模型写入；C4-04 已验证首次设置、真实请求限额/模型拒绝和 refresh/rotate 继承；真实 Compose/共享卷和真实 IdP 尚未验收 |
 | W-04c | 管理 API 与同步后交付（C4-03c） | `PUT quota`/`PATCH models` 具备会话、CSRF、RBAC、范围、理由、版本、payload 指纹和 intent/result 审计；issuance journal -> 签发 -> apply -> 独立回读 -> 原子持久化 -> 才交付；同步前客户端拿不到 Key；任一步失败撤销且启动恢复处理可确认的孤儿 Key | 核心已实现并通过 Mock/故障测试；C4-04 已用隔离真实 Magpie 覆盖 apply/readback、多凭证部分失败和恢复；真实共享卷、真实 IdP 和生产验收未完成 |
 | W-04d | 页面与运营状态（C4-03d） | `unknown/pending/partial_success/dependency_invoked` 显示真实状态、计数、失败凭证和恢复入口；只有 `succeeded + known + synced + 回读一致` 显示“已生效”；禁止自动重试不确定操作 | 部分实现；管理页已有额度/模型写表单、完整证据链和失败证据，员工页已有本人额度/模型/凭证/设备只读门户；基础停用/吊销/轮换、operation/audit 查询和人工对账页面已接入；浏览器 E2E、失败恢复入口、完整运营体验和生产验收未完成 |
@@ -105,7 +105,7 @@ Docker/Compose 构建、启动、健康检查和真实共享卷验证状态
 ```
 
 C4-01 已完成本地单元、CLI 回归和隔离真实二进制冒烟；C4-02 已完成 Node 语法检查和
-15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项；当前管理服务 86/86 通过（66 项管理服务
+15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项；当前管理服务 90/90 通过（70 项管理服务
 集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；真实 Compose、只读挂载和 digest
 重启仍未验收。
 C4-03b/C4-03c/C5 核心已通过
@@ -123,7 +123,7 @@ delivery；邮件、IM 和工单是厂商 HTTPS 网关契约，不是原生 SMTP
 ServiceNow/Jira SDK。NOTIFY-01c 的 SIEM transport、固定 L0 schema 和 dead-letters API
 已实现并通过 6 项专项测试；NOTIFY-01d 的规则/抑制、聚合、升级和运营页未实现。真实
 SIEM/Collector/Syslog/生产证书、真实厂商网关、证书、租户配置和投递未验收。页面 E2E、恢复入口、真实共享卷、真实企业 IdP/MFA、反向代理、
-C5 和 M2-D 生产验收、真实 OA 连接器、完整审批箱、break-glass 以及失败恢复与完整运营体验仍未完成/验收。
+C5 和 M2-D 生产验收、真实 OA 连接器、break-glass 以及失败恢复与完整运营体验仍未完成/验收。
 后续应至少运行：
 
 W-04a-d 还必须逐项保留以下证据：
@@ -175,7 +175,7 @@ v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPo
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 86/86 已覆盖 |
+| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 90/90 已覆盖 |
 | R-02 | 用量归属 | `callerKeyId -> credential -> user -> 组织` 正确 | Mock 已覆盖；真实 usage 卷未验收 |
 | R-03 | 时间序列 | `groupBy=user/department/model/agent`，`bucket=hour/day` | Mock 已覆盖 |
 | R-04 | 数据损坏 | 缺失、尾半行、坏 JSON、超行/超字段/超记录返回稳定存储错误 | Mock 已覆盖 |
@@ -191,7 +191,7 @@ v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPo
 测试；NOTIFY-01b 的渠道管理 API 和统一 HTTPS 渠道适配器已实现并通过 Mock/故障测试，
 支持邮件/IM/Webhook/工单网关契约、HMAC Webhook 和防 SSRF；NOTIFY-01c 的 SIEM transport、
 固定 L0 schema 和 dead-letters API 已实现并通过 6 项专项测试。NOTIFY-01d 的规则/抑制、
-聚合、升级和运营页尚未实现。真实 OA/IdP/MFA/反向代理、内置审批箱、break-glass、真实
+聚合、升级和运营页尚未实现。真实 OA/IdP/MFA/反向代理、break-glass、真实
 SIEM/Collector/Syslog/生产证书、真实厂商网关和真实通知投递尚未验收。Mock、页面截图或存在
 `approvalId` 字段本身都不算生产验收通过；审批生产验收
 至少使用真实管理 IdP 和真实 OA 回调，通知至少使用真实邮件/IM 测试域、
@@ -207,13 +207,13 @@ SIEM/Collector/Syslog/生产证书、真实厂商网关和真实通知投递尚�
 | AP-02 | 伪造与缺失审批 | 缺失、未知、伪造、跨环境或不属于当前组织的 `approvalId` 一律 `403 approval_invalid`，高风险业务依赖调用为 0 | APR-01a Mock 范围已实现：缺失、未知、跨环境和绑定不匹配失败关闭；真实 IdP/OA 验收待完成 |
 | AP-03 | 过期与撤销 | 审批过期、审批人撤回、管理员撤销或角色/组织范围变化后立即失效；每次失败有稳定错误码和审计 | APR-01a Mock 范围已实现过期、撤销和消费失败关闭；角色/组织范围变化后的真实 IdP 联动待验收 |
 | AP-04 | payload 与目标绑定 | 审批后修改动作、目标 ID、批量成员、额度、模型、资源版本或组织范围，旧审批全部失效 | APR-01a Mock 范围已实现动作、目标、组织、理由、payload 和策略版本变更失效；批量成员和真实资源版本待后续工作包 |
-| AP-05 | 职责分离与自审批 | 申请人不能审批自己的请求；需要 N 人/串并行步骤时，少一步、重复一人或不合格审批人均失败关闭 | APR-01a Mock 范围已实现自审批拒绝；N 人/串并行步骤、转交和双人复核未实现 |
+| AP-05 | 职责分离与自审批 | 申请人不能审批自己的请求；需要 N 人/串并行步骤时，少一步、重复一人或不合格审批人均失败关闭 | APR-01a/01d Mock 范围已实现自审批拒绝、N 人/串并行步骤、quorum、转交和撤回；真实多管理员流程未验收 |
 | AP-06 | 外部审批回调 | 飞书/OA/ServiceNow/Jira 回调验签、issuer、audience、时间窗、nonce 和重放缓存均有效；重放、错误签名和错误租户不改变审批状态 | APR-01b HMAC/Mock 适配器已实现并通过原始 body 验签、300 秒时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离和系统审计测试；真实飞书/OA/ServiceNow/Jira 连接器与生产回调演练未实现/验收 |
 | AP-07 | step-up 二次认证 | 独立管理 OIDC Client、PKCE、MFA/ACR 和 `max_age` 生效；未完成 MFA、ACR 不足、authTime 过期、会话/IP/角色绑定变化时高风险动作失败关闭 | 代码和 Mock IdP 集成测试已完成：独立 Client/PKCE、`prompt=login`、`max_age`、essential `auth_time`、ACR/MFA、IdP `sub`/email，以及会话/IP/User-Agent/角色权限/组织范围绑定；未配置时 `503 step_up_unavailable` 失败关闭。真实企业 IdP、MFA/条件访问、反向代理和浏览器流程未验收 |
 | AP-08 | 一次性消费与并发 | 同一审批被重复请求、并发执行、进程重启后重试时只产生一个业务结果；`approval_consumptions` 唯一约束和审计证据一致 | APR-01a Mock 范围已实现原子预留、一次性消费、并发返回 `409 approval_consumed` 和启动恢复失败关闭；真实多实例/存储验收待完成 |
 | AP-09 | break-glass | 仅授权角色可发起，15 分钟自动过期，不能静默使用；5 分钟内产生高风险告警/工单，24 小时内完成事后复核并保全证据 | 未实现 |
 | AP-10 | operation 与审计串联 | 审批、intent/result、operation、通知和外部工单可按 `operationId` 串联；拒绝、过期、撤销、消费和补偿均可追溯且不含秘密 | APR-01a Mock 范围已实现审批、operation 和系统审计串联；通知、外部工单和真实审计存储待验收 |
-| AP-11 | 内置审批运营 | 审批箱支持串并行步骤、转交、撤回、过期和双人复核；非法状态迁移被拒绝，所有操作有审计 | 未实现 |
+| AP-11 | 内置审批运营 | 审批箱支持串并行步骤、转交、撤回、过期和双人复核；非法状态迁移被拒绝，所有操作有审计 | APR-01d 核心已实现并通过 Mock/集成测试；真实 OA/IdP/MFA 和浏览器审批 E2E 未验收 |
 | AP-12 | 依赖失败语义 | OA、IdP、审批存储、审计或 operation 存储不可用时失败关闭，返回稳定错误且不执行业务动作；不得降级为“默认批准” | APR-01a Mock 范围已实现审批/审计存储失败关闭和稳定错误码；真实 OA/IdP 依赖失败待验收 |
 
 ### 7.2 通知、Webhook、SIEM 与工单

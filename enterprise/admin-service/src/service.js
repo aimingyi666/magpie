@@ -11,6 +11,7 @@ import {
   adminSubjectId,
   authorize,
   effectiveAccess,
+  ROLES,
   visibleOrgUnits,
 } from "./rbac.js";
 import {
@@ -41,11 +42,14 @@ import {
 import {
   APPROVAL_POLICY_VERSION,
   APPROVAL_STATUSES,
+  approvalActiveStepIds,
   approvalBindingDigest,
   approvalConsumptionFailure,
   approvalIsExpired,
   approvalPayloadDigest,
   approvalRequiredForAction,
+  approvalWorkflowFailure,
+  ensureApprovalWorkflow,
   normalizedApprovalPayload,
   publicApproval,
   riskForAction,
@@ -134,10 +138,14 @@ const NON_RETRYABLE_OPERATION_ERRORS = new Set([
   "approval_invalid",
   "approval_expired",
   "approval_revoked",
+  "approval_withdrawn",
   "approval_consumed",
+  "approval_incomplete",
   "approval_target_mismatch",
   "approval_payload_mismatch",
   "approval_separation_required",
+  "approval_step_ineligible",
+  "approval_step_unavailable",
   "approval_unavailable",
   "csrf_invalid",
   "forbidden_role",
@@ -1051,13 +1059,26 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
     : "";
   const approvalList = can("approvals.read")
     ? `<form id="approval-filter" class="toolbar">
+        <label>View
+          <select name="view">
+            <option value="pending">My approval inbox</option>
+            <option value="requested">Requested by me</option>
+            <option value="completed">Completed</option>
+            <option value="closed">Closed</option>
+            <option value="">All approvals</option>
+          </select>
+        </label>
         <label>Status
           <select name="status">
             <option value="">All states</option>
             <option value="requested">Requested</option>
+            <option value="pending_approval">Pending approval</option>
             <option value="approved">Approved</option>
             <option value="rejected">Rejected</option>
             <option value="revoked">Revoked</option>
+            <option value="withdrawn">Withdrawn</option>
+            <option value="expired">Expired</option>
+            <option value="reserved">Reserved</option>
             <option value="consumed">Consumed</option>
           </select>
         </label>
@@ -1082,6 +1103,9 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
     ? `<form id="approval-decision-form" class="stack-form">
         <h3>Decide selected approval</h3>
         <p id="approval-selection">No approval selected.</p>
+        <label>Step ID (required when several steps are active)
+          <input name="stepId" maxlength="64" placeholder="stp_security">
+        </label>
         <label>Decision
           <select name="decision"><option value="approve">Approve</option><option value="reject">Reject</option></select>
         </label>
@@ -1096,6 +1120,28 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         <p id="approval-revoke-selection">No approval selected.</p>
         <label>Revocation reason <input name="reason" maxlength="500" required></label>
         <button type="submit">Revoke approval</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
+  const approvalWithdraw = can("approvals.read")
+    ? `<form id="approval-withdraw-form" class="stack-form">
+        <h3>Withdraw my approval request</h3>
+        <p id="approval-withdraw-selection">No approval selected.</p>
+        <label>Withdrawal reason <input name="reason" maxlength="500" required></label>
+        <button type="submit">Withdraw request</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
+  const approvalTransfer = can("approvals.decide")
+    ? `<form id="approval-transfer-form" class="stack-form">
+        <h3>Transfer an active step</h3>
+        <p id="approval-transfer-selection">No approval selected.</p>
+        <label>Step ID <input name="stepId" maxlength="64" placeholder="stp_security" required></label>
+        <label>Target administrator subject ID
+          <input name="toSubjectId" maxlength="64" placeholder="adm_..." required>
+        </label>
+        <label>Transfer reason <input name="reason" maxlength="500" required></label>
+        <button type="submit">Transfer step</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
@@ -1218,7 +1264,7 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
     <section class="box"><h2>Organization scope</h2><p><code>${escapeHtml(scopes)}</code></p></section>
   </div>
   <h2>Usage explorer</h2>${usageExplorer}
-  <h2>Approvals</h2>${approvalRequest}${approvalList}${approvalDecision}${approvalRevoke}
+  <h2>Approvals</h2>${approvalRequest}${approvalList}${approvalDecision}${approvalRevoke}${approvalWithdraw}${approvalTransfer}
   <h2>Exports</h2>${exportPanel}
   <h2>Operations</h2>${operationPanel}
   <h2>Audit metadata</h2>${auditPanel}
@@ -1421,10 +1467,174 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     data.adminSystemAuditLogs.push(record);
     notificationOutbox.enqueueApproval(data, action, approval, {
       ...options,
+      eventKey: ["approval.step_progressed", "approval.transferred"].includes(action)
+        ? options.eventKey
+        : "",
       occurredAt: record.timestamp,
       organizationId: approvalEnvironmentId,
       requestId: options.requestId || "",
     });
+  }
+
+  function approvalStepById(approval, stepId) {
+    ensureApprovalWorkflow(approval);
+    return (approval.steps || []).find((step) => step.stepId === stepId) || null;
+  }
+
+  function approvalSubjectMatchesStep(step, subjectId, roles) {
+    if (!step || step.ineligibleSubjectIds.includes(subjectId)) return false;
+    if (step.eligibleSubjectIds.length === 0 && step.eligibleRoles.length === 0) return true;
+    if (step.eligibleSubjectIds.includes(subjectId)) return true;
+    return step.eligibleRoles.some((role) => roles.includes(role));
+  }
+
+  function approvalStepIdInput(value) {
+    const stepId = String(value ?? "").trim();
+    if (!stepId) return "";
+    if (!/^stp_[A-Za-z0-9_-]{1,60}$/.test(stepId)) {
+      throw new HttpError(400, "invalid_approval_step", "stepId is invalid");
+    }
+    return stepId;
+  }
+
+  function cancelUnfinishedApprovalSteps(approval) {
+    ensureApprovalWorkflow(approval);
+    for (const step of approval.steps) {
+      if (step.status === "pending" || step.status === "in_progress") {
+        step.status = "cancelled";
+      }
+    }
+  }
+
+  function activateNextSerialApprovalStep(approval) {
+    ensureApprovalWorkflow(approval);
+    if (approval.workflowKind !== "serial") return;
+    if (approval.steps.some((step) => step.status === "in_progress")) return;
+    const next = approval.steps.find((step) => step.status === "pending");
+    if (next) next.status = "in_progress";
+  }
+
+  function approvalDecisionStep(approval, requestedStepId = "") {
+    ensureApprovalWorkflow(approval);
+    if (requestedStepId) {
+      const step = approvalStepById(approval, requestedStepId);
+      if (!step || step.status !== "in_progress") {
+        return {
+          error: approvalHttpError(
+            "approval_step_unavailable",
+            "The requested approval step is not awaiting a decision",
+          ),
+        };
+      }
+      return { step };
+    }
+    const active = approval.steps.filter((step) => step.status === "in_progress");
+    if (active.length === 1) return { step: active[0] };
+    if (active.length > 1) {
+      return {
+        error: approvalHttpError(
+          "approval_step_unavailable",
+          "stepId is required while multiple approval steps are active",
+        ),
+      };
+    }
+    return {
+      error: approvalHttpError(
+        "approval_step_unavailable",
+        "Approval has no step awaiting a decision",
+      ),
+    };
+  }
+
+  function recordApprovalDecision(data, approval, input) {
+    ensureApprovalWorkflow(approval);
+    const step = input.step;
+    const createdAt = input.createdAt || new Date().toISOString();
+    const record = {
+      id: `apd_${crypto.randomUUID()}`,
+      approvalId: approval.id,
+      decision: input.decision,
+      actorSubjectId: input.actorSubjectId,
+      actorEmail: String(input.actorEmail || ""),
+      source: String(input.source || "admin"),
+      eventId: String(input.eventId || ""),
+      externalReference: String(input.externalReference || ""),
+      issuer: String(input.issuer || ""),
+      stepId: step.stepId,
+      workflowVersion: approval.workflowVersion,
+      reason: String(input.reason || ""),
+      createdAt,
+    };
+    data.approvalDecisions[record.id] = record;
+    step.decidedBySubjectIds = [
+      ...new Set([...step.decidedBySubjectIds, input.actorSubjectId]),
+    ].sort();
+
+    if (input.decision === "reject") {
+      step.status = "rejected";
+      cancelUnfinishedApprovalSteps(approval);
+      transitionApproval(approval, "rejected", input.actorSubjectId, "rejected");
+      approval.rejectedAt = createdAt;
+      approval.rejectedBySubjectId = input.actorSubjectId;
+      approval.rejectedByEmail = String(input.actorEmail || "");
+      return {
+        record,
+        step,
+        stepCompleted: true,
+        workflowCompleted: false,
+        finalStatus: approval.status,
+      };
+    }
+
+    const stepCompleted = step.decidedBySubjectIds.length >= step.quorum;
+    if (stepCompleted) {
+      step.status = "approved";
+      activateNextSerialApprovalStep(approval);
+    } else {
+      step.status = "in_progress";
+    }
+    const workflowCompleted = stepCompleted
+      && !approvalWorkflowFailure({ ...approval, status: "approved" });
+    if (workflowCompleted) {
+      transitionApproval(approval, "approved", input.actorSubjectId, "approved");
+      approval.approvedAt = createdAt;
+      approval.approvedBySubjectId = input.actorSubjectId;
+      approval.approvedByEmail = String(input.actorEmail || "");
+    } else if (approval.status === "requested") {
+      transitionApproval(
+        approval,
+        "pending_approval",
+        input.actorSubjectId,
+        "approval workflow in progress",
+      );
+    } else {
+      approval.updatedAt = createdAt;
+      approval.status = "pending_approval";
+    }
+    return {
+      record,
+      step,
+      stepCompleted,
+      workflowCompleted,
+      finalStatus: approval.status,
+    };
+  }
+
+  function approvalActorFailure(data, approval, subjectId, permission) {
+    const decision = authorize(data, subjectId, "approvals.decide", approval.targetOrgUnitId);
+    if (!decision.allowed) return decision.reason;
+    const business = authorize(data, subjectId, permission, approval.targetOrgUnitId);
+    if (!business.allowed) return business.reason;
+    return "";
+  }
+
+  function approvalStepActorFailure(data, approval, step, subjectId, permission) {
+    const access = effectiveAccess(data, subjectId);
+    if (!approvalSubjectMatchesStep(step, subjectId, access.roles)
+        || step.decidedBySubjectIds.includes(subjectId)) {
+      return "approval_step_ineligible";
+    }
+    return approvalActorFailure(data, approval, subjectId, permission);
   }
 
   function transitionApproval(approval, status, actorSubjectId, reason = "") {
@@ -1469,6 +1679,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       }
       if (["requested", "pending_approval", "approved"].includes(approval.status)
           && approvalIsExpired(approval, now)) {
+        ensureApprovalWorkflow(approval);
+        cancelUnfinishedApprovalSteps(approval);
         transitionApproval(approval, "expired", "system_expiry", "approval expired");
         appendApprovalSystemAudit(data, "approval.expired", approval, {
           result: "expired",
@@ -1543,10 +1755,190 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       && approval.bindingDigest === bindingDigest;
   }
 
+  function approvalWorkflowText(value, name, maxLength = 64) {
+    const text = String(value ?? "").trim();
+    if (!text
+        || [...text].length > maxLength
+        || !/^[A-Za-z0-9_-]+$/.test(text)) {
+      throw new HttpError(
+        400,
+        "invalid_approval_workflow",
+        `${name} must be a bounded identifier`,
+      );
+    }
+    return text;
+  }
+
+  function approvalWorkflowSubjectIds(value, name) {
+    if (value == null) return [];
+    if (!Array.isArray(value) || value.length > 20) {
+      throw new HttpError(400, "invalid_approval_workflow", `${name} must be an array`);
+    }
+    const ids = [...new Set(value.map((entry) => approvalWorkflowText(entry, name, 64)))];
+    if (ids.some((id) => !/^adm_[a-z0-9]{24}$/.test(id))) {
+      throw new HttpError(
+        400,
+        "invalid_approval_workflow",
+        `${name} must contain admin subject IDs`,
+      );
+    }
+    return ids.sort();
+  }
+
+  function approvalWorkflowRoles(value, name) {
+    if (value == null) return [];
+    if (!Array.isArray(value) || value.length > 20) {
+      throw new HttpError(400, "invalid_approval_workflow", `${name} must be an array`);
+    }
+    const roles = [...new Set(value.map((entry) => approvalWorkflowText(entry, name, 64)))];
+    if (roles.some((role) => !ROLES[role])) {
+      throw new HttpError(400, "invalid_approval_workflow", `${name} contains an unknown role`);
+    }
+    return roles.sort();
+  }
+
+  function approvalWorkflowFromRequest(data, input, binding) {
+    const explicit = input.workflow != null || input.approverSubjectIds != null;
+    if (!explicit) {
+      return {
+        workflowVersion: 1,
+        workflowKind: "serial",
+        steps: [{
+          stepId: "stp_1",
+          mode: "serial",
+          requiredApprovers: 1,
+          quorum: 1,
+          order: 1,
+          status: "in_progress",
+          eligibleSubjectIds: [],
+          eligibleRoles: [],
+          ineligibleSubjectIds: [],
+          decidedBySubjectIds: [],
+          transferHistory: [],
+        }],
+      };
+    }
+    const source = input.workflow == null
+      ? { kind: "serial", steps: [{ approverSubjectIds: input.approverSubjectIds }] }
+      : input.workflow;
+    if (!source || typeof source !== "object" || Array.isArray(source)) {
+      throw new HttpError(400, "invalid_approval_workflow", "workflow must be an object");
+    }
+    const workflowKind = String(source.kind || "serial");
+    if (!["serial", "parallel"].includes(workflowKind)) {
+      throw new HttpError(400, "invalid_approval_workflow", "workflow.kind is not supported");
+    }
+    if (!Array.isArray(source.steps) || source.steps.length < 1 || source.steps.length > 10) {
+      throw new HttpError(
+        400,
+        "invalid_approval_workflow",
+        "workflow.steps must contain between 1 and 10 steps",
+      );
+    }
+    const stepIds = new Set();
+    const steps = source.steps.map((raw, index) => {
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+        throw new HttpError(400, "invalid_approval_workflow", "workflow step is invalid");
+      }
+      const stepId = raw.stepId == null
+        ? `stp_${index + 1}`
+        : approvalWorkflowText(raw.stepId, "workflow.stepId", 64);
+      if (!/^stp_[A-Za-z0-9_-]{1,60}$/.test(stepId)) {
+        throw new HttpError(
+          400,
+          "invalid_approval_workflow",
+          "workflow.stepId must use the stp_ identifier format",
+        );
+      }
+      if (stepIds.has(stepId)) {
+        throw new HttpError(400, "invalid_approval_workflow", "workflow step IDs must be unique");
+      }
+      stepIds.add(stepId);
+      const eligibleSubjectIds = approvalWorkflowSubjectIds(
+        raw.approverSubjectIds ?? raw.eligibleSubjectIds,
+        "workflow approverSubjectIds",
+      );
+      if (eligibleSubjectIds.includes(binding.requesterSubjectId)) {
+        throw new HttpError(
+          400,
+          "invalid_approval_workflow",
+          "The requester cannot be an eligible approver",
+        );
+      }
+      const eligibleRoles = approvalWorkflowRoles(
+        raw.eligibleRoles,
+        "workflow eligibleRoles",
+      );
+      if (eligibleSubjectIds.length === 0 && eligibleRoles.length === 0) {
+        throw new HttpError(
+          400,
+          "invalid_approval_workflow",
+          "Each workflow step must name eligible subjects or roles",
+        );
+      }
+      const requiredApprovers = raw.requiredApprovers == null
+        ? Math.max(1, eligibleSubjectIds.length || 1)
+        : Number(raw.requiredApprovers);
+      const quorum = raw.quorum == null ? requiredApprovers : Number(raw.quorum);
+      if (!Number.isSafeInteger(requiredApprovers) || requiredApprovers < 1
+          || requiredApprovers > 20
+          || !Number.isSafeInteger(quorum) || quorum < 1
+          || quorum > requiredApprovers) {
+        throw new HttpError(
+          400,
+          "invalid_approval_workflow",
+          "workflow approver counts are invalid",
+        );
+      }
+      if (eligibleSubjectIds.length > 0 && quorum > eligibleSubjectIds.length
+          && eligibleRoles.length === 0) {
+        throw new HttpError(
+          400,
+          "invalid_approval_workflow",
+          "workflow quorum exceeds the named approvers",
+        );
+      }
+      for (const subjectId of eligibleSubjectIds) {
+        const failure = approvalActorFailure(
+          data,
+          binding,
+          subjectId,
+          APPROVAL_ACTION_TARGETS[binding.action].permission,
+        );
+        if (failure) {
+          throw new HttpError(
+            400,
+            "invalid_approval_workflow",
+            "A named approver lacks decision permission or organization scope",
+          );
+        }
+      }
+      return {
+        stepId,
+        mode: workflowKind === "parallel" || raw.mode === "parallel" ? "parallel" : "serial",
+        requiredApprovers,
+        quorum,
+        order: index + 1,
+        status: workflowKind === "parallel" || index === 0 ? "in_progress" : "pending",
+        eligibleSubjectIds,
+        eligibleRoles,
+        ineligibleSubjectIds: [],
+        decidedBySubjectIds: [],
+        transferHistory: [],
+      };
+    });
+    return {
+      workflowVersion: 1,
+      workflowKind,
+      steps,
+    };
+  }
+
   function approvalHttpError(code, message = "Approval validation failed") {
     const statusCode = code === "approval_required"
       ? 400
-      : code === "approval_consumed" || code === "approval_payload_mismatch"
+      : ["approval_consumed", "approval_payload_mismatch", "approval_incomplete",
+        "approval_step_unavailable"].includes(code)
         ? 409
         : code === "approval_unavailable"
           ? 503
@@ -1930,6 +2322,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         };
       }
       if (approvalIsExpired(approval)) {
+        ensureApprovalWorkflow(approval);
+        cancelUnfinishedApprovalSteps(approval);
         transitionApproval(approval, "expired", "system_expiry", "approval expired");
         appendApprovalSystemAudit(data, "approval.expired", approval, {
           result: "expired",
@@ -1942,6 +2336,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       }
       if (approval.status === "revoked") {
         return { error: approvalHttpError("approval_revoked", "Approval was revoked") };
+      }
+      if (approval.status === "withdrawn") {
+        return { error: approvalHttpError("approval_withdrawn", "Approval was withdrawn") };
       }
       if (approval.status === "reserved"
           || approval.status === "consumed"
@@ -1957,12 +2354,55 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         };
       }
 
+      ensureApprovalWorkflow(approval);
+      const legacyExternalStep = approval.workflowKind === "serial"
+        && approval.steps.length === 1
+        && approval.steps[0].stepId === "stp_1"
+        && approval.steps[0].eligibleSubjectIds.length === 0
+        && approval.steps[0].eligibleRoles.length === 0
+        && approval.steps[0].ineligibleSubjectIds.length === 0
+        && approval.steps[0].transferHistory.length === 0;
+      if (!legacyExternalStep && !callback.body.stepId) {
+        return {
+          error: approvalHttpError(
+            "approval_step_unavailable",
+            "stepId is required for an externally configured approval workflow",
+          ),
+        };
+      }
+      const stepDecision = approvalDecisionStep(approval, callback.body.stepId);
+      if (stepDecision.error) return { error: stepDecision.error };
+      if (!legacyExternalStep) {
+        const definition = approvalActionDefinition(approval.action);
+        const stepFailure = approvalStepActorFailure(
+          data,
+          approval,
+          stepDecision.step,
+          callback.body.actorSubjectId,
+          definition.permission,
+        );
+        if (stepFailure === "approval_step_ineligible") {
+          return {
+            error: approvalHttpError(
+              "approval_step_ineligible",
+              "The external approver is not eligible for this step",
+            ),
+          };
+        }
+        if (stepFailure) {
+          return {
+            error: new ApprovalCallbackError(
+              403,
+              "approval_callback_scope",
+              "The external approver lacks decision permission or organization scope",
+            ),
+          };
+        }
+      }
       const createdAt = callback.receivedAt;
-      const decisionId = `apd_${crypto.randomUUID()}`;
-      const record = {
-        id: decisionId,
-        approvalId: approval.id,
+      const decisionResult = recordApprovalDecision(data, approval, {
         decision: callback.body.decision,
+        step: stepDecision.step,
         actorSubjectId: callback.body.actorSubjectId,
         actorEmail: callback.body.actorEmail,
         source: "external",
@@ -1971,44 +2411,31 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         issuer: callback.body.issuer,
         reason: callback.body.reason,
         createdAt,
-      };
-      data.approvalDecisions[decisionId] = record;
+      });
+      const decisionId = decisionResult.record.id;
       approval.decisionSource = "external";
       approval.externalReference = callback.body.externalReference;
       approval.externalEventId = callback.body.eventId;
-      if (callback.body.decision === "approve") {
-        transitionApproval(
-          approval,
-          "approved",
-          callback.body.actorSubjectId,
-          "approved by external callback",
-        );
-        approval.approvedAt = createdAt;
-        approval.approvedBySubjectId = callback.body.actorSubjectId;
-        approval.approvedByEmail = callback.body.actorEmail;
-      } else {
-        transitionApproval(
-          approval,
-          "rejected",
-          callback.body.actorSubjectId,
-          "rejected by external callback",
-        );
-        approval.rejectedAt = createdAt;
-        approval.rejectedBySubjectId = callback.body.actorSubjectId;
-        approval.rejectedByEmail = callback.body.actorEmail;
-      }
+      const auditAction = callback.body.decision === "reject"
+        ? "approval.rejected"
+        : (decisionResult.workflowCompleted
+          ? "approval.approved"
+          : "approval.step_progressed");
       appendApprovalSystemAudit(
         data,
-        callback.body.decision === "approve" ? "approval.approved" : "approval.rejected",
+        auditAction,
         approval,
         {
-          result: callback.body.decision === "approve" ? "approved" : "rejected",
+          result: callback.body.decision === "reject"
+            ? "rejected"
+            : (decisionResult.workflowCompleted ? "approved" : "step_progressed"),
           actorSubjectId: callback.body.actorSubjectId,
           actorEmail: callback.body.actorEmail,
           reason: callback.body.reason,
           source: "external",
           eventId: callback.body.eventId,
           externalReference: callback.body.externalReference,
+          eventKey: `${stepDecision.step.stepId}_${decisionId}`,
         },
       );
       const event = {
@@ -2016,7 +2443,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         eventDigest: callback.eventDigest,
         approvalId: approval.id,
         nonceDigest: callback.nonceDigest,
-        outcome: callback.body.decision === "approve" ? "approved" : "rejected",
+        outcome: callback.body.decision === "reject"
+          ? "rejected"
+          : (decisionResult.workflowCompleted ? "approved" : "step_progressed"),
         issuer: callback.body.issuer,
         audience: callback.body.audience,
         externalReference: callback.body.externalReference,
@@ -2081,6 +2510,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     }
     const target = await resolveApprovalTarget(current.session, action, targetId, payload);
     await requireStepUp(current, req, action);
+    const explicitWorkflow = body.workflow != null || body.approverSubjectIds != null;
+    if (explicitWorkflow) {
+      await requirePermission(current.session, "approvals.configure");
+    }
     const expected = approvalExpectedBinding({
       requesterSubjectId: current.session.subjectId,
       action,
@@ -2091,6 +2524,11 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       reason,
       payload,
     });
+    const workflow = await store.read((data) => approvalWorkflowFromRequest(
+      data,
+      body,
+      expected,
+    ));
     const now = new Date();
     const approval = {
       id: `apr_${crypto.randomUUID()}`,
@@ -2113,10 +2551,18 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       expiresAt: new Date(now.getTime() + APPROVAL_TTL_MS).toISOString(),
       approvedAt: "",
       approvedBySubjectId: "",
+      approvedByEmail: "",
       rejectedAt: "",
+      rejectedBySubjectId: "",
+      rejectedByEmail: "",
       revokedAt: "",
+      withdrawnAt: "",
+      withdrawnBySubjectId: "",
       operationId: "",
       consumedAt: "",
+      workflowVersion: workflow.workflowVersion,
+      workflowKind: workflow.workflowKind,
+      steps: workflow.steps,
       stateHistory: [{
         status: "requested",
         at: now.toISOString(),
@@ -2125,6 +2571,23 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       }],
     };
     await store.mutate((data) => {
+      if (explicitWorkflow
+          && !authorize(
+            data,
+            current.session.subjectId,
+            "approvals.configure",
+            expected.targetOrgUnitId,
+          ).allowed) {
+        throw new HttpError(
+          403,
+          "forbidden_role",
+          "Only an authorized administrator can configure approval steps",
+        );
+      }
+      const currentWorkflow = approvalWorkflowFromRequest(data, body, expected);
+      approval.workflowVersion = currentWorkflow.workflowVersion;
+      approval.workflowKind = currentWorkflow.workflowKind;
+      approval.steps = currentWorkflow.steps;
       data.approvalRequests[approval.id] = structuredClone(approval);
       appendApprovalSystemAudit(data, "approval.requested", approval, {
         result: "requested",
@@ -2196,6 +2659,71 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     json(res, 200, { approvals });
   }
 
+  function approvalInboxQuery(searchParams) {
+    const view = String(searchParams.get("view") || "pending").trim();
+    if (!["pending", "requested", "completed", "closed"].includes(view)) {
+      throw new HttpError(400, "invalid_approval_filter", "view is not supported");
+    }
+    const base = approvalQuery(searchParams);
+    return { ...base, view };
+  }
+
+  async function listApprovalInbox(req, res, searchParams) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    const result = await requirePermission(current.session, "approvals.read");
+    const query = approvalInboxQuery(searchParams);
+    const approvals = await store.read((data) => Object.values(data.approvalRequests)
+      .filter((approval) => {
+        if (!organizationScopeAllows(result.access, approval.targetOrgUnitId)) return false;
+        if (query.status && approval.status !== query.status) return false;
+        if (query.action && approval.action !== query.action) return false;
+        if (query.targetType && approval.targetType !== query.targetType) return false;
+        if (query.requesterSubjectId
+            && approval.requesterSubjectId !== query.requesterSubjectId) return false;
+        if (query.view === "requested") {
+          return approval.requesterSubjectId === current.session.subjectId;
+        }
+        if (query.view === "completed") {
+          return ["approved", "reserved", "consumed"].includes(approval.status);
+        }
+        if (query.view === "closed") {
+          return ["rejected", "expired", "revoked", "withdrawn"].includes(approval.status)
+            || (approval.status !== "approved"
+              && approval.status !== "reserved"
+              && approval.status !== "consumed"
+              && approvalIsExpired(approval));
+        }
+        if (!["requested", "pending_approval"].includes(approval.status)
+            || approvalIsExpired(approval)
+            || approval.requesterSubjectId === current.session.subjectId) {
+          return false;
+        }
+        ensureApprovalWorkflow(approval);
+        const definition = approvalActionDefinition(approval.action);
+        return approval.steps
+          .filter((step) => step.status === "in_progress")
+          .some((step) => (
+            !approvalStepActorFailure(
+              data,
+              approval,
+              step,
+              current.session.subjectId,
+              definition.permission,
+            )
+          ));
+      })
+      .sort((left, right) => String(right.createdAt || "")
+        .localeCompare(String(left.createdAt || ""))
+        || String(right.id || "").localeCompare(String(left.id || "")))
+      .slice(0, query.limit)
+      .map((approval) => publicApproval(
+        structuredClone(approval),
+        structuredClone(approvalDecisionList(data, approval.id)),
+      )));
+    json(res, 200, { view: query.view, approvals });
+  }
+
   async function getApproval(req, res, approvalId) {
     const current = await currentSession(req);
     if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
@@ -2229,6 +2757,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       throw new HttpError(400, "invalid_decision", "decision must be approve or reject");
     }
     const reason = cleanReason(body.reason);
+    const requestedStepId = approvalStepIdInput(body.stepId);
     const storedApproval = await store.read((data) => {
       const approval = data.approvalRequests[approvalId];
       return approval ? structuredClone(approval) : null;
@@ -2251,6 +2780,33 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         "The requester cannot decide their own approval",
       );
     }
+    if (storedApproval.status === "withdrawn") {
+      throw approvalHttpError("approval_withdrawn", "Approval was withdrawn");
+    }
+    if (storedApproval.status === "revoked") {
+      throw approvalHttpError("approval_revoked", "Approval was revoked");
+    }
+    if (storedApproval.status === "reserved" || storedApproval.status === "consumed") {
+      throw approvalHttpError("approval_consumed", "Approval was already consumed");
+    }
+    const selected = approvalDecisionStep(storedApproval, requestedStepId);
+    if (selected.error) throw selected.error;
+    const earlyStepFailure = approvalStepActorFailure(
+      await store.read((data) => data),
+      storedApproval,
+      selected.step,
+      current.session.subjectId,
+      definition.permission,
+    );
+    if (earlyStepFailure === "approval_step_ineligible") {
+      throw approvalHttpError(
+        "approval_step_ineligible",
+        "Your account is not eligible to decide this approval step",
+      );
+    }
+    if (earlyStepFailure) {
+      throw new HttpError(403, earlyStepFailure, "This approval step is outside your authority");
+    }
     await requireStepUp(current, req, storedApproval.action);
 
     const outcome = await store.mutate((data) => {
@@ -2258,35 +2814,36 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       if (!approval) {
         return { error: approvalHttpError("approval_invalid", "Approval is not available") };
       }
-      if (!["requested", "pending_approval"].includes(approval.status)) {
-        if (approvalIsExpired(approval)) {
-          transitionApproval(approval, "expired", "system_expiry", "approval expired");
-          appendApprovalSystemAudit(data, "approval.expired", approval, {
-            result: "expired",
-            errorCode: "approval_expired",
-          });
-          return { error: approvalHttpError("approval_expired", "Approval has expired") };
-        }
-        if (approval.status === "revoked") {
-          return { error: approvalHttpError("approval_revoked", "Approval was revoked") };
-        }
-        if (approval.status === "reserved" || approval.status === "consumed") {
-          return { error: approvalHttpError("approval_consumed", "Approval was already consumed") };
-        }
-        return {
-          error: approvalHttpError(
-            "approval_unavailable",
-            "Approval is not awaiting a decision",
-          ),
-        };
+      if (approval.environmentId !== approvalEnvironmentId) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not valid here") };
+      }
+      if (approval.status === "withdrawn") {
+        return { error: approvalHttpError("approval_withdrawn", "Approval was withdrawn") };
+      }
+      if (approval.status === "revoked") {
+        return { error: approvalHttpError("approval_revoked", "Approval was revoked") };
+      }
+      if (approval.status === "reserved" || approval.status === "consumed"
+          || data.approvalConsumptions[approval.id]) {
+        return { error: approvalHttpError("approval_consumed", "Approval was already consumed") };
       }
       if (approvalIsExpired(approval)) {
+        ensureApprovalWorkflow(approval);
+        cancelUnfinishedApprovalSteps(approval);
         transitionApproval(approval, "expired", "system_expiry", "approval expired");
         appendApprovalSystemAudit(data, "approval.expired", approval, {
           result: "expired",
           errorCode: "approval_expired",
         });
         return { error: approvalHttpError("approval_expired", "Approval has expired") };
+      }
+      if (!["requested", "pending_approval"].includes(approval.status)) {
+        return {
+          error: approvalHttpError(
+            "approval_unavailable",
+            "Approval is not awaiting a decision",
+          ),
+        };
       }
       if (approval.requesterSubjectId === current.session.subjectId) {
         return {
@@ -2296,34 +2853,54 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           ),
         };
       }
+      const stepDecision = approvalDecisionStep(approval, requestedStepId);
+      if (stepDecision.error) return { error: stepDecision.error };
+      const stepFailure = approvalStepActorFailure(
+        data,
+        approval,
+        stepDecision.step,
+        current.session.subjectId,
+        definition.permission,
+      );
+      if (stepFailure === "approval_step_ineligible") {
+        return {
+          error: approvalHttpError(
+            "approval_step_ineligible",
+            "Your account is not eligible to decide this approval step",
+          ),
+        };
+      }
+      if (stepFailure) {
+        return {
+          error: new HttpError(403, stepFailure, "This approval step is outside your authority"),
+        };
+      }
       const createdAt = new Date().toISOString();
-      const record = {
-        id: `apd_${crypto.randomUUID()}`,
-        approvalId,
+      const result = recordApprovalDecision(data, approval, {
         decision,
+        step: stepDecision.step,
         actorSubjectId: current.session.subjectId,
         actorEmail: current.session.email,
         reason,
         createdAt,
-      };
-      data.approvalDecisions[record.id] = record;
-      if (decision === "approve") {
-        transitionApproval(approval, "approved", current.session.subjectId, "approved");
-        approval.approvedAt = createdAt;
-        approval.approvedBySubjectId = current.session.subjectId;
-      } else {
-        transitionApproval(approval, "rejected", current.session.subjectId, "rejected");
-        approval.rejectedAt = createdAt;
-      }
+        source: "admin",
+      });
+      approval.decisionSource = "admin";
+      const auditAction = decision === "reject"
+        ? "approval.rejected"
+        : (result.workflowCompleted ? "approval.approved" : "approval.step_progressed");
       appendApprovalSystemAudit(
         data,
-        decision === "approve" ? "approval.approved" : "approval.rejected",
+        auditAction,
         approval,
         {
-          result: decision === "approve" ? "approved" : "rejected",
+          result: decision === "reject"
+            ? "rejected"
+            : (result.workflowCompleted ? "approved" : "step_progressed"),
           actorSubjectId: current.session.subjectId,
           actorEmail: current.session.email,
           reason,
+          eventKey: `${stepDecision.step.stepId}_${result.record.id}`,
         },
       );
       return {
@@ -2358,8 +2935,13 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       if (!approval) {
         return { error: approvalHttpError("approval_invalid", "Approval is not available") };
       }
+      if (approval.environmentId !== approvalEnvironmentId) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not valid here") };
+      }
       if (approvalIsExpired(approval)) {
         if (["requested", "pending_approval", "approved"].includes(approval.status)) {
+          ensureApprovalWorkflow(approval);
+          cancelUnfinishedApprovalSteps(approval);
           transitionApproval(approval, "expired", "system_expiry", "approval expired");
           appendApprovalSystemAudit(data, "approval.expired", approval, {
             result: "expired",
@@ -2375,6 +2957,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         if (approval.status === "revoked") {
           return { error: approvalHttpError("approval_revoked", "Approval was already revoked") };
         }
+        if (approval.status === "withdrawn") {
+          return { error: approvalHttpError("approval_withdrawn", "Approval was withdrawn") };
+        }
         return {
           error: approvalHttpError(
             "approval_unavailable",
@@ -2383,13 +2968,280 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         };
       }
       const revokedAt = new Date().toISOString();
+      ensureApprovalWorkflow(approval);
+      cancelUnfinishedApprovalSteps(approval);
       transitionApproval(approval, "revoked", current.session.subjectId, "revoked");
       approval.revokedAt = revokedAt;
+      approval.revokedBySubjectId = current.session.subjectId;
+      approval.revokedByEmail = current.session.email;
       appendApprovalSystemAudit(data, "approval.revoked", approval, {
         result: "revoked",
         actorSubjectId: current.session.subjectId,
         actorEmail: current.session.email,
         reason,
+      });
+      return {
+        approval: structuredClone(approval),
+        decisions: structuredClone(approvalDecisionList(data, approvalId)),
+      };
+    });
+    if (outcome.error) throw outcome.error;
+    json(res, 200, {
+      approval: publicApproval(outcome.approval, outcome.decisions),
+    });
+  }
+
+  async function withdrawApproval(req, res, approvalId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const storedApproval = await store.read((data) => {
+      const approval = data.approvalRequests[approvalId];
+      return approval ? structuredClone(approval) : null;
+    });
+    if (!storedApproval) throw new HttpError(404, "approval_not_found", "Approval not found");
+    if (storedApproval.requesterSubjectId !== current.session.subjectId) {
+      throw new HttpError(
+        403,
+        "forbidden_role",
+        "Only the requester can withdraw this approval",
+      );
+    }
+    const outcome = await store.mutate((data) => {
+      const approval = data.approvalRequests[approvalId];
+      if (!approval) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not available") };
+      }
+      if (approval.environmentId !== approvalEnvironmentId
+          || approval.requesterSubjectId !== current.session.subjectId) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not valid here") };
+      }
+      if (approval.status === "withdrawn") {
+        return { error: approvalHttpError("approval_withdrawn", "Approval was withdrawn") };
+      }
+      if (approval.status === "revoked") {
+        return { error: approvalHttpError("approval_revoked", "Approval was revoked") };
+      }
+      if (approval.status === "reserved" || approval.status === "consumed"
+          || data.approvalConsumptions[approval.id]) {
+        return { error: approvalHttpError("approval_consumed", "Approval was already consumed") };
+      }
+      if (approvalIsExpired(approval)) {
+        ensureApprovalWorkflow(approval);
+        cancelUnfinishedApprovalSteps(approval);
+        transitionApproval(approval, "expired", "system_expiry", "approval expired");
+        appendApprovalSystemAudit(data, "approval.expired", approval, {
+          result: "expired",
+          errorCode: "approval_expired",
+        });
+        return { error: approvalHttpError("approval_expired", "Approval has expired") };
+      }
+      if (!["requested", "pending_approval"].includes(approval.status)) {
+        return {
+          error: approvalHttpError(
+            "approval_unavailable",
+            "Approval cannot be withdrawn in its current state",
+          ),
+        };
+      }
+      const withdrawnAt = new Date().toISOString();
+      ensureApprovalWorkflow(approval);
+      cancelUnfinishedApprovalSteps(approval);
+      transitionApproval(approval, "withdrawn", current.session.subjectId, "withdrawn");
+      approval.withdrawnAt = withdrawnAt;
+      approval.withdrawnBySubjectId = current.session.subjectId;
+      appendApprovalSystemAudit(data, "approval.withdrawn", approval, {
+        result: "withdrawn",
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+      });
+      return {
+        approval: structuredClone(approval),
+        decisions: structuredClone(approvalDecisionList(data, approvalId)),
+      };
+    });
+    if (outcome.error) throw outcome.error;
+    json(res, 200, {
+      approval: publicApproval(outcome.approval, outcome.decisions),
+    });
+  }
+
+  async function transferApprovalStep(req, res, approvalId, stepId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const targetSubjectId = approvalWorkflowSubjectIds(
+      [body.toSubjectId],
+      "toSubjectId",
+    )[0];
+    if (!targetSubjectId) {
+      throw new HttpError(400, "invalid_approval_step", "toSubjectId is required");
+    }
+    const requestedStepId = approvalStepIdInput(stepId);
+    const storedApproval = await store.read((data) => {
+      const approval = data.approvalRequests[approvalId];
+      return approval ? structuredClone(approval) : null;
+    });
+    if (!storedApproval) throw new HttpError(404, "approval_not_found", "Approval not found");
+    const storedStep = approvalStepById(storedApproval, requestedStepId);
+    if (!storedStep || storedStep.status !== "in_progress") {
+      throw approvalHttpError(
+        "approval_step_unavailable",
+        "The requested approval step is not awaiting a decision",
+      );
+    }
+    const outcome = await store.mutate((data) => {
+      const approval = data.approvalRequests[approvalId];
+      if (!approval) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not available") };
+      }
+      if (approval.environmentId !== approvalEnvironmentId) {
+        return { error: approvalHttpError("approval_invalid", "Approval is not valid here") };
+      }
+      if (approvalIsExpired(approval)) {
+        ensureApprovalWorkflow(approval);
+        cancelUnfinishedApprovalSteps(approval);
+        transitionApproval(approval, "expired", "system_expiry", "approval expired");
+        appendApprovalSystemAudit(data, "approval.expired", approval, {
+          result: "expired",
+          errorCode: "approval_expired",
+        });
+        return { error: approvalHttpError("approval_expired", "Approval has expired") };
+      }
+      if (!["requested", "pending_approval"].includes(approval.status)) {
+        if (approval.status === "withdrawn") {
+          return { error: approvalHttpError("approval_withdrawn", "Approval was withdrawn") };
+        }
+        if (approval.status === "revoked") {
+          return { error: approvalHttpError("approval_revoked", "Approval was revoked") };
+        }
+        if (approval.status === "reserved" || approval.status === "consumed") {
+          return { error: approvalHttpError("approval_consumed", "Approval was consumed") };
+        }
+        return {
+          error: approvalHttpError(
+            "approval_unavailable",
+            "Approval cannot be transferred in its current state",
+          ),
+        };
+      }
+      if (approval.requesterSubjectId === current.session.subjectId) {
+        return {
+          error: approvalHttpError(
+            "approval_separation_required",
+            "The requester cannot transfer an approval step",
+          ),
+        };
+      }
+      const step = approvalStepById(approval, requestedStepId);
+      if (!step || step.status !== "in_progress") {
+        return {
+          error: approvalHttpError(
+            "approval_step_unavailable",
+            "The requested approval step is not awaiting a decision",
+          ),
+        };
+      }
+      const definition = approvalActionDefinition(approval.action);
+      const actorFailure = approvalStepActorFailure(
+        data,
+        approval,
+        step,
+        current.session.subjectId,
+        definition.permission,
+      );
+      if (actorFailure) {
+        return {
+          error: actorFailure === "approval_step_ineligible"
+            ? approvalHttpError(
+              "approval_step_ineligible",
+              "Your account cannot transfer this approval step",
+            )
+            : new HttpError(403, actorFailure, "This approval step is outside your authority"),
+        };
+      }
+      if (targetSubjectId === current.session.subjectId) {
+        return {
+          error: new HttpError(
+            400,
+            "invalid_approval_step",
+            "The target approver must be a different administrator",
+          ),
+        };
+      }
+      if (targetSubjectId === approval.requesterSubjectId) {
+        return {
+          error: approvalHttpError(
+            "approval_separation_required",
+            "The requester cannot be an approver",
+          ),
+        };
+      }
+      if (step.decidedBySubjectIds.includes(targetSubjectId)) {
+        return {
+          error: approvalHttpError(
+            "approval_step_ineligible",
+            "The target approver already decided this step",
+          ),
+        };
+      }
+      const targetAccess = effectiveAccess(data, targetSubjectId);
+      if (step.eligibleRoles.length > 0
+          && !step.eligibleRoles.some((role) => targetAccess.roles.includes(role))) {
+        return {
+          error: approvalHttpError(
+            "approval_step_ineligible",
+            "The target approver does not hold an eligible role",
+          ),
+        };
+      }
+      const targetFailure = approvalActorFailure(
+        data,
+        approval,
+        targetSubjectId,
+        definition.permission,
+      );
+      if (targetFailure) {
+        return {
+          error: new HttpError(
+            403,
+            targetFailure,
+            "The target approver lacks decision permission or organization scope",
+          ),
+        };
+      }
+      const transferredAt = new Date().toISOString();
+      step.eligibleSubjectIds = [
+        ...new Set([
+          ...step.eligibleSubjectIds.filter((subjectId) => subjectId !== current.session.subjectId),
+          targetSubjectId,
+        ]),
+      ].sort();
+      step.ineligibleSubjectIds = [
+        ...new Set([
+          ...step.ineligibleSubjectIds.filter((subjectId) => subjectId !== targetSubjectId),
+          current.session.subjectId,
+        ]),
+      ].sort();
+      step.transferHistory.push({
+        fromSubjectId: current.session.subjectId,
+        toSubjectId: targetSubjectId,
+        actorSubjectId: current.session.subjectId,
+        reason,
+        at: transferredAt,
+      });
+      approval.updatedAt = transferredAt;
+      appendApprovalSystemAudit(data, "approval.transferred", approval, {
+        result: "transferred",
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        eventKey: `${step.stepId}_${step.transferHistory.length}`,
       });
       return {
         approval: structuredClone(approval),
@@ -5777,10 +6629,30 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/approvals/inbox") {
+      await listApprovalInbox(req, res, url.searchParams);
+      return;
+    }
+
     const approvalDecisionMatch =
       /^\/api\/v1\/admin\/approvals\/([A-Za-z0-9_-]+)\/decisions$/.exec(url.pathname);
     if (req.method === "POST" && approvalDecisionMatch) {
       await decideApproval(req, res, approvalDecisionMatch[1]);
+      return;
+    }
+
+    const approvalWithdrawMatch =
+      /^\/api\/v1\/admin\/approvals\/([A-Za-z0-9_-]+)\/withdraw$/.exec(url.pathname);
+    if (req.method === "POST" && approvalWithdrawMatch) {
+      await withdrawApproval(req, res, approvalWithdrawMatch[1]);
+      return;
+    }
+
+    const approvalTransferMatch =
+      /^\/api\/v1\/admin\/approvals\/([A-Za-z0-9_-]+)\/steps\/(stp_[A-Za-z0-9_-]{1,60})\/transfer$/
+        .exec(url.pathname);
+    if (req.method === "POST" && approvalTransferMatch) {
+      await transferApprovalStep(req, res, approvalTransferMatch[1], approvalTransferMatch[2]);
       return;
     }
 

@@ -1075,12 +1075,19 @@ async function requestApproval(f, jar, current, body) {
   return result.body.approval;
 }
 
-async function decideApproval(f, approver, approvalId, decision = "approve", reason = "Independent review") {
+async function decideApproval(
+  f,
+  approver,
+  approvalId,
+  decision = "approve",
+  reason = "Independent review",
+  stepId = "",
+) {
   const result = await adminPost(
     f,
     approver.jar,
     `/api/v1/admin/approvals/${approvalId}/decisions`,
-    { decision, reason },
+    { decision, reason, ...(stepId ? { stepId } : {}) },
     approver.current.body.csrfToken,
   );
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
@@ -4280,6 +4287,419 @@ test("approval APIs enforce CSRF, separation of duty, permissions, and organizat
   assert.equal(approved.decisions.length, 1);
   assert.equal(approved.decisions[0].actorSubjectId, approver.current.body.user.id);
   assertNoWriteSecrets(approved, f, jar);
+});
+
+test("approval inbox and serial workflows enforce active-step eligibility", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const reviewer = await independentApprover(f, { name: "Serial Reviewer" });
+  const owner = await independentApprover(f, { name: "Serial Owner" });
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Two-step approval workflow",
+    workflow: {
+      kind: "serial",
+      steps: [
+        { stepId: "stp_security", approverSubjectIds: [reviewer.current.body.user.id] },
+        { stepId: "stp_owner", approverSubjectIds: [owner.current.body.user.id] },
+      ],
+    },
+  });
+
+  assert.equal(approval.workflowKind, "serial");
+  assert.deepEqual(approval.activeStepIds, ["stp_security"]);
+  assert.deepEqual(
+    approval.steps.map((step) => [step.stepId, step.status]),
+    [["stp_security", "in_progress"], ["stp_owner", "pending"]],
+  );
+
+  const reviewerInbox = await adminGet(
+    f,
+    reviewer.jar,
+    "/api/v1/admin/approvals/inbox?view=pending",
+  );
+  assert.equal(reviewerInbox.response.status, 200);
+  assert.equal(reviewerInbox.body.view, "pending");
+  assert.ok(reviewerInbox.body.approvals.some((item) => (
+    item.approvalId === approval.approvalId
+  )));
+
+  const ownerInbox = await adminGet(
+    f,
+    owner.jar,
+    "/api/v1/admin/approvals/inbox?view=pending",
+  );
+  assert.equal(ownerInbox.response.status, 200);
+  assert.ok(!ownerInbox.body.approvals.some((item) => (
+    item.approvalId === approval.approvalId
+  )));
+
+  const requesterInbox = await adminGet(
+    f,
+    jar,
+    "/api/v1/admin/approvals/inbox?view=requested",
+  );
+  assert.equal(requesterInbox.response.status, 200);
+  assert.ok(requesterInbox.body.approvals.some((item) => (
+    item.approvalId === approval.approvalId
+  )));
+
+  const premature = await adminPost(
+    f,
+    owner.jar,
+    `/api/v1/admin/approvals/${approval.approvalId}/decisions`,
+    { decision: "approve", reason: "Owner is not eligible for the first step" },
+    owner.current.body.csrfToken,
+  );
+  assert.equal(premature.response.status, 403);
+  assert.equal(premature.body.error.code, "approval_step_ineligible");
+
+  const first = await decideApproval(
+    f,
+    reviewer,
+    approval.approvalId,
+    "approve",
+    "Security review complete",
+  );
+  assert.equal(first.status, "pending_approval");
+  assert.deepEqual(first.activeStepIds, ["stp_owner"]);
+  assert.deepEqual(
+    first.steps.map((step) => [step.stepId, step.status]),
+    [["stp_security", "approved"], ["stp_owner", "in_progress"]],
+  );
+
+  const ownerInboxAfterFirst = await adminGet(
+    f,
+    owner.jar,
+    "/api/v1/admin/approvals/inbox?view=pending",
+  );
+  assert.ok(ownerInboxAfterFirst.body.approvals.some((item) => (
+    item.approvalId === approval.approvalId
+  )));
+
+  const second = await decideApproval(
+    f,
+    owner,
+    approval.approvalId,
+    "approve",
+    "Business owner approved",
+  );
+  assert.equal(second.status, "approved");
+  assert.deepEqual(second.activeStepIds, []);
+  assert.deepEqual(second.decisions.map((decision) => decision.stepId), [
+    "stp_security",
+    "stp_owner",
+  ]);
+});
+
+test("parallel approval steps require an explicit step and honor quorum", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const first = await independentApprover(f, { name: "Parallel First" });
+  const second = await independentApprover(f, { name: "Parallel Second" });
+  const third = await independentApprover(f, { name: "Parallel Third" });
+  const final = await independentApprover(f, { name: "Parallel Final" });
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Parallel quorum workflow",
+    workflow: {
+      kind: "parallel",
+      steps: [
+        {
+          stepId: "stp_quorum",
+          approverSubjectIds: [
+            first.current.body.user.id,
+            second.current.body.user.id,
+            third.current.body.user.id,
+          ],
+          requiredApprovers: 3,
+          quorum: 2,
+        },
+        {
+          stepId: "stp_final",
+          approverSubjectIds: [final.current.body.user.id],
+        },
+      ],
+    },
+  });
+  assert.equal(approval.workflowKind, "parallel");
+  assert.deepEqual(approval.activeStepIds, ["stp_quorum", "stp_final"]);
+
+  const missingStep = await adminPost(
+    f,
+    first.jar,
+    `/api/v1/admin/approvals/${approval.approvalId}/decisions`,
+    { decision: "approve", reason: "Missing step while two are active" },
+    first.current.body.csrfToken,
+  );
+  assert.equal(missingStep.response.status, 409);
+  assert.equal(missingStep.body.error.code, "approval_step_unavailable");
+
+  const oneVote = await decideApproval(
+    f,
+    first,
+    approval.approvalId,
+    "approve",
+    "First quorum vote",
+    "stp_quorum",
+  );
+  assert.equal(oneVote.status, "pending_approval");
+  assert.equal(oneVote.steps[0].status, "in_progress");
+  assert.deepEqual(oneVote.steps[0].decidedBySubjectIds, [
+    first.current.body.user.id,
+  ]);
+
+  const repeatedVote = await adminPost(
+    f,
+    first.jar,
+    `/api/v1/admin/approvals/${approval.approvalId}/decisions`,
+    {
+      decision: "approve",
+      reason: "The same approver cannot vote twice",
+      stepId: "stp_quorum",
+    },
+    first.current.body.csrfToken,
+  );
+  assert.equal(repeatedVote.response.status, 403);
+  assert.equal(repeatedVote.body.error.code, "approval_step_ineligible");
+
+  const quorum = await decideApproval(
+    f,
+    second,
+    approval.approvalId,
+    "approve",
+    "Second quorum vote",
+    "stp_quorum",
+  );
+  assert.equal(quorum.status, "pending_approval");
+  assert.equal(quorum.steps[0].status, "approved");
+  assert.deepEqual(quorum.activeStepIds, ["stp_final"]);
+
+  const thirdInbox = await adminGet(
+    f,
+    third.jar,
+    "/api/v1/admin/approvals/inbox?view=pending",
+  );
+  assert.ok(!thirdInbox.body.approvals.some((item) => (
+    item.approvalId === approval.approvalId
+  )));
+  const finalInbox = await adminGet(
+    f,
+    final.jar,
+    "/api/v1/admin/approvals/inbox?view=pending",
+  );
+  assert.ok(finalInbox.body.approvals.some((item) => (
+    item.approvalId === approval.approvalId
+  )));
+
+  const completed = await decideApproval(
+    f,
+    final,
+    approval.approvalId,
+    "approve",
+    "Final approval",
+    "stp_final",
+  );
+  assert.equal(completed.status, "approved");
+  assert.deepEqual(completed.activeStepIds, []);
+});
+
+test("approval transfer, requester withdrawal, audit, and consumption fail closed", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const original = await independentApprover(f, { name: "Transfer Original" });
+  const alternate = await independentApprover(f, { name: "Transfer Alternate" });
+  const other = await independentApprover(f, { name: "Transfer Other" });
+
+  const transferable = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Transferable approval",
+    workflow: {
+      kind: "serial",
+      steps: [{
+        stepId: "stp_transfer",
+        requiredApprovers: 1,
+        quorum: 1,
+        approverSubjectIds: [
+          original.current.body.user.id,
+          other.current.body.user.id,
+        ],
+      }],
+    },
+  });
+
+  const nonRequesterWithdraw = await adminPost(
+    f,
+    other.jar,
+    `/api/v1/admin/approvals/${transferable.approvalId}/withdraw`,
+    { reason: "Only the requester may withdraw" },
+    other.current.body.csrfToken,
+  );
+  assert.equal(nonRequesterWithdraw.response.status, 403);
+  assert.equal(nonRequesterWithdraw.body.error.code, "forbidden_role");
+
+  const transferred = await adminPost(
+    f,
+    original.jar,
+    `/api/v1/admin/approvals/${transferable.approvalId}/steps/stp_transfer/transfer`,
+    {
+      toSubjectId: alternate.current.body.user.id,
+      reason: "Original reviewer is unavailable",
+    },
+    original.current.body.csrfToken,
+  );
+  assert.equal(transferred.response.status, 200, JSON.stringify(transferred.body));
+  const transferStep = transferred.body.approval.steps[0];
+  assert.ok(transferStep.eligibleSubjectIds.includes(alternate.current.body.user.id));
+  assert.ok(!transferStep.eligibleSubjectIds.includes(original.current.body.user.id));
+  assert.ok(transferStep.ineligibleSubjectIds.includes(original.current.body.user.id));
+  assert.deepEqual(transferStep.transferHistory.map((entry) => ({
+    from: entry.fromSubjectId,
+    to: entry.toSubjectId,
+    reason: entry.reason,
+  })), [{
+    from: original.current.body.user.id,
+    to: alternate.current.body.user.id,
+    reason: "Original reviewer is unavailable",
+  }]);
+
+  const originalAfterTransfer = await adminPost(
+    f,
+    original.jar,
+    `/api/v1/admin/approvals/${transferable.approvalId}/decisions`,
+    { decision: "approve", reason: "Original reviewer cannot decide" },
+    original.current.body.csrfToken,
+  );
+  assert.equal(originalAfterTransfer.response.status, 403);
+  assert.equal(originalAfterTransfer.body.error.code, "approval_step_ineligible");
+
+  const approvedAfterTransfer = await decideApproval(
+    f,
+    alternate,
+    transferable.approvalId,
+    "approve",
+    "Alternate reviewer approved",
+  );
+  assert.equal(approvedAfterTransfer.status, "approved");
+
+  const withdrawal = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/approvals/${transferable.approvalId}/withdraw`,
+    { reason: "Too late after approval" },
+    current.body.csrfToken,
+  );
+  assert.equal(withdrawal.response.status, 503);
+  assert.equal(withdrawal.body.error.code, "approval_unavailable");
+
+  const toWithdraw = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "Withdraw before a decision",
+  });
+  const withdrawn = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/approvals/${toWithdraw.approvalId}/withdraw`,
+    { reason: "Request was created in error" },
+    current.body.csrfToken,
+  );
+  assert.equal(withdrawn.response.status, 200, JSON.stringify(withdrawn.body));
+  assert.equal(withdrawn.body.approval.status, "withdrawn");
+  assert.equal(withdrawn.body.approval.withdrawnBySubjectId, current.body.user.id);
+  assert.ok(withdrawn.body.approval.steps.every((step) => step.status === "cancelled"));
+
+  const decideWithdrawn = await adminPost(
+    f,
+    other.jar,
+    `/api/v1/admin/approvals/${toWithdraw.approvalId}/decisions`,
+    { decision: "approve", reason: "Withdrawn approvals cannot be decided" },
+    other.current.body.csrfToken,
+  );
+  assert.equal(decideWithdrawn.response.status, 403);
+  assert.equal(decideWithdrawn.body.error.code, "approval_withdrawn");
+
+  const consumeWithdrawn = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/disable",
+    {
+      reason: "Withdraw before a decision",
+      approvalId: toWithdraw.approvalId,
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(consumeWithdrawn.response.status, 403);
+  assert.equal(consumeWithdrawn.body.error.code, "approval_withdrawn");
+
+  const data = await readAdminData(f);
+  assert.ok(data.adminSystemAuditLogs.some((audit) => (
+    audit.action === "approval.transferred"
+      && audit.approvalId === transferable.approvalId
+      && audit.result === "transferred"
+  )));
+  assert.ok(data.adminSystemAuditLogs.some((audit) => (
+    audit.action === "approval.withdrawn"
+      && audit.approvalId === toWithdraw.approvalId
+      && audit.result === "withdrawn"
+  )));
+});
+
+test("external approval callbacks require step IDs for configured workflows", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f, { name: "External Workflow" });
+  const approval = await requestApproval(f, jar, current, {
+    action: "user.disable",
+    targetId: "usr_bob",
+    reason: "External workflow callback",
+    workflow: {
+      kind: "serial",
+      steps: [{
+        stepId: "stp_external",
+        approverSubjectIds: [approver.current.body.user.id],
+      }],
+    },
+  });
+
+  const basePayload = {
+    approvalId: approval.approvalId,
+    actorSubjectId: approver.current.body.user.id,
+    actorEmail: `${approver.suffix}@corp.example`,
+  };
+  const missingStep = await postApprovalCallback(f, callbackPayload(
+    approval.approvalId,
+    basePayload,
+  ));
+  assert.equal(missingStep.response.status, 409);
+  assert.equal(missingStep.body.error.code, "approval_step_unavailable");
+
+  const completed = await postApprovalCallback(f, callbackPayload(
+    approval.approvalId,
+    { ...basePayload, stepId: "stp_external" },
+  ));
+  assert.equal(completed.response.status, 200, JSON.stringify(completed.body));
+  assert.equal(completed.body.approval.status, "approved");
+  assert.equal(completed.body.approval.decisions[0].stepId, "stp_external");
 });
 
 test("external approval callbacks verify HMAC, time, issuer, audience, event idempotency, and nonce replay", { timeout: 30000 }, async (t) => {

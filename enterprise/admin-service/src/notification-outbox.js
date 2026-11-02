@@ -216,8 +216,19 @@ function enqueueWithChannels(data, input, options = {}) {
 }
 
 export function enqueueApprovalNotification(data, action, approval, options = {}) {
-  if (!approval || !["approval.requested", "approval.approved", "approval.rejected",
-    "approval.expired", "approval.consumed"].includes(action)) {
+  if (!approval || ![
+    "approval.requested",
+    "approval.step_progressed",
+    "approval.approved",
+    "approval.rejected",
+    "approval.expired",
+    "approval.withdrawn",
+    "approval.revoked",
+    "approval.transferred",
+    "approval.reserved",
+    "approval.consumed",
+    "approval.recovered_reserved",
+  ].includes(action)) {
     return null;
   }
   const severity = ["H", "C"].includes(String(approval.riskLevel || ""))
@@ -232,8 +243,11 @@ export function enqueueApprovalNotification(data, action, approval, options = {}
           ? "system_expiry"
           : ""
     );
+  const eventKey = String(options.eventKey || "")
+    .replace(/[^A-Za-z0-9_-]/g, "")
+    .slice(0, 72);
   return enqueueWithChannels(data, {
-    eventId: `evt_${action.replaceAll(".", "_")}_${approval.id}`,
+    eventId: `evt_${action.replaceAll(".", "_")}_${approval.id}${eventKey ? `_${eventKey}` : ""}`,
     eventType: action,
     severity,
     occurredAt: options.occurredAt || approval.updatedAt || new Date().toISOString(),
@@ -248,7 +262,8 @@ export function enqueueApprovalNotification(data, action, approval, options = {}
     operationId: options.operationId || approval.operationId,
     requestId: options.requestId || "",
     errorCode: options.errorCode || "",
-    summary: `Approval ${approval.id} ${action.split(".")[1]} for ${approval.action}`,
+    summary: `Approval ${approval.id} ${action.split(".")[1].replaceAll("_", " ")}`
+      + ` for ${approval.action}`,
   }, {
     maxAttempts: options.maxAttempts,
     channels: options.channels,

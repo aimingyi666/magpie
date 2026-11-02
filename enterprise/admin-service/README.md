@@ -4,6 +4,7 @@
 **M2-C2 管理写接口与权限映射**、**M2-C3 幂等与 intent/result 管理审计**和
 **M2-C5 操作/审计查询与对账**、**M2-D 基础运营页与 CSV 导出**、**M2-E1/APR-01a 服务端审批**，以及
 **APR-01b HMAC 外部审批回调适配器**、**APR-01c 独立 OIDC step-up**、
+**APR-01d 审批箱/多步骤审批核心**、
 **NOTIFY-01a transactional outbox** 和 **NOTIFY-01b 渠道管理/统一 HTTPS transport**：
 管理 OIDC、
 会话、CSRF、RBAC、组织范围、用户/部门/设备/凭证/模型/用量只读视图、只读 `usage.jsonl`
@@ -16,7 +17,7 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 86 项管理测试通过（66 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项）。
+当前总计 90 项管理测试通过（70 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项）。
 auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
@@ -94,9 +95,14 @@ APR-01c 已提供独立 OIDC Client 的 step-up：`prompt=login`、`max_age`、e
   返回一次性 Bearer export token 和下载路径；`GET /api/v1/admin/exports/{id}/download`
   还必须使用原管理员会话 Cookie，首次下载后即消费并记录 `export.downloaded` 系统审计。
 - `POST /api/v1/admin/approvals`、`GET /api/v1/admin/approvals/{id}`、
-  `POST /api/v1/admin/approvals/{id}/decisions` 和
-  `POST /api/v1/admin/approvals/{id}/revoke` 提供审批申请、查询、批准/拒绝和撤销。
-  申请、决策、撤销要求管理会话、CSRF、必填理由和对应权限；决策/撤销还会校验目标组织范围。
+  `GET /api/v1/admin/approvals/inbox`、`POST /api/v1/admin/approvals/{id}/decisions`、
+  `POST /api/v1/admin/approvals/{id}/revoke`、`POST /api/v1/admin/approvals/{id}/withdraw`
+  和 `POST /api/v1/admin/approvals/{id}/steps/{stepId}/transfer` 提供审批申请、查询、审批箱、
+  批准/拒绝、撤销、申请人撤回和步骤转交。申请、决策、撤回、转交和撤销要求管理会话、CSRF、
+  必填理由和对应权限；决策/撤回/转交还会校验目标组织范围。
+- 审批箱支持 `pending/requested/completed/closed/all` 视图。工作流支持 `serial`/`parallel`
+  两种模式、显式 `stepId`、每步 `requiredApprovers/quorum`、审批人角色/人员约束和转交
+  历史；多步骤工作流的外部回调必须携带 `stepId`。申请人不能审批自己的步骤。
 - APR-01a 使用 24 小时有效期和 L/M/H/C 风险。审批绑定环境、申请人、组织、动作、目标、
   理由、规范化 payload SHA-256、binding SHA-256 和策略版本；禁止自审批。
 - 除低风险 `user.enable` 外，现有受支持管理写操作都要消费有效审批。审批在业务依赖调用前
@@ -349,8 +355,11 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 | `PATCH` | `/api/v1/admin/users/{id}/policy/models` | 模型授权；要求 `models.write`、`expectedVersion` 和幂等校验 |
 | `POST` | `/api/v1/admin/approvals` | 申请审批；要求被审批动作的原权限、CSRF、`reason` 和动作绑定字段 |
 | `GET` | `/api/v1/admin/approvals/{id}` | 读取审批状态和决策；要求 `approvals.read` 和目标组织范围 |
+| `GET` | `/api/v1/admin/approvals/inbox` | 审批箱；支持 `view=pending\|requested\|completed\|closed\|all`、组织范围和分页 |
 | `POST` | `/api/v1/admin/approvals/{id}/decisions` | 批准/拒绝；要求 `approvals.decide`、CSRF 和 `reason`，禁止自审批 |
 | `POST` | `/api/v1/admin/approvals/{id}/revoke` | 撤销审批；要求 `approvals.revoke`、CSRF 和 `reason` |
+| `POST` | `/api/v1/admin/approvals/{id}/withdraw` | 申请人撤回尚未完成的审批；要求 CSRF、理由和申请人身份 |
+| `POST` | `/api/v1/admin/approvals/{id}/steps/{stepId}/transfer` | 转交一个活动审批步骤；要求目标审批人/角色合法并记录转交历史 |
 | `POST` | `/api/v1/integrations/approvals/callback` | 外部审批 HMAC 回调；不使用管理会话/CSRF，只改变审批状态 |
 | `POST` | `/api/v1/admin/usage/export` | 生成用量 CSV；要求已批准审批、fresh step-up、CSRF、组织范围、理由和 `Idempotency-Key` |
 | `POST` | `/api/v1/admin/audit/export` | 生成审计 CSV；要求已批准审批、fresh step-up、CSRF、组织范围、理由和 `Idempotency-Key` |
@@ -481,7 +490,7 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\admin-service.test.mjs test\model-catalog.test.mjs test\notification-channels.test.mjs test\notification-siem.test.mjs
 ```
 
-2026-11-02 的实际结果：`86 passed, 0 failed`（66 项管理服务集成测试 + 7 项目录专项测试 +
+2026-11-02 的实际结果：`90 passed, 0 failed`（70 项管理服务集成测试 + 7 项目录专项测试 +
 7 项通知渠道专项测试 + 6 项 SIEM 专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
@@ -501,7 +510,9 @@ C4-03d 页面测试覆盖 CSRF meta、静态脚本、只读角色无写表单、
 组织范围、同键幂等与冲突、CSV 公式注入防护、敏感字段排除、token 不落查询串、会话绑定、
 首次下载消费、重复/过期 `410` 和 `export.downloaded` 审计。APR-01a 覆盖风险与摘要稳定性、审批申请/决策/撤销的
 CSRF/权限/组织范围/自审批拒绝、动作/目标/理由/payload/策略版本绑定、过期/撤销、一次性
-消费、并发复用和启动恢复失败关闭。APR-01b 覆盖回调配置成组校验、HMAC 原始 body 验签、
+消费、并发复用和启动恢复失败关闭。APR-01d 覆盖审批箱状态过滤、串行活动步骤权限、并行
+quorum、显式 `stepId`、转交、申请人撤回、非法状态迁移和外部回调缺少 `stepId` 时失败关闭。
+APR-01b 覆盖回调配置成组校验、HMAC 原始 body 验签、
 时间窗、issuer/audience、nonce 重放、
 eventId 幂等、错误签名/媒体类型/缺失头、审批状态和职责分离、过期/撤销/已消费失败关闭、
 旧 store 集合迁移和 secret 不落响应/存储。APR-01c 覆盖无 step-up 时 H 风险失败关闭且
@@ -513,9 +524,9 @@ essential `auth_time`/ACR 请求、未配置时失败关闭、站外返回路径
 人工重放、审批/结果审计与 outbox 原子提交、渠道 RBAC/CSRF/step-up/理由/幂等/审计、
 渠道投影与收件人限制、Webhook HMAC、HTTPS/allowlist/DNS 固定解析、SSRF 和重定向拒绝、
 fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。管理服务当前为
-`86 passed, 0 failed`，
+`90 passed, 0 failed`，
 auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，合计
-`126 passed, 0 failed`。
+`130 passed, 0 failed`。
 
 尚未验证：
 
@@ -526,9 +537,10 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - C4-03c 的 Docker/真实共享卷和生产部署验收；C4-04 已完成隔离真实 Magpie 的完整管理链路、
   回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d/C5/M2-D
   的基础页面和 CSV 导出已接入，浏览器 E2E、失败恢复入口、完整运营体验和生产验收仍未完成。
-- APR-01c 的代码和 Mock IdP 集成测试已完成；APR-01d/e 及真实管理 IdP step-up/MFA/ACR、
-  真实飞书/OA/ServiceNow/Jira 适配器及生产回调演练、串并行审批箱、转交、break-glass、
-  审批通知仍未实现/未验收。
+- APR-01c 的代码和 Mock IdP 集成测试已完成；APR-01d 的审批箱、串并行步骤、quorum、
+  转交和撤回代码已实现并通过 Mock/故障测试；APR-01e break-glass、真实管理 IdP
+  step-up/MFA/ACR、真实飞书/OA/ServiceNow/Jira 适配器、生产回调演练、浏览器审批 E2E
+  和审批通知仍未实现/未验收。
 - NOTIFY-01a/01b/01c 默认不启用渠道；未启用渠道或没有 transport 时正常启动不创建 dispatcher。
   `operation.audit_failed` 只有 schema、暂无可靠触发点；deliveries 查询无 cursor。
   邮件/IM/工单是统一 HTTPS 网关契约，不是原生厂商 SDK；真实网关、证书、租户配置和投递
@@ -542,9 +554,10 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - 每个管理请求会更新 `lastSeenAt`，小规模试点可接受，规模化需要共享存储和写合并。
 - result 审计失败时 operation 会停在 `dependency_invoked`；C5 已提供查询、审计分页和受控
   对账，但自动补偿、告警队列和真实运维演练仍未实现/验收。
-- 审批已有服务端 API、一次性消费、HMAC 外部回调适配器和 APR-01c step-up；NOTIFY-01a/01b/01c
-  已有 outbox、渠道 API、统一 HTTPS/SIEM transport 与死信重放，但没有审批管理 UI、真实 OA
-  连接器、审批箱、break-glass、真实 SIEM 接入、通知运营页或真实厂商网关验收；审批、step-up、
+- 审批已有服务端 API、一次性消费、HMAC 外部回调适配器、APR-01c step-up 和 APR-01d
+  审批箱/多步骤核心；NOTIFY-01a/01b/01c 已有 outbox、渠道 API、统一 HTTPS/SIEM transport
+  与死信重放，但没有真实 OA 连接器、break-glass、真实 SIEM 接入、通知运营页或真实厂商
+  网关验收；审批、step-up、
   渠道和 outbox 状态存储仍是
   单实例 JSON，尚未做多实例并发和真实 OA/IdP 验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。

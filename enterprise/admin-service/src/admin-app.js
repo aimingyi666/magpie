@@ -233,17 +233,38 @@ async function submitPolicy(form) {
   }
 }
 
-function selectApproval(approvalId, status = "") {
+function selectApproval(approvalId, status = "", approval = null) {
   selectedApprovalId = approvalId;
   const text = `${approvalId}${status ? ` (${status})` : ""}`;
-  const decision = document.querySelector("#approval-selection");
-  const revoke = document.querySelector("#approval-revoke-selection");
-  if (decision) decision.textContent = text;
-  if (revoke) revoke.textContent = text;
+  for (const selector of [
+    "#approval-selection",
+    "#approval-revoke-selection",
+    "#approval-withdraw-selection",
+    "#approval-transfer-selection",
+  ]) {
+    const selection = document.querySelector(selector);
+    if (selection) selection.textContent = text;
+  }
+  const activeStepIds = Array.isArray(approval?.activeStepIds) ? approval.activeStepIds : [];
+  const suggestedStepId = activeStepIds.length === 1 ? activeStepIds[0] : "";
+  for (const formSelector of ["#approval-decision-form", "#approval-transfer-form"]) {
+    const form = document.querySelector(formSelector);
+    const step = field(form, "stepId");
+    if (step && suggestedStepId) step.value = suggestedStepId;
+  }
   const exportApproval = field(document.querySelector("#export-form"), "approvalId");
   if (exportApproval) exportApproval.value = approvalId;
   const reconcileApproval = field(document.querySelector("#reconcile-form"), "approvalId");
   if (reconcileApproval) reconcileApproval.value = approvalId;
+}
+
+function approvalStepSummary(approval) {
+  return (approval.steps || []).map((step) => {
+    const transfers = (step.transferHistory || []).length;
+    return `${step.order}. ${step.stepId} [${step.mode}/${step.status}] `
+      + `${(step.decidedBySubjectIds || []).length}/${step.quorum} of ${step.requiredApprovers}`
+      + `${transfers ? `, ${transfers} transfer(s)` : ""}`;
+  }).join("; ");
 }
 
 function renderApprovals(approvals) {
@@ -255,9 +276,11 @@ function renderApprovals(approvals) {
     return;
   }
   target.append(dataTable(
-    ["Approval", "Action", "Status", "Requester", "Target", "Scope", "Expires"],
+    ["Approval", "Workflow", "Steps", "Action", "Status", "Requester", "Target", "Scope", "Expires"],
     approvals.map((approval) => [
       approval.approvalId,
+      approval.workflowKind,
+      approvalStepSummary(approval),
       approval.action,
       approval.status,
       approval.requesterEmail || approval.requesterSubjectId,
@@ -267,7 +290,7 @@ function renderApprovals(approvals) {
     ]),
     approvals.map((approval) => ({
       label: "Select",
-      run: () => selectApproval(approval.approvalId, approval.status),
+      run: () => selectApproval(approval.approvalId, approval.status, approval),
     })),
   ));
 }
@@ -278,9 +301,18 @@ async function loadApprovals() {
   const params = queryFromForm(form);
   setResult(form, "Loading approvals.", "pending");
   try {
-    const payload = await api(`/api/v1/admin/approvals?${params}`);
+    const view = params.get("view");
+    params.delete("view");
+    const endpoint = view ? "/api/v1/admin/approvals/inbox" : "/api/v1/admin/approvals";
+    if (view) params.set("view", view);
+    const payload = await api(`${endpoint}?${params}`);
     renderApprovals(payload.approvals || []);
-    setResult(form, `${(payload.approvals || []).length} approval request(s) loaded.`, "result");
+    setResult(
+      form,
+      `${(payload.approvals || []).length} approval request(s) loaded`
+        + `${payload.view ? ` from the ${payload.view} view` : ""}.`,
+      "result",
+    );
   } catch (error) {
     showError(form, error);
   }
@@ -306,7 +338,7 @@ async function requestApproval(form) {
   try {
     const response = await api("/api/v1/admin/approvals", { method: "POST", body });
     const approval = response.approval || {};
-    selectApproval(approval.approvalId, approval.status);
+    selectApproval(approval.approvalId, approval.status, approval);
     setResult(
       form,
       `Approval ${approval.approvalId || "unknown"} created with status ${approval.status || "unknown"}.`,
@@ -334,6 +366,7 @@ async function decideSelectedApproval(form) {
         body: {
           decision: fieldValue(form, "decision"),
           reason: fieldValue(form, "reason"),
+          ...(fieldValue(form, "stepId") ? { stepId: fieldValue(form, "stepId") } : {}),
         },
       },
     );
@@ -366,6 +399,64 @@ async function revokeSelectedApproval(form) {
     setResult(
       form,
       `Approval ${approval.approvalId || selectedApprovalId} is now ${approval.status || "revoked"}.`,
+      "result",
+    );
+    await loadApprovals();
+  } catch (error) {
+    showError(form, error);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function withdrawSelectedApproval(form) {
+  if (!selectedApprovalId) {
+    setResult(form, "Select an approval request first.", "error");
+    return;
+  }
+  setBusy(form, true);
+  try {
+    const response = await api(
+      `/api/v1/admin/approvals/${encodeURIComponent(selectedApprovalId)}/withdraw`,
+      { method: "POST", body: { reason: fieldValue(form, "reason") } },
+    );
+    const approval = response.approval || {};
+    setResult(
+      form,
+      `Approval ${approval.approvalId || selectedApprovalId} is now ${approval.status || "withdrawn"}.`,
+      "result",
+    );
+    await loadApprovals();
+  } catch (error) {
+    showError(form, error);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function transferSelectedApproval(form) {
+  if (!selectedApprovalId) {
+    setResult(form, "Select an approval request first.", "error");
+    return;
+  }
+  const stepId = fieldValue(form, "stepId");
+  setBusy(form, true);
+  try {
+    const response = await api(
+      `/api/v1/admin/approvals/${encodeURIComponent(selectedApprovalId)}`
+        + `/steps/${encodeURIComponent(stepId)}/transfer`,
+      {
+        method: "POST",
+        body: {
+          toSubjectId: fieldValue(form, "toSubjectId"),
+          reason: fieldValue(form, "reason"),
+        },
+      },
+    );
+    const approval = response.approval || {};
+    setResult(
+      form,
+      `Approval ${approval.approvalId || selectedApprovalId} step ${stepId} was transferred.`,
       "result",
     );
     await loadApprovals();
@@ -861,7 +952,8 @@ document.addEventListener("submit", async (event) => {
   }
   const known = form.matches(
     ".policy-write-form, #usage-filter, #approval-request-form, #approval-filter, "
-    + "#approval-decision-form, #approval-revoke-form, #export-form, "
+    + "#approval-decision-form, #approval-revoke-form, #approval-withdraw-form, "
+    + "#approval-transfer-form, #export-form, "
     + "#operation-write-form, #operation-filter, #reconcile-form, #audit-filter",
   );
   if (!known) return;
@@ -878,6 +970,10 @@ document.addEventListener("submit", async (event) => {
     await decideSelectedApproval(form);
   } else if (form.id === "approval-revoke-form") {
     await revokeSelectedApproval(form);
+  } else if (form.id === "approval-withdraw-form") {
+    await withdrawSelectedApproval(form);
+  } else if (form.id === "approval-transfer-form") {
+    await transferSelectedApproval(form);
   } else if (form.id === "export-form") {
     await createExport(form);
   } else if (form.id === "operation-write-form") {
