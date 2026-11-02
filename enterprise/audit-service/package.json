@@ -1,0 +1,14 @@
+{
+  "name": "@magpie-enterprise/audit-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Magpie Enterprise L0/L1 audit event pipeline",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

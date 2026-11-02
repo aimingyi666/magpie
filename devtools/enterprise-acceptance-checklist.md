@@ -267,8 +267,8 @@ outbox 状态、attempt、渠道、HTTP/协议结果、死信和人工重放
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| C-01 | 默认 L0 | 不采集 Prompt/回复/附件正文；只记元数据 | 当前只做到这一层 |
-| C-02 | L1 摘要 | 工具名、参数类别和结果状态可检索 | 未实现 |
+| C-01 | 默认 L0 | 不采集 Prompt/回复/附件正文；只记元数据 | 仍为 L0；M4-A 管道核心可接收严格 allowlist 的 L0 元数据，真实网关和 UI 未接入 |
+| C-02 | L1 摘要 | 工具名、参数类别和结果状态可检索 | M4-A 管道核心可接收 L1 `tool_call`/`policy_decision` 元数据；真实网关/UI、管理员 OIDC/RBAC 和组织范围未接入 |
 | C-03 | L2 脱敏正文 | 显式授权、二次确认、目的、水印和访问审计 | 未实现 |
 | C-04 | L3 原始正文 | 默认关闭；法定调查双人审批、短保留 | 未实现 |
 | C-05 | 流式完整性 | 流式回复拼接完整，断流/重试可恢复 | 未实现 |
@@ -289,10 +289,10 @@ outbox 状态、attempt、渠道、HTTP/协议结果、死信和人工重放
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| O-01 | Compose | 干净环境 `--profile admin` 和 `--profile gateway-control` 分别构建、启动、健康检查、重启恢复；验证 gateway-control 不发布宿主机端口且只能使用内部网络 | 当前机器无 Docker CLI；C4-02 Dockerfile/Compose 仅静态编写，未构建、启动或健康检查 |
+| O-01 | Compose | 干净环境 `--profile admin`、`--profile gateway-control` 和 `--profile audit` 分别构建、启动、健康检查、重启恢复；验证 gateway-control/audit 不发布宿主机端口且只能使用内部网络 | 当前机器无 Docker CLI；C4-02 和 M4-A 的 Dockerfile/Compose 仅静态编写，未构建、启动或健康检查 |
 | O-02 | HTTPS/代理 | 管理域名、Cookie、公司 CA、WAF、可信代理头正确 | 未验收 |
 | O-03 | 密钥管理 | Gateway/issuer/session/OIDC/internal token 全部独立且不进仓库 | 文档已定义，需 Secret Manager 验收 |
-| O-04 | 备份恢复 | admin/auth/gateway/audit 数据分别备份并隔离恢复 | 未验收 |
+| O-04 | 备份恢复 | admin/auth/gateway/audit 数据分别备份并隔离恢复 | audit 已有独立 `audit-data` 卷定义，但 M4-A 持久 JSON 存储尚未做备份恢复演练 |
 | O-05 | 灰度回滚 | 客户端、模型、资源和策略可独立灰度/回滚 | 未验收 |
 | O-06 | 容量 | 目标人数、并发、P95 延迟和存储增长压测通过 | 未做 |
 | O-07 | HA/DR | 多副本、共享存储、RPO 15 分钟、RTO 2 小时演练通过 | 未实现 |

@@ -190,6 +190,54 @@ services:
       retries: 3
       start_period: 10s
 
+  # M4-A audit event pipeline core. This service is internal-only: it accepts
+  # L0/L1 metadata events, persists an idempotent queue, and exposes metadata
+  # query endpoints. Gateway/UI integration, administrator OIDC/RBAC, L2/L3
+  # content, retention, HA and production acceptance are not implemented.
+  # Start it explicitly with:
+  #   docker compose --profile audit up -d audit
+  audit:
+    profiles: ["audit"]
+    build:
+      context: ./audit-service
+      args:
+        AUDIT_UID: ${AUDIT_UID:-10003}
+        AUDIT_GID: ${AUDIT_GID:-10003}
+    container_name: magpie-enterprise-audit
+    restart: unless-stopped
+    user: "${AUDIT_UID:-10003}:${AUDIT_GID:-10003}"
+    expose:
+      - "3449"
+    environment:
+      AUDIT_BIND: 0.0.0.0
+      AUDIT_PORT: 3449
+      AUDIT_SERVICE_TOKEN: ${AUDIT_SERVICE_TOKEN:-}
+      AUDIT_STORE_PATH: ${AUDIT_STORE_PATH:-/data/audit-store.json}
+      AUDIT_MAX_BODY_BYTES: ${AUDIT_MAX_BODY_BYTES:-32768}
+      AUDIT_MAX_EVENTS: ${AUDIT_MAX_EVENTS:-1000000}
+      AUDIT_MAX_QUEUE_EVENTS: ${AUDIT_MAX_QUEUE_EVENTS:-100000}
+      AUDIT_MAX_SESSIONS: ${AUDIT_MAX_SESSIONS:-100000}
+      AUDIT_FLUSH_INTERVAL_MS: ${AUDIT_FLUSH_INTERVAL_MS:-1000}
+      AUDIT_BATCH_SIZE: ${AUDIT_BATCH_SIZE:-200}
+      AUDIT_RATE_LIMIT_PER_MINUTE: ${AUDIT_RATE_LIMIT_PER_MINUTE:-6000}
+    volumes:
+      - audit-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3449/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   auth:
     profiles: ["auth", "admin"]
     build:
@@ -347,6 +395,7 @@ volumes:
   resource-data:
   resource-content:
   mcp-data:
+  audit-data:
 
 secrets:
   resource-signing-key:
