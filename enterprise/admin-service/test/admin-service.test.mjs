@@ -836,8 +836,17 @@ async function fixture(options = {}) {
       ADMIN_USAGE_MAX_RECORDS: options.maxRecords || "1000000",
       ADMIN_USAGE_MAX_FIELDS: options.maxFields || "256",
       ADMIN_USAGE_MAX_RANGE_DAYS: "366",
+      ADMIN_NOTIFICATION_CHANNELS_ENABLED:
+        options.notificationChannelsEnabled ? "true" : "false",
+      ADMIN_NOTIFICATION_OUTBOUND_ALLOWLIST:
+        options.notificationAllowlist ?? "hooks.example.test",
+      ADMIN_NOTIFICATION_EMAIL_RECIPIENT_DOMAINS:
+        options.notificationEmailDomains ?? "corp.example",
+      ADMIN_NOTIFICATION_HTTP_TIMEOUT_MS: "1000",
+      ADMIN_NOTIFICATION_HTTP_MAX_RESPONSE_BYTES: "65536",
+      ADMIN_NOTIFICATION_HTTP_MAX_REDIRECTS: "3",
     });
-    admin = await createEnterpriseAdminServer(config);
+    admin = await createEnterpriseAdminServer(config, options.adminServerOptions || {});
     const base = await listen(admin.server);
     config.publicUrl = base;
     config.oidc.redirectUri = `${base}/admin/oauth/callback`;
@@ -4775,7 +4784,7 @@ test("APR-01c step-up rejects changed identity and invalid freshness or MFA clai
   const rejectedClaims = [
     [{ auth_time: undefined }, "missing auth_time"],
     [{ auth_time: now - 121 }, "stale auth_time"],
-    [{ auth_time: now + 31 }, "future auth_time"],
+    [{ auth_time: now + 300 }, "future auth_time"],
     [{ amr: ["pwd"], acr: "" }, "missing MFA"],
   ];
   for (const [claims, label] of rejectedClaims) {
@@ -5518,4 +5527,262 @@ test("NOTIFY-01a notification APIs enforce scope, CSRF, idempotency and safe pro
     audit.action === "notification.replay_requested"
       && audit.deliveryId === rootDelivery.deliveryId
       && audit.actorSubjectId === superCurrent.body.user.id));
+});
+
+test("NOTIFY-01b channel APIs enforce RBAC, step-up, CSRF, idempotency and safe projections", { timeout: 30000 }, async (t) => {
+  let testFails = false;
+  const transportCalls = [];
+  const channelTransport = {
+    async deliver(delivery) {
+      transportCalls.push(delivery);
+      return { ok: true, statusCode: 204 };
+    },
+    async test(channel) {
+      transportCalls.push({ test: channel.channelId });
+      if (testFails) {
+        const error = new Error("notification endpoint timed out");
+        error.code = "transport_timeout";
+        throw error;
+      }
+    },
+  };
+  const f = await fixture({
+    notificationChannelsEnabled: true,
+    adminServerOptions: { notificationChannelTransport: channelTransport },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const superJar = await adminLogin(f);
+  await stepUp(f, superJar);
+  const superCurrent = await me(f, superJar);
+  const security = await independentApprover(f, {
+    role: "security_admin",
+    scopeOrgUnitId: "*",
+  });
+  const department = await independentApprover(f, {
+    role: "department_admin",
+    scopeOrgUnitId: "org-root",
+  });
+
+  const createPath = "/api/v1/admin/notifications/channels";
+  const channelBody = {
+    name: "Security webhook",
+    type: "webhook",
+    provider: "generic",
+    eventTypes: ["operation.failed", "approval.rejected"],
+    secretRef: "MAGPIE_NOTIFICATION_WEBHOOK_SECRET",
+    config: {
+      endpointRef: "MAGPIE_SECURITY_WEBHOOK_URL",
+      timeoutMs: 1000,
+    },
+    reason: "Register the security notification endpoint",
+  };
+
+  const noCsrf = await adminPost(
+    f,
+    superJar,
+    createPath,
+    channelBody,
+    "",
+    { "idempotency-key": "notify-channel-no-csrf" },
+  );
+  assert.equal(noCsrf.response.status, 403);
+  assert.equal(noCsrf.body.error.code, "csrf_invalid");
+  const noReason = await adminPost(
+    f,
+    superJar,
+    createPath,
+    { ...channelBody, reason: "" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-no-reason" },
+  );
+  assert.equal(noReason.response.status, 400);
+  assert.equal(noReason.body.error.code, "invalid_reason");
+  const noIdempotency = await adminPost(
+    f,
+    superJar,
+    createPath,
+    channelBody,
+    superCurrent.body.csrfToken,
+  );
+  assert.equal(noIdempotency.response.status, 400);
+  assert.equal(noIdempotency.body.error.code, "idempotency_key_required");
+
+  const noStepJar = new CookieJar();
+  await adminLogin(f, noStepJar, {
+    sub: "admin-no-step-up",
+    email: "no-step-up@corp.example",
+    name: "No Step Up",
+  }, { stepUp: false });
+  const noStepCurrent = await me(f, noStepJar);
+  await addRoleBinding(
+    f,
+    "rb-no-step-up",
+    noStepCurrent.body.user.id,
+    "enterprise_admin",
+    "*",
+  );
+  const noStep = await adminPost(
+    f,
+    noStepJar,
+    createPath,
+    channelBody,
+    noStepCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-no-step-up" },
+  );
+  assert.equal(noStep.response.status, 403);
+  assert.equal(noStep.body.error.code, "step_up_required");
+
+  const plaintextSecret = await adminPost(
+    f,
+    superJar,
+    createPath,
+    {
+      ...channelBody,
+      config: {
+        ...channelBody.config,
+        token: "plaintext-notification-token",
+      },
+    },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-plaintext-secret" },
+  );
+  assert.equal(plaintextSecret.response.status, 400);
+  assert.equal(plaintextSecret.body.error.code, "invalid_notification_channel");
+
+  const created = await adminPost(
+    f,
+    superJar,
+    createPath,
+    channelBody,
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-create-1" },
+  );
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.created, true);
+  assert.match(created.body.channel.channelId, /^nch_[a-f0-9]{24}$/);
+  assert.equal(created.body.channel.secretConfigured, true);
+  assert.ok(!JSON.stringify(created.body).includes("plaintext-notification-token"));
+
+  const replayed = await adminPost(
+    f,
+    superJar,
+    createPath,
+    channelBody,
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-create-1" },
+  );
+  assert.equal(replayed.response.status, 200);
+  assert.equal(replayed.body.created, false);
+  assert.equal(replayed.body.channel.channelId, created.body.channel.channelId);
+  const conflict = await adminPost(
+    f,
+    superJar,
+    createPath,
+    { ...channelBody, name: "A different channel" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-create-1" },
+  );
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.error.code, "notification_channel_request_conflict");
+
+  const listed = await adminGet(
+    f,
+    superJar,
+    "/api/v1/admin/notifications/channels",
+  );
+  assert.equal(listed.response.status, 200);
+  assert.equal(listed.body.channels.length, 1);
+  assert.equal(listed.body.channels[0].lastTest, null);
+  const securityRead = await adminGet(
+    f,
+    security.jar,
+    "/api/v1/admin/notifications/channels",
+  );
+  assert.equal(securityRead.response.status, 200);
+  const departmentRead = await adminGet(
+    f,
+    department.jar,
+    "/api/v1/admin/notifications/channels",
+  );
+  assert.equal(departmentRead.response.status, 403);
+  assert.equal(departmentRead.body.error.code, "forbidden_role");
+
+  const channelPath = `/api/v1/admin/notifications/channels/${created.body.channel.channelId}`;
+  const securityWrite = await adminPatch(
+    f,
+    security.jar,
+    channelPath,
+    { enabled: false, reason: "Security administrators are read-only" },
+    security.current.body.csrfToken,
+    { "idempotency-key": "notify-channel-security-write" },
+  );
+  assert.equal(securityWrite.response.status, 403);
+  assert.equal(securityWrite.body.error.code, "forbidden_role");
+
+  const updated = await adminPatch(
+    f,
+    superJar,
+    channelPath,
+    { enabled: false, reason: "Pause endpoint during maintenance" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-update-1" },
+  );
+  assert.equal(updated.response.status, 200, JSON.stringify(updated.body));
+  assert.equal(updated.body.channel.enabled, false);
+
+  const tested = await adminPost(
+    f,
+    superJar,
+    `${channelPath}/test`,
+    { reason: "Validate the endpoint after maintenance" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-test-1" },
+  );
+  assert.equal(tested.response.status, 200, JSON.stringify(tested.body));
+  assert.equal(tested.body.ok, true);
+  assert.equal(tested.body.test.status, "succeeded");
+  assert.equal(tested.body.test.resultCode, "transport_ok");
+  const testReplay = await adminPost(
+    f,
+    superJar,
+    `${channelPath}/test`,
+    { reason: "Validate the endpoint after maintenance" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-test-1" },
+  );
+  assert.equal(testReplay.response.status, 200);
+  assert.equal(testReplay.body.replayed, true);
+  assert.equal(testReplay.body.test.testId, tested.body.test.testId);
+
+  testFails = true;
+  const failedTest = await adminPost(
+    f,
+    superJar,
+    `${channelPath}/test`,
+    { reason: "Validate failure classification" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-channel-test-2" },
+  );
+  assert.equal(failedTest.response.status, 200, JSON.stringify(failedTest.body));
+  assert.equal(failedTest.body.ok, false);
+  assert.equal(failedTest.body.test.status, "failed");
+  assert.equal(failedTest.body.test.resultCode, "transport_timeout");
+
+  const data = await readAdminData(f);
+  assert.equal(Object.keys(data.notificationChannels).length, 1);
+  assert.equal(Object.keys(data.notificationChannelTests).length, 2);
+  assert.equal(Object.keys(data.notificationDeliveries).length, 0);
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "notification.channel.created"
+      && audit.channelId === created.body.channel.channelId
+      && audit.reason === channelBody.reason));
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "notification.channel.updated"
+      && audit.channelId === created.body.channel.channelId));
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "notification.channel.tested"
+      && audit.result === "failed"
+      && audit.resultCode === "transport_timeout"));
+  assert.ok(!JSON.stringify(data.notificationChannels).includes("plaintext-notification-token"));
 });

@@ -60,7 +60,15 @@ import {
   NotificationOutbox,
   NOTIFICATION_STATUSES,
   publicNotificationDelivery,
+  stableErrorCode,
 } from "./notification-outbox.js";
+import {
+  NotificationChannelTransport,
+  channelProviderFromData,
+  createNotificationChannel,
+  publicNotificationChannel,
+  updateNotificationChannel,
+} from "./notification-channels.js";
 
 const MAX_BODY = 16 * 1024;
 const DEFAULT_USAGE_WINDOW_DAYS = 7;
@@ -1092,14 +1100,38 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     ? (options.stepUpOidc || new OidcClient(config.stepUpOidc))
     : null;
   const authService = options.authService || new AuthServiceClient(config.authService);
+  const notificationChannelSettings = config.notifications?.channels || {};
+  const notificationChannelTransport = options.notificationChannelTransport || (
+    notificationChannelSettings.enabled
+      ? new NotificationChannelTransport(store, {
+        env: options.notificationChannelEnv || process.env,
+        allowlist: notificationChannelSettings.outboundAllowlist || [],
+        emailRecipientDomains: notificationChannelSettings.emailRecipientDomains || [],
+        timeoutMs: notificationChannelSettings.httpTimeoutMs,
+        maxResponseBytes: notificationChannelSettings.httpMaxResponseBytes,
+        maxRedirects: notificationChannelSettings.httpMaxRedirects,
+        dnsResolver: options.notificationDnsResolver,
+        requestImpl: options.notificationRequestImpl,
+        now: options.notificationNow,
+      })
+      : null
+  );
   const notificationOutbox = options.notificationOutbox || new NotificationOutbox(store, {
     maxAttempts: config.notifications?.maxAttempts || 6,
     now: options.notificationNow,
+    channelProvider: notificationChannelSettings.enabled
+      ? channelProviderFromData
+      : null,
   });
+  const notificationTransport = options.notificationTransport || (
+    notificationChannelTransport
+      ? (delivery) => notificationChannelTransport.deliver(delivery)
+      : null
+  );
   const notificationDispatcher = options.notificationDispatcher || (
-    options.notificationTransport
+    notificationTransport
       ? new NotificationDispatcher(store, {
-        transport: options.notificationTransport,
+        transport: notificationTransport,
         leaseMs: config.notifications?.leaseMs || 60 * 1000,
         pollIntervalMs: config.notifications?.pollIntervalMs || 30 * 1000,
         batchSize: config.notifications?.batchSize || 20,
@@ -2039,9 +2071,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     });
   }
 
-  async function requireStepUp(current, req, action) {
+  async function requireStepUp(current, req, action, riskOverride = "") {
     const { sidHash, session } = current;
-    const risk = riskForAction(action);
+    const risk = riskOverride || riskForAction(action);
     if (!["H", "C"].includes(risk)) return null;
     if (!config.stepUpOidc || !stepUpOidc) {
       throw new HttpError(
@@ -2847,6 +2879,400 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       ok: true,
       replayed: outcome.replayed,
       delivery: publicNotificationDelivery(outcome.delivery),
+    });
+  }
+
+  function requireNotificationChannels() {
+    if (!config.notifications?.channels?.enabled || !notificationChannelTransport) {
+      throw new HttpError(
+        503,
+        "notification_channels_unavailable",
+        "Notification channel delivery is not configured",
+      );
+    }
+  }
+
+  function notificationChannelInput(body, update = false) {
+    const allowed = new Set([
+      "reason",
+      "name",
+      "type",
+      "provider",
+      "enabled",
+      "eventTypes",
+      "secretRef",
+      "config",
+    ]);
+    const unexpected = Object.keys(body).find((key) => !allowed.has(key));
+    if (unexpected) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `Unexpected notification channel field: ${unexpected}`,
+      );
+    }
+    const input = {};
+    for (const key of allowed) {
+      if (key !== "reason" && body[key] !== undefined) input[key] = body[key];
+    }
+    if (update && Object.keys(input).length === 0) {
+      throw new HttpError(400, "invalid_request", "Notification channel update is empty");
+    }
+    return input;
+  }
+
+  function notificationChannelFingerprint(action, channelId, reason, payload) {
+    return sha256(JSON.stringify(canonicalValue({
+      action,
+      channelId,
+      reason,
+      payload,
+    })));
+  }
+
+  function normalizedChannelPayload(channel) {
+    return {
+      name: channel.name,
+      type: channel.type,
+      provider: channel.provider,
+      enabled: channel.enabled,
+      eventTypes: channel.eventTypes,
+      secretRef: channel.secretRef,
+      config: channel.config,
+    };
+  }
+
+  function publicNotificationChannelTest(result) {
+    if (!result) return null;
+    return {
+      testId: String(result.testId || ""),
+      channelId: String(result.channelId || ""),
+      status: String(result.status || ""),
+      resultCode: String(result.resultCode || ""),
+      createdAt: String(result.createdAt || ""),
+    };
+  }
+
+  async function listNotificationChannels(session) {
+    requireNotificationChannels();
+    await requirePermission(session, "notifications.channels.read");
+    return store.read((data) => {
+      const testsByChannel = new Map();
+      for (const result of Object.values(data.notificationChannelTests)) {
+        const previous = testsByChannel.get(result.channelId);
+        if (!previous || String(result.createdAt).localeCompare(String(previous.createdAt)) > 0) {
+          testsByChannel.set(result.channelId, result);
+        }
+      }
+      return Object.values(data.notificationChannels)
+        .sort((left, right) => String(left.name).localeCompare(String(right.name)))
+        .map((channel) => ({
+          ...publicNotificationChannel(channel),
+          lastTest: publicNotificationChannelTest(testsByChannel.get(channel.channelId)),
+        }));
+    });
+  }
+
+  async function createNotificationChannelResource(req, res) {
+    requireNotificationChannels();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    await requirePermission(current.session, "notifications.channels.write");
+    await requireStepUp(current, req, "notification.channel.create", "H");
+    const input = notificationChannelInput(body);
+    let candidate;
+    try {
+      candidate = createNotificationChannel(input, {
+        allowlist: config.notifications?.channels?.outboundAllowlist || [],
+        emailRecipientDomains: config.notifications?.channels?.emailRecipientDomains || [],
+        actorSubjectId: current.session.subjectId,
+      });
+    } catch (error) {
+      throw new HttpError(400, "invalid_notification_channel", error.message);
+    }
+    const payload = normalizedChannelPayload(candidate);
+    const requestFingerprint = notificationChannelFingerprint(
+      "notification.channel.create",
+      "",
+      reason,
+      payload,
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const outcome = await store.mutate((data) => {
+      const existing = data.notificationChannelRequests[idempotencyKeyHash];
+      if (existing) {
+        if (existing.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "notification_channel_request_conflict",
+            "Idempotency-Key was already used for a different notification channel request",
+          );
+        }
+        const channel = data.notificationChannels[existing.channelId];
+        if (!channel) {
+          throw new HttpError(
+            503,
+            "storage_unavailable",
+            "The notification channel request points to a missing channel",
+          );
+        }
+        return { channel: structuredClone(channel), created: false };
+      }
+      if (data.notificationChannels[candidate.channelId]) {
+        throw new HttpError(409, "notification_channel_conflict", "Channel already exists");
+      }
+      data.notificationChannels[candidate.channelId] = candidate;
+      const now = candidate.createdAt;
+      data.notificationChannelRequests[idempotencyKeyHash] = {
+        idempotencyKeyHash,
+        requestFingerprint,
+        action: "notification.channel.create",
+        channelId: candidate.channelId,
+        status: "succeeded",
+        createdAt: now,
+        updatedAt: now,
+      };
+      data.adminSystemAuditLogs.push({
+        id: `audit_${crypto.randomUUID()}`,
+        action: "notification.channel.created",
+        timestamp: now,
+        channelId: candidate.channelId,
+        channelType: candidate.type,
+        provider: candidate.provider,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        result: "succeeded",
+      });
+      return { channel: structuredClone(candidate), created: true };
+    });
+    json(res, outcome.created ? 201 : 200, {
+      ok: true,
+      created: outcome.created,
+      channel: publicNotificationChannel(outcome.channel),
+    });
+  }
+
+  async function updateNotificationChannelResource(req, res, channelId) {
+    requireNotificationChannels();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    await requirePermission(current.session, "notifications.channels.write");
+    await requireStepUp(current, req, "notification.channel.update", "H");
+    const patch = notificationChannelInput(body, true);
+    const existing = await store.read((data) => {
+      const channel = data.notificationChannels[channelId];
+      return channel ? structuredClone(channel) : null;
+    });
+    if (!existing) throw new HttpError(404, "notification_channel_not_found", "Channel not found");
+    let updated;
+    try {
+      updated = updateNotificationChannel(existing, patch, {
+        allowlist: config.notifications?.channels?.outboundAllowlist || [],
+        emailRecipientDomains: config.notifications?.channels?.emailRecipientDomains || [],
+        actorSubjectId: current.session.subjectId,
+      });
+    } catch (error) {
+      throw new HttpError(400, "invalid_notification_channel", error.message);
+    }
+    const requestFingerprint = notificationChannelFingerprint(
+      "notification.channel.update",
+      channelId,
+      reason,
+      patch,
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const outcome = await store.mutate((data) => {
+      const existingRequest = data.notificationChannelRequests[idempotencyKeyHash];
+      if (existingRequest) {
+        if (existingRequest.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "notification_channel_request_conflict",
+            "Idempotency-Key was already used for a different notification channel request",
+          );
+        }
+        const channel = data.notificationChannels[existingRequest.channelId];
+        if (!channel) {
+          throw new HttpError(
+            503,
+            "storage_unavailable",
+            "The notification channel request points to a missing channel",
+          );
+        }
+        return { channel: structuredClone(channel), updated: false };
+      }
+      if (!data.notificationChannels[channelId]) {
+        throw new HttpError(404, "notification_channel_not_found", "Channel not found");
+      }
+      data.notificationChannels[channelId] = updated;
+      data.notificationChannelRequests[idempotencyKeyHash] = {
+        idempotencyKeyHash,
+        requestFingerprint,
+        action: "notification.channel.update",
+        channelId,
+        status: "succeeded",
+        createdAt: updated.updatedAt,
+        updatedAt: updated.updatedAt,
+      };
+      data.adminSystemAuditLogs.push({
+        id: `audit_${crypto.randomUUID()}`,
+        action: "notification.channel.updated",
+        timestamp: updated.updatedAt,
+        channelId,
+        channelType: updated.type,
+        provider: updated.provider,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        result: "succeeded",
+      });
+      return { channel: structuredClone(updated), updated: true };
+    });
+    json(res, 200, {
+      ok: true,
+      updated: outcome.updated,
+      channel: publicNotificationChannel(outcome.channel),
+    });
+  }
+
+  async function testNotificationChannelResource(req, res, channelId) {
+    requireNotificationChannels();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    await requirePermission(current.session, "notifications.channels.test");
+    await requireStepUp(current, req, "notification.channel.test", "H");
+    const channel = await store.read((data) => {
+      const stored = data.notificationChannels[channelId];
+      return stored ? structuredClone(stored) : null;
+    });
+    if (!channel) throw new HttpError(404, "notification_channel_not_found", "Channel not found");
+    const requestFingerprint = notificationChannelFingerprint(
+      "notification.channel.test",
+      channelId,
+      reason,
+      {},
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const reservation = await store.mutate((data) => {
+      const existing = data.notificationChannelRequests[idempotencyKeyHash];
+      if (existing) {
+        if (existing.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "notification_channel_request_conflict",
+            "Idempotency-Key was already used for a different notification channel request",
+          );
+        }
+        if (existing.status === "in_progress") {
+          throw new HttpError(
+            409,
+            "notification_channel_test_in_progress",
+            "This notification channel test is still in progress",
+          );
+        }
+        return {
+          existing: true,
+          testId: existing.testId || "",
+          createdAt: existing.createdAt,
+        };
+      }
+      const now = new Date().toISOString();
+      const testId = `nct_${sha256(
+        `${idempotencyKeyHash}\u0000${channelId}\u0000${now}`,
+      ).slice(0, 24)}`;
+      data.notificationChannelRequests[idempotencyKeyHash] = {
+        idempotencyKeyHash,
+        requestFingerprint,
+        action: "notification.channel.test",
+        channelId,
+        status: "in_progress",
+        testId,
+        createdAt: now,
+        updatedAt: now,
+      };
+      return { existing: false, testId, createdAt: now };
+    });
+    if (reservation.existing) {
+      const result = await store.read((data) => (
+        data.notificationChannelTests[reservation.testId]
+          ? structuredClone(data.notificationChannelTests[reservation.testId])
+          : null
+      ));
+      if (!result) {
+        throw new HttpError(
+          503,
+          "storage_unavailable",
+          "The notification channel test result is unavailable",
+        );
+      }
+      json(res, 200, {
+        ok: result.status === "succeeded",
+        replayed: true,
+        test: publicNotificationChannelTest(result),
+      });
+      return;
+    }
+    let status = "succeeded";
+    let resultCode = "transport_ok";
+    try {
+      await notificationChannelTransport.test(channel);
+    } catch (error) {
+      status = "failed";
+      resultCode = stableErrorCode(error);
+    }
+    const result = await store.mutate((data) => {
+      const now = new Date().toISOString();
+      const stored = {
+        testId: reservation.testId,
+        channelId,
+        status,
+        resultCode,
+        actorSubjectId: current.session.subjectId,
+        createdAt: now,
+      };
+      data.notificationChannelTests[reservation.testId] = stored;
+      const request = data.notificationChannelRequests[idempotencyKeyHash];
+      if (!request || request.status !== "in_progress") {
+        throw new HttpError(
+          503,
+          "storage_unavailable",
+          "The notification channel test reservation was lost",
+        );
+      }
+      request.status = "succeeded";
+      request.testId = reservation.testId;
+      request.updatedAt = now;
+      data.adminSystemAuditLogs.push({
+        id: `audit_${crypto.randomUUID()}`,
+        action: "notification.channel.tested",
+        timestamp: now,
+        channelId,
+        testId: reservation.testId,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        result: status,
+        resultCode,
+      });
+      return stored;
+    });
+    json(res, 200, {
+      ok: result.status === "succeeded",
+      replayed: false,
+      test: publicNotificationChannelTest(result),
     });
   }
 
@@ -3966,6 +4392,38 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
       json(res, 200, await listNotificationDeliveries(current.session, url.searchParams));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/notifications/channels") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, {
+        channels: await listNotificationChannels(current.session),
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/notifications/channels") {
+      await createNotificationChannelResource(req, res);
+      return;
+    }
+
+    const notificationChannelMatch =
+      /^\/api\/v1\/admin\/notifications\/channels\/(nch_[a-f0-9]{24})$/.exec(
+        url.pathname,
+      );
+    if (req.method === "PATCH" && notificationChannelMatch) {
+      await updateNotificationChannelResource(req, res, notificationChannelMatch[1]);
+      return;
+    }
+
+    const notificationChannelTestMatch =
+      /^\/api\/v1\/admin\/notifications\/channels\/(nch_[a-f0-9]{24})\/test$/.exec(
+        url.pathname,
+      );
+    if (req.method === "POST" && notificationChannelTestMatch) {
+      await testNotificationChannelResource(req, res, notificationChannelTestMatch[1]);
       return;
     }
 

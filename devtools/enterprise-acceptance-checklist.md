@@ -1,6 +1,6 @@
 # Magpie 企业版验收清单
 
-状态：生产验收基线 v1.8（与完整方案 v3.13 对应）
+状态：生产验收基线 v1.9（与完整方案 v3.14 对应）
 
 日期：2026-11-02
 
@@ -105,18 +105,23 @@ Docker/Compose 构建、启动、健康检查和真实共享卷验证状态
 ```
 
 C4-01 已完成本地单元、CLI 回归和隔离真实二进制冒烟；C4-02 已完成 Node 语法检查和
-15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项和 60 项管理服务集成测试，管理服务合计
-67/67 通过；真实 Compose、只读挂载和 digest 重启仍未验收。C4-03b/C4-03c/C5 核心已通过
+15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项；当前管理服务 75/75 通过（61 项管理服务
+集成、7 项目录专项、7 项通知渠道专项）；真实 Compose、只读挂载和 digest 重启仍未验收。
+C4-03b/C4-03c/C5 核心已通过
 25 项 auth-service 测试；C4-03d 已部分实现管理页额度/模型写表单和员工只读状态门户；
 C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，包括多凭证、refresh/rotate 继承和故障恢复。
 APR-01a 已实现审批后端、绑定校验、职责分离、一次性消费和系统审计；APR-01b 已实现
 HMAC/Mock 外部审批回调适配器；APR-01c 已实现独立 OIDC step-up、PKCE、`prompt=login`、
 `max_age`、`auth_time`、ACR/MFA、会话/IP/User-Agent/角色范围绑定和 H/C 门禁，并通过
 Mock IdP 集成测试。NOTIFY-01a 已实现 outbox 原子提交、租约恢复、重试、死信、deliveries
-查询和受审计人工重放，并通过 Mock/故障测试；NOTIFY-01b/c/d 的邮件/IM/Webhook/SIEM/
-工单、渠道规则和运营页未实现。页面 E2E、恢复入口、真实共享卷、真实企业 IdP/MFA、
-反向代理、C5 生产验收、真实 OA 连接器、审批 UI、审批箱、break-glass、真实通知渠道以及
-D 仍未完成/验收。
+查询和受审计人工重放，并通过 Mock/故障测试。NOTIFY-01b 已实现 `email`/`im`/`webhook`/
+`ticketing` 渠道管理 API 和统一 HTTPS 渠道适配器；专项/故障测试覆盖 RBAC/CSRF/step-up/
+理由/幂等/审计、`eventId + channelId` fanout 去重、Webhook HMAC、HTTPS:443、host
+allowlist、DNS 固定解析以及私网/云元数据/重定向防护。频道测试只写测试结果，不伪造真实
+delivery；邮件、IM 和工单是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/
+ServiceNow/Jira SDK。NOTIFY-01c/d 的 SIEM、规则/抑制和运营页未实现；真实厂商网关、证书、
+租户配置和投递未验收。页面 E2E、恢复入口、真实共享卷、真实企业 IdP/MFA、反向代理、
+C5 生产验收、真实 OA 连接器、审批 UI、审批箱、break-glass 以及 D 仍未完成/验收。
 后续应至少运行：
 
 W-04a-d 还必须逐项保留以下证据：
@@ -168,7 +173,7 @@ v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPo
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 67/67 已覆盖 |
+| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 75/75 已覆盖 |
 | R-02 | 用量归属 | `callerKeyId -> credential -> user -> 组织` 正确 | Mock 已覆盖；真实 usage 卷未验收 |
 | R-03 | 时间序列 | `groupBy=user/department/model/agent`，`bucket=hour/day` | Mock 已覆盖 |
 | R-04 | 数据损坏 | 缺失、尾半行、坏 JSON、超行/超字段/超记录返回稳定存储错误 | Mock 已覆盖 |
@@ -181,8 +186,10 @@ v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPo
 一次性消费和系统审计已实现；APR-01b 的 HMAC/Mock 外部审批回调适配器已实现；APR-01c
 的独立 OIDC step-up 已实现并通过 Mock IdP 集成测试。NOTIFY-01a 的 transactional outbox、
 租约、幂等、退避、死信、重启恢复、deliveries 查询和受审计人工重放已实现并通过 Mock/故障
-测试；NOTIFY-01b/c/d 的邮件/IM/Webhook/SIEM/工单、规则和运营页尚未实现。真实 OA/IdP/
-MFA/反向代理、内置审批箱、break-glass 和真实通知渠道尚未验收。Mock、页面截图或存在
+测试；NOTIFY-01b 的渠道管理 API 和统一 HTTPS 渠道适配器已实现并通过 Mock/故障测试，
+支持邮件/IM/Webhook/工单网关契约、HMAC Webhook 和防 SSRF；NOTIFY-01c/d 的 SIEM、规则/
+抑制和运营页尚未实现。真实 OA/IdP/MFA/反向代理、内置审批箱、break-glass、真实厂商网关和
+真实通知投递尚未验收。Mock、页面截图或存在
 `approvalId` 字段本身都不算生产验收通过；审批生产验收
 至少使用真实管理 IdP 和真实 OA 回调，通知至少使用真实邮件/IM 测试域、
 受控 Webhook、SIEM 测试索引和工单测试项目。每条记录保留脱敏后的 `approvalId`、
@@ -211,17 +218,17 @@ MFA/反向代理、内置审批箱、break-glass 和真实通知渠道尚未验�
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
 | NT-01 | outbox 原子提交 | 业务状态、审计和 outbox 事件在同一事务或受控文件锁提交；任一提交失败时不出现“业务成功但事件永久丢失” | 01a 核心已实现并有集成测试；生产存储未验收 |
-| NT-02 | 请求解耦 | 业务响应不等待 SMTP、IM、Webhook、SIEM 或工单；渠道超时不改变已提交业务结果 | 01a 设计满足；无真实渠道可验收 |
+| NT-02 | 请求解耦 | 业务响应不等待 SMTP、IM、Webhook、SIEM 或工单；渠道超时不改变已提交业务结果 | 01a/01b 核心和 Mock/故障测试满足；生产渠道未验收 |
 | NT-03 | 重启恢复 | 在 pending/leased/delivering/retry_wait 各状态强制重启 dispatcher，事件恢复且不丢失；租约超时可回收 | 01a 核心已实现并有重启式存储测试；生产部署未验收 |
-| NT-04 | 重试与幂等 | 超时、5xx、限流和网络错误按指数退避重试；同一 `eventId` 重复投递可被接收端去重，不产生重复工单或重复告警 | 01a 重试/幂等核心已实现；无真实接收端验收 |
+| NT-04 | 重试与幂等 | 超时、5xx、限流和网络错误按指数退避重试；同一 `eventId` 重复投递可被接收端去重，不产生重复工单或重复告警 | 01a/01b 按 `eventId + channelId` 去重及重试核心已实现；真实接收端未验收 |
 | NT-05 | 死信与人工重放 | 永久失败进入 dead_letter 并可查询；有权限管理员在理由和审计下重放，重放生成新 attempt，不修改原始证据 | 01a 已实现，无运营 UI 和真实渠道验收 |
-| NT-06 | 邮件与企业 IM | SMTP/Graph/邮件网关和飞书/Teams/Slack 机器人可配置、可测试；收件人域、附件、超时和消息大小限制生效，Secret 不落页面或日志 | 未实现 |
-| NT-07 | 通用 Webhook | 仅 HTTPS + 允许列表；HMAC 时间戳/nonce 签名可由接收端验证；超时、响应体上限和重试符合契约 | 未实现 |
-| NT-08 | Webhook 防 SSRF | 拒绝私网、回环、链路本地、云元数据和不允许的端口；重定向逐跳重新校验；DNS rebinding 和 TOCTOU 测试不能访问内网 | 未实现 |
+| NT-06 | 邮件与企业 IM | SMTP/Graph/邮件网关和飞书/Teams/Slack 机器人可配置、可测试；收件人域、附件、超时和消息大小限制生效，Secret 不落页面或日志 | 01b 提供邮件/IM 的 HTTPS 网关契约、渠道测试、收件人域限制和 `secretRef`；不是原生 SMTP/Graph/飞书/Teams SDK，真实网关和投递未验收 |
+| NT-07 | 通用 Webhook | 仅 HTTPS + 允许列表；HMAC 时间戳/nonce 签名可由接收端验证；超时、响应体上限和重试符合契约 | 01b 已实现并通过 Mock/故障测试；真实接收端未验收 |
+| NT-08 | Webhook 防 SSRF | 拒绝私网、回环、链路本地、云元数据和不允许的端口；重定向逐跳重新校验；DNS rebinding 和 TOCTOU 测试不能访问内网 | 01b 已实现 HTTPS:443、host allowlist、DNS 固定解析、私网/回环/链路本地/云元数据拒绝和 307/308 逐跳校验；真实网络环境未验收 |
 | NT-09 | SIEM 投递 | OTel/Syslog/HTTP Collector 使用固定 schema；严重安全事件 5 分钟内进入测试索引，字段、严重级别和 `eventId` 可核对 | 未实现 |
-| NT-10 | 工单联动 | ServiceNow/Jira/飞书工单可创建并保存外部工单 ID；创建失败重试、死信和人工补单，不伪造“已建单” | 未实现 |
+| NT-10 | 工单联动 | ServiceNow/Jira/飞书工单可创建并保存外部工单 ID；创建失败重试、死信和人工补单，不伪造“已建单” | 01b 提供通用 HTTPS 工单网关契约并以 `deliveryId` 作外部引用，失败进入 outbox 重试/死信；非原生 ServiceNow/Jira/飞书 SDK，真实工单项目和外工单 ID 回读未验收 |
 | NT-11 | 抑制、聚合与证据 | 规则可聚合并抑制重复外部打扰，但原始安全事件不丢弃；抑制范围、原因、到期和恢复均可见审计 | 未实现 |
-| NT-12 | 脱敏与运营查询 | 响应、存储、日志、审计、outbox、Webhook 和 SIEM 全链路扫描不含 Gateway Key、token hash、Cookie、OIDC/服务 token、Prompt/回复正文和完整工具参数；失败、重试、抑制和死信可授权查询 | 01a 的 deliveries 查询、存储脱敏和死信重放已覆盖；Webhook/SIEM、抑制和完整运营页未实现 |
+| NT-12 | 脱敏与运营查询 | 响应、存储、日志、审计、outbox、Webhook 和 SIEM 全链路扫描不含 Gateway Key、token hash、Cookie、OIDC/服务 token、Prompt/回复正文和完整工具参数；失败、重试、抑制和死信可授权查询 | 01a/01b 的 deliveries、渠道投影、存储脱敏和死信重放已覆盖；SIEM、抑制规则和完整运营页未实现 |
 
 每条审批/通知验收还必须保留以下串联证据：
 

@@ -30,9 +30,10 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 冒烟测试。**C4-02** `gateway-control` 受控适配器也已实现，并通过 `15/15` Mock/故障
 测试：只允许 describe/apply/健康检查、独立 Bearer 服务令牌、固定 argv、10 秒超时、
 64 KiB 上限、写入后独立回读和 `pending` 保守状态。C4-02 的 Docker/Compose 尚未实机
-验收，admin-service 经 auth-service 间接调用，尚未直接接入。**C4-03a** 正式只读模型目录已实现，并通过 7 项目录专项
-和 60 项管理服务集成测试，管理服务合计 `67/67`；`GET /api/v1/admin/models` 已使用正式
-目录，`ADMIN_MODELS` 仅保留兼容显示。C4-03a 仍待真实 Compose/只读挂载/digest 验收；
+验收，admin-service 经 auth-service 间接调用，尚未直接接入。**C4-03a** 正式只读模型目录已实现，并通过 7 项目录专项；
+当前管理服务 `75/75`（61 项管理服务集成、7 项目录专项、7 项通知渠道专项）；
+`GET /api/v1/admin/models` 已使用正式目录，`ADMIN_MODELS` 仅保留兼容显示。C4-03a 仍待真实
+Compose/只读挂载/digest 验收；
 auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b** 的用户级策略核心已实现：版本化 `gatewayPolicy`、
 旧 M1 `unknown` 迁移、quota/models 分步首次设置、缺项失败关闭、版本冲突和逐凭证回读确认
 均通过 auth-service `25/25`。C4-03c 的额度/模型管理 API、幂等签发、issuance journal、
@@ -48,11 +49,14 @@ C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未�
 以及 `APR-01c` 的独立 step-up 已实现并通过 Mock/故障测试；`APR-01c` 覆盖独立 OIDC
 Client、`prompt=login`、`max_age`、`auth_time`、ACR/MFA、会话/IP/UA/角色范围绑定，
 未配置时高风险操作失败关闭。`NOTIFY-01a` 的 transactional outbox、租约、幂等、退避、
-死信、重启恢复、deliveries 查询和受审计人工重放已实现并通过 Mock/故障测试；`01b/c/d`
-的邮件/IM/Webhook/SIEM/工单、渠道规则和运营页仍未实现。正常启动不注入 transport 时不会
-创建 dispatcher，也不会伪造“已投递”。`APR-01d/e` 的审批箱和 break-glass、真实 OA/IdP
-连接器仍未实现或验收。业务请求不得同步等待外部通知渠道，管理页也不能在真实 IdP、MFA、
-反向代理和生产验收完成前宣称生产可用。
+死信、重启恢复、deliveries 查询和受审计人工重放已实现并通过 Mock/故障测试；`NOTIFY-01b`
+的渠道管理 API 和统一 HTTPS 渠道适配器已实现并通过专项/故障测试，支持 `email`/`im`/
+`webhook`/`ticketing`、HMAC Webhook、host allowlist、DNS 固定解析和私网/重定向防护。
+邮件/IM/工单是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/ServiceNow/Jira SDK；
+`NOTIFY-01c/d` 的 SIEM、渠道规则/抑制和运营页仍未实现。默认禁用渠道，未启用渠道或没有
+transport 时不会创建 dispatcher，也不会伪造“已投递”。`APR-01d/e` 的审批箱和 break-glass、
+真实 OA/IdP 连接器、真实厂商网关和生产投递仍未实现或验收。业务请求不得同步等待外部通知
+渠道，管理页也不能在真实 IdP、MFA、反向代理和生产验收完成前宣称生产可用。
 
 企业功能必须按下面的顺序推进，不能跳步：
 
@@ -67,7 +71,7 @@ Client、`prompt=login`、`max_age`、`auth_time`、ACR/MFA、会话/IP/UA/角�
   -> C4-04：完整管理到真实 Magpie 策略流 E2E（已完成；待 Docker/共享卷和真实 IdP 验收）
   -> C5：operations/audit-logs/reconcile
   -> APR-01a/b/c：审批绑定/一次性消费、外部审批、step-up（代码和 Mock 测试已完成）
-  -> NOTIFY-01a [core done] / 01b/c：outbox、邮件/IM/Webhook/工单、SIEM
+  -> NOTIFY-01a/b [core done] / 01c：outbox、渠道 API/HTTPS transport、SIEM
   -> M2-D：管理台写操作、看板和授权导出
   -> APR-01d/e + NOTIFY-01d：内置审批、break-glass、通知运营页
   -> M3-M6

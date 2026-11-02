@@ -3,8 +3,9 @@
 独立的企业管理控制面。当前版本完成 **M2-A 管理身份底座**、**M2-B 只读治理**、
 **M2-C2 管理写接口与权限映射**、**M2-C3 幂等与 intent/result 管理审计**和
 **M2-C5 操作/审计查询与对账**、**M2-E1/APR-01a 服务端审批**，以及
-**APR-01b HMAC 外部审批回调适配器**、**APR-01c 独立 OIDC step-up** 和
-**NOTIFY-01a transactional outbox**：管理 OIDC、
+**APR-01b HMAC 外部审批回调适配器**、**APR-01c 独立 OIDC step-up**、
+**NOTIFY-01a transactional outbox** 和 **NOTIFY-01b 渠道管理/统一 HTTPS transport**：
+管理 OIDC、
 会话、CSRF、RBAC、组织范围、用户/部门/设备/凭证/模型/用量只读视图、只读 `usage.jsonl`
 汇总，以及停用/启用用户、吊销设备和轮换当前凭证四个受控写接口。Auth 服务的
 **M2-C1 内部写接口**继续只供服务间调用。
@@ -15,7 +16,8 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 67 项管理测试通过（60 项管理服务集成测试 + 7 项目录专项测试）。auth-service 的
+当前总计 75 项管理测试通过（61 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项）。
+auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
 CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据链成立时显示“已生效”；
@@ -378,9 +380,39 @@ ADMIN_NOTIFICATION_OUTBOX_MAX_ATTEMPTS=6
 ADMIN_NOTIFICATION_OUTBOX_BATCH_SIZE=20
 ```
 
-正常启动不注入外部 transport，因此只写入 outbox，不创建 dispatcher，也不会把事件标成
-`delivered`。当前只有 deliveries 查询和死信人工重放；channels/rules/suppress/test-channel
-API、真实邮件/IM/Webhook/SIEM/工单渠道和运营页尚未实现。
+NOTIFY-01b 的渠道配置：
+
+```text
+ADMIN_NOTIFICATION_CHANNELS_ENABLED=false
+ADMIN_NOTIFICATION_OUTBOUND_ALLOWLIST=
+ADMIN_NOTIFICATION_EMAIL_RECIPIENT_DOMAINS=
+ADMIN_NOTIFICATION_HTTP_TIMEOUT_MS=5000
+ADMIN_NOTIFICATION_HTTP_MAX_RESPONSE_BYTES=65536
+ADMIN_NOTIFICATION_HTTP_MAX_REDIRECTS=3
+```
+
+可用渠道类型为 `email`、`im`、`webhook` 和 `ticketing`。渠道只保存 `secretRef` 环境变量
+名，不保存 Secret；Webhook 要求 `secretRef`，发送
+`X-Magpie-Timestamp`、`X-Magpie-Nonce` 和
+`X-Magpie-Signature: v1=HMAC-SHA256(secret, timestamp.nonce.rawJsonBody)`。出站必须是
+HTTPS:443、命中 host allowlist，并在每次请求和 307/308 重定向时重新解析并固定公网地址；
+拒绝私网、回环、链路本地、云元数据和不允许的端口。
+
+渠道 API：
+
+```text
+GET   /api/v1/admin/notifications/channels
+POST  /api/v1/admin/notifications/channels
+PATCH /api/v1/admin/notifications/channels/{channelId}
+POST  /api/v1/admin/notifications/channels/{channelId}/test
+```
+
+读操作要求 `notifications.channels.read`；创建/更新要求 `.write`，测试要求 `.test`。所有写
+操作还要求管理会话、CSRF、非空理由、`Idempotency-Key`、审计和 H 风险 step-up。渠道测试
+只写 `notificationChannelTests` 结果，不创建伪造的业务 delivery。默认禁用渠道；未启用渠道
+或没有 transport 时不会创建 dispatcher，也不会把事件标成 `delivered`。邮件/IM/工单使用
+厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/ServiceNow/Jira SDK；SIEM、
+rules/suppress API、通知运营页和真实厂商网关验收仍未实现。
 
 四个写接口的成功响应包含 `requestId`、`operationId`、动作名、目标 ID 和白名单业务摘要。
 请求可携带 `Idempotency-Key`（去空白后最长 128 个字符且不得含控制字符）。服务端只持久化
@@ -413,10 +445,11 @@ Get-ChildItem src\*.js | ForEach-Object {
   & $node --check $_.FullName
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-& $node --test test\admin-service.test.mjs test\model-catalog.test.mjs
+& $node --test test\admin-service.test.mjs test\model-catalog.test.mjs test\notification-channels.test.mjs
 ```
 
-2026-11-02 的实际结果：`67 passed, 0 failed`（60 项管理服务集成测试 + 7 项目录专项测试）。
+2026-11-02 的实际结果：`75 passed, 0 failed`（61 项管理服务集成测试 + 7 项目录专项测试 +
+7 项通知渠道专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
 拒绝、用户详情跨范围拒绝、会话过期、IP fail-closed、依赖不可用、凭证元数据、用量归属、
@@ -442,10 +475,12 @@ eventId 幂等、错误签名/媒体类型/缺失头、审批状态和职责分�
 essential `auth_time`/ACR 请求、未配置时失败关闭、站外返回路径拒绝、配置一致性和 secret
 不落响应/存储。NOTIFY-01a 新增覆盖 8 种 L0 事件、字段白名单、稳定 `eventId`/`deliveryId`
 幂等、租约恢复、并发串行、1/5/15/60/360 分钟退避、死信、deliveries 脱敏查询、受审计
-人工重放、审批/结果审计与 outbox 原子提交，以及有/无 transport 时的启动行为。管理服务
-当前为 `67 passed, 0 failed`，
+人工重放、审批/结果审计与 outbox 原子提交、渠道 RBAC/CSRF/step-up/理由/幂等/审计、
+渠道投影与收件人限制、Webhook HMAC、HTTPS/allowlist/DNS 固定解析、SSRF 和重定向拒绝、
+fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。管理服务当前为
+`75 passed, 0 failed`，
 auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，合计
-`107 passed, 0 failed`。
+`115 passed, 0 failed`。
 
 尚未验证：
 
@@ -460,9 +495,10 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - APR-01c 的代码和 Mock IdP 集成测试已完成；APR-01d/e 及真实管理 IdP step-up/MFA/ACR、
   真实飞书/OA/ServiceNow/Jira 适配器及生产回调演练、串并行审批箱、转交、break-glass、
   审批通知仍未实现/未验收。
-- NOTIFY-01a 没有外部 transport，正常启动不创建 dispatcher；`operation.audit_failed`
-  只有 schema、暂无可靠触发点；deliveries 查询无 cursor。NOTIFY-01b/c/d 的邮件/企业
-  IM/Webhook/SIEM/工单、channels/rules/suppress API 和运营页面未实现/验收。
+- NOTIFY-01a/01b 默认不启用渠道；未启用渠道或没有 transport 时正常启动不创建 dispatcher。
+  `operation.audit_failed` 只有 schema、暂无可靠触发点；deliveries 查询无 cursor。
+  邮件/IM/工单是统一 HTTPS 网关契约，不是原生厂商 SDK；真实网关、证书、租户配置和投递
+  未验收。NOTIFY-01c/d 的 SIEM、rules/suppress API 和通知运营页面未实现/验收。
 - 四个 M2-C2 写接口在真实 IdP、反向代理、真实 auth-service 和真实网关上的端到端演练。
 
 ## 当前限制
@@ -471,9 +507,10 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - 每个管理请求会更新 `lastSeenAt`，小规模试点可接受，规模化需要共享存储和写合并。
 - result 审计失败时 operation 会停在 `dependency_invoked`；C5 已提供查询、审计分页和受控
   对账，但自动补偿、告警队列和真实运维演练仍未实现/验收。
-- 审批已有服务端 API、一次性消费、HMAC 外部回调适配器和 APR-01c step-up；NOTIFY-01a
-  已有 outbox 与死信重放，但没有审批管理 UI、真实 OA 连接器、审批箱、break-glass 或
-  真实通知投递；审批、step-up 和 outbox 状态存储仍是
+- 审批已有服务端 API、一次性消费、HMAC 外部回调适配器和 APR-01c step-up；NOTIFY-01a/01b
+  已有 outbox、渠道 API、统一 HTTPS transport 与死信重放，但没有审批管理 UI、真实 OA
+  连接器、审批箱、break-glass、SIEM、通知运营页或真实厂商网关验收；审批、step-up、
+  渠道和 outbox 状态存储仍是
   单实例 JSON，尚未做多实例并发和真实 OA/IdP 验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。
 - 用量读取当前基于单个 `usage.jsonl` 文件；轮转、归档、超大文件和事件存储查询尚未验收。

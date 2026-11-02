@@ -6,6 +6,7 @@ import {
   NOTIFICATION_SEVERITIES,
   NOTIFICATION_STATUSES,
 } from "./notification-outbox.js";
+import { validateNotificationChannelStore } from "./notification-channels.js";
 
 function emptyStore() {
   return {
@@ -26,6 +27,9 @@ function emptyStore() {
     stepUpAssertions: {},
     notificationDeliveries: {},
     notificationReplayRequests: {},
+    notificationChannels: {},
+    notificationChannelTests: {},
+    notificationChannelRequests: {},
   };
 }
 
@@ -65,6 +69,9 @@ function validateLoaded(value) {
     "stepUpAssertions",
     "notificationDeliveries",
     "notificationReplayRequests",
+    "notificationChannels",
+    "notificationChannelTests",
+    "notificationChannelRequests",
   ]) {
     if (!value[key] || typeof value[key] !== "object" || Array.isArray(value[key])) {
       throw new Error(`admin store ${key} must be an object`);
@@ -224,6 +231,9 @@ function validateLoaded(value) {
         || typeof delivery.eventId !== "string"
         || !/^evt_[A-Za-z0-9_.:-]{4,195}$/.test(delivery.eventId)
         || delivery.schemaVersion !== 1
+        || (delivery.channelId != null
+          && (typeof delivery.channelId !== "string"
+            || (delivery.channelId && !/^nch_[a-f0-9]{24}$/.test(delivery.channelId))))
         || !notificationEventTypes.has(delivery.eventType)
         || !notificationSeverities.has(delivery.severity)
         || !notificationStatuses.has(delivery.status)
@@ -302,6 +312,7 @@ function validateLoaded(value) {
       throw new Error("admin store notification replay request createdAt is invalid");
     }
   }
+  validateNotificationChannelStore(value);
   return value;
 }
 

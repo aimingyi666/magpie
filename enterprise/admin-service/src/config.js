@@ -49,6 +49,18 @@ function list(env, name) {
     .filter(Boolean);
 }
 
+function hostAllowlist(env, name) {
+  const values = list(env, name).map((value) => value.toLowerCase().replace(/\.$/, ""));
+  for (const value of values) {
+    const hostname = value.startsWith("*.") ? value.slice(2) : value;
+    if (!/^(?:[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?|\[[0-9a-f:.]+\])$/.test(hostname)
+        || hostname.includes("..")) {
+      throw new Error(`${name} contains an invalid hostname`);
+    }
+  }
+  return [...new Set(values)].sort();
+}
+
 function url(env, name, fallback) {
   const raw = String(env[name] || fallback || "").trim().replace(/\/+$/, "");
   let parsed;
@@ -280,6 +292,35 @@ export function loadConfig(env = process.env) {
         1,
         200,
       ),
+      channels: {
+        enabled: bool(env, "ADMIN_NOTIFICATION_CHANNELS_ENABLED", false),
+        outboundAllowlist: hostAllowlist(env, "ADMIN_NOTIFICATION_OUTBOUND_ALLOWLIST"),
+        emailRecipientDomains: list(
+          env,
+          "ADMIN_NOTIFICATION_EMAIL_RECIPIENT_DOMAINS",
+        ).map((value) => value.toLowerCase()),
+        httpTimeoutMs: integer(
+          env,
+          "ADMIN_NOTIFICATION_HTTP_TIMEOUT_MS",
+          5000,
+          500,
+          30000,
+        ),
+        httpMaxResponseBytes: integer(
+          env,
+          "ADMIN_NOTIFICATION_HTTP_MAX_RESPONSE_BYTES",
+          64 * 1024,
+          1024,
+          1024 * 1024,
+        ),
+        httpMaxRedirects: integer(
+          env,
+          "ADMIN_NOTIFICATION_HTTP_MAX_REDIRECTS",
+          3,
+          0,
+          3,
+        ),
+      },
     },
   };
 

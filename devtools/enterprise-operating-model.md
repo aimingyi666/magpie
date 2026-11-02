@@ -1,6 +1,6 @@
 # Magpie 企业版项目实施与运营手册
 
-状态：完整实施方案 v3.13（项目治理附件）
+状态：完整实施方案 v3.14（项目治理附件）
 
 日期：2026-11-02
 
@@ -32,8 +32,9 @@
 **当前事实：** M0、M1、M2-A、M2-B、M2-C1、M2-C2 和 M2-C3 已有代码及 Mock/本地测试
 证据；C4-01 的 schema v1 机器协议已实现，并通过 Go 单测、gateway-key CLI 回归和隔离
 真实二进制冒烟；C4-02 `enterprise/gateway-control/` 受控适配器已实现，并通过 15 项
-Mock/故障测试。C4-03a 正式只读模型目录已实现，并通过 7 项目录专项和 60 项管理服务集成
-测试，管理服务合计 67 项通过；C4-03b 的用户级 `gatewayPolicy` 核心已在 auth-service 实现，
+Mock/故障测试。C4-03a 正式只读模型目录已实现，并通过 7 项目录专项；当前 admin-service
+75 项测试通过（61 项管理服务集成、7 项目录专项、7 项通知渠道专项）；C4-03b 的用户级
+`gatewayPolicy` 核心已在 auth-service 实现，
 覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 25 项测试通过。
 C4-03c 的管理 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿
 和启动恢复核心已实现，并通过 Mock/故障测试；C4-03d 部分实现：管理页已有额度/模型写
@@ -45,8 +46,12 @@ operation/audit 查询与人工对账后端已实现并通过 Mock/故障测试�
 APR-01a 的服务端审批、绑定、职责分离、一次性消费和系统审计已实现，APR-01b 的 HMAC/Mock
 外部审批回调适配器已实现并通过测试，APR-01c 的独立 OIDC step-up 已实现并通过 Mock IdP
 集成测试；NOTIFY-01a 的 transactional outbox、租约、幂等、退避、死信、重启恢复、
-deliveries 查询和受审计人工重放已实现并通过 Mock/故障测试。真实 OA 连接器、真实 IdP/
-MFA/反向代理和生产回调演练未验证；APR-01d/e、NOTIFY-01b/c/d 和 M2-D 仍未实现。
+deliveries 查询和受审计人工重放已实现并通过 Mock/故障测试。NOTIFY-01b 的渠道管理 API
+和统一 HTTPS 渠道适配器已实现并通过专项/故障测试，覆盖 `email`/`im`/`webhook`/
+`ticketing`、HMAC Webhook、防 SSRF、host allowlist 和 `secretRef`；邮件、IM、工单使用
+厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/ServiceNow/Jira SDK。真实 OA 连接器、
+真实厂商网关、证书/租户配置、真实 IdP/MFA/反向代理和生产回调演练未验证；APR-01d/e、
+NOTIFY-01c/d 和 M2-D 仍未实现。
 真实企业 IdP、Docker Compose、真实共享卷、Windows 计划任务、反向代理、
 生产部署中的操作审计查询、中央 MCP/资源库、会话正文审计、安全运营和 HA 尚未完成生产
 验收。当前只能定位为“可演示、可受控技术试点”，不能称为“企业生产版完成”。
@@ -357,7 +362,7 @@ Issue、临时豁免期限和负责人。
 M2-C4 的目标不是“在管理页写一个额度数字”，而是证明用户级 `gatewayPolicy` 已经在所有
 活跃网关凭证上生效。C4-01 已完成底层机器协议和本地测试；C4-02 已完成受控适配器和
 15 项 Mock/故障测试，但 Docker/Compose、真实共享卷和健康检查尚未实机验收；C4-03a 已完成
-管理服务只读目录和 67 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
+管理服务只读目录和 75 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
 核心并通过 25 项测试；C4-03c 已完成管理 API、幂等签发、issuance journal、自动
 apply/readback、同步后交付、失败补偿和启动恢复的本地 Mock/故障链路，并通过 C4-04 的
 真实 Magpie 管理链路验证；真实共享卷和部署验收未完成。C4-03d 已完成管理页额度/模型

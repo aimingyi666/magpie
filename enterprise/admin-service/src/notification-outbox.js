@@ -1,34 +1,23 @@
 import crypto from "node:crypto";
+import {
+  channelMatchesEvent,
+  deliveryIdForChannel,
+} from "./notification-channels.js";
+import {
+  NOTIFICATION_EVENT_TYPES,
+  NOTIFICATION_RETRY_DELAYS_MS,
+  NOTIFICATION_SEVERITIES,
+  NOTIFICATION_STATUSES,
+  publicNotificationDelivery,
+} from "./notification-schema.js";
 
-export const NOTIFICATION_EVENT_TYPES = Object.freeze([
-  "approval.requested",
-  "approval.approved",
-  "approval.rejected",
-  "approval.expired",
-  "approval.consumed",
-  "operation.failed",
-  "operation.partial_success",
-  "operation.audit_failed",
-]);
-
-export const NOTIFICATION_STATUSES = Object.freeze([
-  "pending",
-  "leased",
-  "delivering",
-  "delivered",
-  "retry_wait",
-  "dead_letter",
-]);
-
-export const NOTIFICATION_SEVERITIES = Object.freeze(["info", "warning", "critical"]);
-
-export const NOTIFICATION_RETRY_DELAYS_MS = Object.freeze([
-  60 * 1000,
-  5 * 60 * 1000,
-  15 * 60 * 1000,
-  60 * 60 * 1000,
-  6 * 60 * 60 * 1000,
-]);
+export {
+  NOTIFICATION_EVENT_TYPES,
+  NOTIFICATION_RETRY_DELAYS_MS,
+  NOTIFICATION_SEVERITIES,
+  NOTIFICATION_STATUSES,
+  publicNotificationDelivery,
+} from "./notification-schema.js";
 
 const DELIVERY_STATUSES = new Set(NOTIFICATION_STATUSES);
 const EVENT_TYPES = new Set(NOTIFICATION_EVENT_TYPES);
@@ -43,6 +32,16 @@ const STABLE_ERROR_CODES = new Set([
   "transport_rejected",
   "transport_invalid_response",
   "transport_error",
+  "transport_invalid_url",
+  "transport_url_rejected",
+  "transport_host_not_allowed",
+  "transport_private_address",
+  "transport_redirect_rejected",
+  "transport_response_too_large",
+  "transport_secret_unavailable",
+  "transport_endpoint_unavailable",
+  "transport_channel_unavailable",
+  "transport_recipient_domain_rejected",
   "delivery_payload_invalid",
   "lease_lost",
   "lease_expired",
@@ -104,10 +103,6 @@ function requireSafeEventInput(input) {
   };
 }
 
-function deliveryIdFor(eventId) {
-  return `ntd_${crypto.createHash("sha256").update(eventId).digest("hex").slice(0, 32)}`;
-}
-
 function stableErrorCode(error) {
   const candidate = safeText(error?.code, 80);
   if (STABLE_ERROR_CODES.has(candidate)) return candidate;
@@ -143,24 +138,6 @@ function clearLease(delivery) {
   delivery.leaseExpiresAt = "";
 }
 
-export function publicNotificationDelivery(delivery) {
-  return {
-    deliveryId: String(delivery?.deliveryId || ""),
-    eventId: String(delivery?.eventId || ""),
-    eventType: String(delivery?.eventType || ""),
-    severity: String(delivery?.severity || ""),
-    status: String(delivery?.status || ""),
-    attemptCount: Number.isSafeInteger(delivery?.attemptCount) ? delivery.attemptCount : 0,
-    nextAttemptAt: String(delivery?.nextAttemptAt || ""),
-    leaseExpiresAt: String(delivery?.leaseExpiresAt || ""),
-    lastErrorCode: String(delivery?.lastErrorCode || ""),
-    summary: String(delivery?.summary || ""),
-    createdAt: String(delivery?.createdAt || ""),
-    updatedAt: String(delivery?.updatedAt || ""),
-    deliveredAt: String(delivery?.deliveredAt || ""),
-  };
-}
-
 export function notificationTransportEvent(delivery) {
   return publicNotificationDelivery(delivery);
 }
@@ -170,11 +147,16 @@ export function enqueueNotification(data, input, options = {}) {
     throw new Error("notification outbox storage is unavailable");
   }
   const event = requireSafeEventInput(input);
+  const channelId = safeText(options.channelId, 80);
+  if (channelId && !/^nch_[a-f0-9]{24}$/.test(channelId)) {
+    throw new Error("notification channelId is invalid");
+  }
   const existing = Object.values(data.notificationDeliveries)
-    .find((delivery) => delivery.eventId === event.eventId);
+    .find((delivery) => delivery.eventId === event.eventId
+      && String(delivery.channelId || "") === channelId);
   if (existing) return { delivery: existing, inserted: false };
 
-  const deliveryId = deliveryIdFor(event.eventId);
+  const deliveryId = deliveryIdForChannel(event.eventId, channelId);
   if (data.notificationDeliveries[deliveryId]) {
     throw new Error("notification delivery ID collision");
   }
@@ -184,6 +166,7 @@ export function enqueueNotification(data, input, options = {}) {
     : 6;
   const delivery = {
     deliveryId,
+    channelId,
     ...event,
     status: "pending",
     attemptCount: 0,
@@ -200,6 +183,34 @@ export function enqueueNotification(data, input, options = {}) {
   };
   data.notificationDeliveries[deliveryId] = delivery;
   return { delivery, inserted: true };
+}
+
+export function enqueueNotificationFanout(data, input, channels, options = {}) {
+  const matching = (Array.isArray(channels) ? channels : [])
+    .filter((channel) => channelMatchesEvent(channel, String(input?.eventType || "")));
+  const deliveries = [];
+  let insertedCount = 0;
+  for (const channel of matching) {
+    const result = enqueueNotification(data, input, {
+      ...options,
+      channelId: channel.channelId,
+    });
+    deliveries.push(result.delivery);
+    if (result.inserted) insertedCount += 1;
+  }
+  return {
+    deliveries,
+    insertedCount,
+    inserted: insertedCount > 0,
+  };
+}
+
+function enqueueWithChannels(data, input, options = {}) {
+  if (Array.isArray(options.channels)) {
+    const { channels, ...channelOptions } = options;
+    return enqueueNotificationFanout(data, input, channels, channelOptions);
+  }
+  return enqueueNotification(data, input, options);
 }
 
 export function enqueueApprovalNotification(data, action, approval, options = {}) {
@@ -219,7 +230,7 @@ export function enqueueApprovalNotification(data, action, approval, options = {}
           ? "system_expiry"
           : ""
     );
-  return enqueueNotification(data, {
+  return enqueueWithChannels(data, {
     eventId: `evt_${action.replaceAll(".", "_")}_${approval.id}`,
     eventType: action,
     severity,
@@ -236,7 +247,10 @@ export function enqueueApprovalNotification(data, action, approval, options = {}
     requestId: options.requestId || "",
     errorCode: options.errorCode || "",
     summary: `Approval ${approval.id} ${action.split(".")[1]} for ${approval.action}`,
-  }, { maxAttempts: options.maxAttempts });
+  }, {
+    maxAttempts: options.maxAttempts,
+    channels: options.channels,
+  });
 }
 
 export function enqueueOperationNotification(data, operation, options = {}) {
@@ -251,7 +265,7 @@ export function enqueueOperationNotification(data, operation, options = {}) {
   }
   if (!eventType) return null;
   const eventId = `evt_${eventType.replaceAll(".", "_")}_${operation.id}`;
-  return enqueueNotification(data, {
+  return enqueueWithChannels(data, {
     eventId,
     eventType,
     severity: eventType === "operation.failed" ? "critical" : "warning",
@@ -267,7 +281,10 @@ export function enqueueOperationNotification(data, operation, options = {}) {
     errorCode: operation.errorCode || options.errorCode || "",
     summary: `Operation ${operation.id} ${eventType.split(".")[1].replaceAll("_", " ")}`
       + (operation.errorCode ? ` (${operation.errorCode})` : ""),
-  }, { maxAttempts: options.maxAttempts });
+  }, {
+    maxAttempts: options.maxAttempts,
+    channels: options.channels,
+  });
 }
 
 export function recoverExpiredNotificationLeases(data, options = {}) {
@@ -487,16 +504,21 @@ export class NotificationOutbox {
     this.store = store;
     this.maxAttempts = options.maxAttempts || 6;
     this.now = options.now || (() => new Date());
+    this.channelProvider = options.channelProvider || null;
   }
 
   enqueue(data, input) {
-    return enqueueNotification(data, input, { maxAttempts: this.maxAttempts });
+    return enqueueNotification(data, input, {
+      maxAttempts: this.maxAttempts,
+      channels: this.channelProvider ? this.channelProvider(data) : undefined,
+    });
   }
 
   enqueueApproval(data, action, approval, options = {}) {
     return enqueueApprovalNotification(data, action, approval, {
       ...options,
       maxAttempts: this.maxAttempts,
+      channels: this.channelProvider ? this.channelProvider(data) : undefined,
     });
   }
 
@@ -504,6 +526,7 @@ export class NotificationOutbox {
     return enqueueOperationNotification(data, operation, {
       ...options,
       maxAttempts: this.maxAttempts,
+      channels: this.channelProvider ? this.channelProvider(data) : undefined,
     });
   }
 
