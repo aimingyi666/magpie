@@ -19,6 +19,15 @@ const APPROVAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{7,127}$/;
 const MAX_ACCESS_REASON_LENGTH = 1024;
 const GRANT_REQUEST_FIELDS = new Set(["purpose", "reason", "approvalId", "ttlSeconds"]);
 const PURPOSE_SET = new Set(CONTENT_PURPOSES);
+const HOLD_ID_PATTERN = /^hld_[A-Za-z0-9_-]{43}$/;
+const DELETION_ID_PATTERN = /^del_[A-Za-z0-9_-]{43}$/;
+const EXPORT_ID_PATTERN = /^exp_[A-Za-z0-9_-]{43}$/;
+const EFFECTIVE_HOLD_STATUSES = new Set([
+  "active",
+  "scheduled",
+  "expired",
+  "released",
+]);
 
 export class ContentApiError extends Error {
   constructor(statusCode, code, message, retryable = false) {
@@ -64,6 +73,35 @@ function idempotencyKey(req) {
     );
   }
   return key;
+}
+
+function queryValue(url, name, pattern, maximum = 192) {
+  const value = url.searchParams.get(name);
+  if (value == null || value === "") return "";
+  if (value.length > maximum || !pattern.test(value)) {
+    throw new ContentApiError(400, "invalid_query", `${name} is invalid`);
+  }
+  return value;
+}
+
+function queryTimestamp(url, name) {
+  const value = url.searchParams.get(name);
+  if (value == null || value === "") return "";
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime()) || parsed.toISOString() !== value) {
+    throw new ContentApiError(400, "invalid_query", `${name} is invalid`);
+  }
+  return value;
+}
+
+function queryLimit(url, fallback = 100) {
+  const value = url.searchParams.get("limit");
+  if (value == null || value === "") return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 500) {
+    throw new ContentApiError(400, "invalid_query", "limit is invalid");
+  }
+  return parsed;
 }
 
 async function readJsonBody(req, maximumBytes) {
@@ -238,6 +276,18 @@ export function contentRoute(pathname) {
   if (pathname === "/api/v1/admin/audit/content/streams") {
     return { name: "content_admin_streams" };
   }
+  if (pathname === "/api/v1/admin/audit/content/retention/run") {
+    return { name: "content_retention_run" };
+  }
+  if (pathname === "/api/v1/admin/audit/content/deletions") {
+    return { name: "content_deletions" };
+  }
+  if (pathname === "/api/v1/admin/audit/content/legal-holds") {
+    return { name: "content_legal_holds" };
+  }
+  if (pathname === "/api/v1/admin/audit/content/exports") {
+    return { name: "content_exports" };
+  }
   const chunks = /^\/api\/v1\/internal\/audit\/content\/streams\/(str_[A-Za-z0-9_-]{43})\/chunks$/
     .exec(pathname);
   if (chunks) return { name: "content_chunks", streamId: chunks[1] };
@@ -247,6 +297,26 @@ export function contentRoute(pathname) {
   const grants = /^\/api\/v1\/admin\/audit\/content\/(ct_[A-Za-z0-9_-]{43})\/grants$/
     .exec(pathname);
   if (grants) return { name: "content_grant", contentRef: grants[1] };
+  const deletionVerify = /^\/api\/v1\/admin\/audit\/content\/deletions\/(del_[A-Za-z0-9_-]{43})\/verify$/
+    .exec(pathname);
+  if (deletionVerify) {
+    return { name: "content_deletion_verify", deletionId: deletionVerify[1] };
+  }
+  const deletion = /^\/api\/v1\/admin\/audit\/content\/deletions\/(del_[A-Za-z0-9_-]{43})$/
+    .exec(pathname);
+  if (deletion) {
+    return { name: "content_deletion", deletionId: deletion[1] };
+  }
+  const release = /^\/api\/v1\/admin\/audit\/content\/legal-holds\/(hld_[A-Za-z0-9_-]{43})\/release$/
+    .exec(pathname);
+  if (release) {
+    return { name: "content_legal_hold_release", holdId: release[1] };
+  }
+  const download = /^\/api\/v1\/admin\/audit\/content\/exports\/(exp_[A-Za-z0-9_-]{43})\/download$/
+    .exec(pathname);
+  if (download) {
+    return { name: "content_export_download", exportId: download[1] };
+  }
   const content = /^\/api\/v1\/admin\/audit\/content\/(ct_[A-Za-z0-9_-]{43})$/
     .exec(pathname);
   if (content) return { name: "content_object", contentRef: content[1] };
@@ -259,21 +329,7 @@ function requireServiceAuth(req, config) {
   }
 }
 
-function adminContext(req, content) {
-  if (!content.adminEnabled) {
-    throw new ContentApiError(
-      503,
-      "content_admin_disabled",
-      "Content administration is disabled",
-    );
-  }
-  if (!safeEqual(bearerToken(req), content.adminToken)) {
-    throw new ContentApiError(
-      401,
-      "content_admin_unauthorized",
-      "A valid content administrator token is required",
-    );
-  }
+function administratorIdentity(req, content) {
   const adminId = String(req.headers["x-audit-admin-id"] || "").trim();
   if (!SAFE_ID_PATTERN.test(adminId)) {
     throw new ContentApiError(
@@ -304,6 +360,42 @@ function adminContext(req, content) {
     organizationId,
     sessionId,
   };
+}
+
+function adminContext(req, content) {
+  if (!content.adminEnabled) {
+    throw new ContentApiError(
+      503,
+      "content_admin_disabled",
+      "Content administration is disabled",
+    );
+  }
+  if (!safeEqual(bearerToken(req), content.adminToken)) {
+    throw new ContentApiError(
+      401,
+      "content_admin_unauthorized",
+      "A valid content administrator token is required",
+    );
+  }
+  return administratorIdentity(req, content);
+}
+
+function governanceContext(req, content) {
+  if (!content.governanceEnabled) {
+    throw new ContentApiError(
+      503,
+      "content_governance_disabled",
+      "Content governance is disabled",
+    );
+  }
+  if (!safeEqual(bearerToken(req), content.governanceToken)) {
+    throw new ContentApiError(
+      401,
+      "content_governance_unauthorized",
+      "A valid content governance token is required",
+    );
+  }
+  return administratorIdentity(req, content);
 }
 
 export async function handleContentRoute(context) {
@@ -373,6 +465,215 @@ export async function handleContentRoute(context) {
       }, reqId);
       return;
     }
+    if (route.name === "content_retention_run") {
+      requireMethod(req, "POST");
+      const administrator = governanceContext(req, content);
+      const body = await readJsonBody(req, config.contentMaxBodyBytes);
+      const summary = await content.retention.run(body, {
+        requestId: reqId,
+        sourceHash: sourceHash(req, config),
+        organizationId: administrator.organizationId,
+      });
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        summary,
+      }, reqId);
+      return;
+    }
+    if (route.name === "content_deletions") {
+      requireMethod(req, "GET");
+      const administrator = governanceContext(req, content);
+      const url = new URL(req.url || "/", "http://localhost");
+      const from = queryTimestamp(url, "from");
+      const to = queryTimestamp(url, "to");
+      if (from && to && from > to) {
+        throw new ContentApiError(400, "invalid_query", "from must not be after to");
+      }
+      const deletions = await content.deletion.list({
+        organizationId: administrator.organizationId,
+        contentRef: queryValue(url, "contentRef", /^ct_[A-Za-z0-9_-]{43}$/, 46),
+        from,
+        to,
+        limit: queryLimit(url),
+      });
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        deletions,
+      }, reqId);
+      return;
+    }
+    if (route.name === "content_deletion") {
+      requireMethod(req, "GET");
+      const administrator = governanceContext(req, content);
+      const deletion = await content.deletion.get(route.deletionId);
+      if (deletion.organizationId !== administrator.organizationId) {
+        throw new ContentApiError(
+          403,
+          "content_admin_scope_mismatch",
+          "The administrator organization scope is invalid",
+        );
+      }
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        deletion,
+      }, reqId);
+      return;
+    }
+    if (route.name === "content_deletion_verify") {
+      requireMethod(req, "POST");
+      const administrator = governanceContext(req, content);
+      const deletion = await content.deletion.get(route.deletionId);
+      if (deletion.organizationId !== administrator.organizationId) {
+        throw new ContentApiError(
+          403,
+          "content_admin_scope_mismatch",
+          "The administrator organization scope is invalid",
+        );
+      }
+      const verification = await content.deletion.verify(route.deletionId);
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        verification,
+      }, reqId);
+      return;
+    }
+    if (route.name === "content_legal_holds") {
+      const administrator = governanceContext(req, content);
+      if (req.method === "POST") {
+        const body = await readJsonBody(req, config.contentMaxBodyBytes);
+        const result = await content.legalHolds.create(
+          administrator,
+          body,
+          idempotencyKey(req),
+        );
+        jsonResponse(res, result.duplicate ? 200 : 201, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          duplicate: result.duplicate,
+          hold: result.hold,
+        }, reqId);
+        return;
+      }
+      requireMethod(req, "GET");
+      const url = new URL(req.url || "/", "http://localhost");
+      const effectiveStatus = queryValue(
+        url,
+        "effectiveStatus",
+        /^(?:active|scheduled|expired|released)$/,
+        16,
+      );
+      if (effectiveStatus && !EFFECTIVE_HOLD_STATUSES.has(effectiveStatus)) {
+        throw new ContentApiError(400, "invalid_query", "effectiveStatus is invalid");
+      }
+      const holds = await content.legalHolds.list({
+        organizationId: administrator.organizationId,
+        contentRef: queryValue(url, "contentRef", /^ct_[A-Za-z0-9_-]{43}$/, 46),
+        effectiveStatus,
+        limit: queryLimit(url),
+      });
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        holds,
+      }, reqId);
+      return;
+    }
+    if (route.name === "content_legal_hold_release") {
+      requireMethod(req, "POST");
+      const administrator = governanceContext(req, content);
+      const body = await readJsonBody(req, config.contentMaxBodyBytes);
+      const result = await content.legalHolds.release(
+        administrator,
+        route.holdId,
+        body,
+      );
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        hold: result.hold,
+      }, reqId);
+      return;
+    }
+    if (route.name === "content_exports") {
+      const administrator = governanceContext(req, content);
+      if (!content.exportEnabled || !content.export) {
+        throw new ContentApiError(
+          503,
+          "content_export_disabled",
+          "Content export is disabled",
+        );
+      }
+      if (req.method === "POST") {
+        const body = await readJsonBody(req, config.contentMaxBodyBytes);
+        const result = await content.export.create(
+          administrator,
+          body,
+          idempotencyKey(req),
+          {
+            requestId: reqId,
+            sourceHash: sourceHash(req, config),
+          },
+        );
+        jsonResponse(res, result.duplicate ? 200 : 201, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          duplicate: result.duplicate,
+          export: result.export,
+          token: result.token,
+        }, reqId);
+        return;
+      }
+      requireMethod(req, "GET");
+      const url = new URL(req.url || "/", "http://localhost");
+      const exports = await content.export.list({
+        organizationId: administrator.organizationId,
+        status: queryValue(
+          url,
+          "status",
+          /^(?:active|downloaded|expired)$/,
+          16,
+        ),
+        limit: queryLimit(url),
+      });
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        exports,
+      }, reqId);
+      return;
+    }
+    if (route.name === "content_export_download") {
+      requireMethod(req, "GET");
+      const administrator = governanceContext(req, content);
+      if (!content.exportEnabled || !content.export) {
+        throw new ContentApiError(
+          503,
+          "content_export_disabled",
+          "Content export is disabled",
+        );
+      }
+      const token = String(req.headers["x-audit-export-token"] || "").trim();
+      const result = await content.export.download(
+        route.exportId,
+        administrator,
+        token,
+      );
+      res.writeHead(200, {
+        "content-type": "application/octet-stream",
+        "content-length": result.bytes.length,
+        "content-disposition": `attachment; filename="magpie-export-${route.exportId}.mge"`,
+        "cache-control": "no-store",
+        "x-content-type-options": "nosniff",
+        "x-request-id": reqId,
+        "x-audit-watermark": result.watermark,
+      });
+      res.end(result.bytes);
+      return;
+    }
     if (route.name === "content_stream") {
       requireMethod(req, "GET");
       adminContext(req, content);
@@ -414,6 +715,27 @@ export async function handleContentRoute(context) {
       return;
     }
     if (route.name === "content_object") {
+      if (req.method === "DELETE") {
+        const administrator = governanceContext(req, content);
+        const contentRef = validateContentRef(route.contentRef);
+        const result = await content.deletion.delete(
+          contentRef,
+          administrator,
+          await readJsonBody(req, config.contentMaxBodyBytes),
+          idempotencyKey(req),
+          {
+            requestId: reqId,
+            sourceHash: sourceHash(req, config),
+          },
+        );
+        jsonResponse(res, 200, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          duplicate: result.duplicate,
+          deletion: result.proof,
+        }, reqId);
+        return;
+      }
       requireMethod(req, "GET");
       const administrator = adminContext(req, content);
       const contentRef = validateContentRef(route.contentRef);

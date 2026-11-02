@@ -8,6 +8,10 @@ import {
   handleContentRoute,
 } from "./content-service.js";
 import { ContentGrantManager } from "./content-grant.js";
+import { ContentDeletionManager } from "./content-deletion.js";
+import { ContentExportManager } from "./content-export.js";
+import { ContentLegalHoldManager } from "./content-legal-hold.js";
+import { ContentRetentionManager } from "./content-retention.js";
 import { ContentRetrieval } from "./content-retrieval.js";
 import { ContentStreamManager } from "./content-streams.js";
 import { AuditPipeline } from "./pipeline.js";
@@ -292,6 +296,16 @@ function routeOf(pathname) {
 }
 
 export async function createAuditServer(config, options = {}) {
+  if (config.contentGovernanceEnabled && !config.contentAdminEnabled) {
+    throw new Error(
+      "Content governance requires content administration to be enabled",
+    );
+  }
+  if (config.contentExportEnabled && !config.contentGovernanceEnabled) {
+    throw new Error(
+      "Content export requires content governance to be enabled",
+    );
+  }
   const store = options.store || new AuditStore(config.storePath, {
     maxEvents: config.maxEvents,
     maxQueueEvents: config.maxQueueEvents,
@@ -309,10 +323,15 @@ export async function createAuditServer(config, options = {}) {
   let contentManager = null;
   let contentGrants = null;
   let contentRetrieval = null;
+  let contentLegalHolds = null;
+  let contentDeletion = null;
+  let contentRetention = null;
+  let contentExport = null;
   if (config.contentEnabled) {
     contentStore = options.contentStore || new ContentStore({
       directory: config.contentStoreDir,
       key: config.contentEncryptionKey,
+      proofSecret: config.contentProofSecret,
       maxStreamBytes: config.contentMaxStreamBytes,
       now: options.nowMs || Date.now,
     });
@@ -340,15 +359,65 @@ export async function createAuditServer(config, options = {}) {
       });
     }
   }
+  if (config.contentGovernanceEnabled) {
+    contentLegalHolds = options.contentLegalHolds || new ContentLegalHoldManager(
+      contentStore,
+      {
+        sessionSecret: config.contentProofSecret,
+        organizationId: config.contentOrganizationId,
+        now: options.nowMs || Date.now,
+      },
+    );
+    contentDeletion = options.contentDeletion || new ContentDeletionManager(
+      contentStore,
+      {
+        proofSecret: config.contentProofSecret,
+        legalHolds: contentLegalHolds,
+        now: options.nowMs || Date.now,
+      },
+    );
+    if (config.contentExportEnabled) {
+      contentExport = options.contentExport || new ContentExportManager(
+        contentStore,
+        {
+          secret: config.contentExportSecret,
+          key: config.contentExportKey,
+          organizationId: config.contentOrganizationId,
+          defaultTtlSeconds: config.contentExportTtlSeconds,
+          now: options.nowMs || Date.now,
+        },
+      );
+    }
+    contentRetention = options.contentRetention || new ContentRetentionManager(
+      contentStore,
+      {
+        deletion: contentDeletion,
+        legalHolds: contentLegalHolds,
+        exports: contentExport,
+        organizationId: config.contentOrganizationId,
+        intervalMs: config.contentRetentionSweepIntervalMs,
+        now: options.nowMs || Date.now,
+        logger,
+      },
+    );
+    if (!options.contentRetention) contentRetention.start();
+  }
   const content = {
     enabled: Boolean(config.contentEnabled),
     adminEnabled: Boolean(config.contentAdminEnabled),
+    governanceEnabled: Boolean(config.contentGovernanceEnabled),
+    exportEnabled: Boolean(config.contentExportEnabled),
     organizationId: config.contentOrganizationId,
     adminToken: config.contentAdminToken,
+    governanceToken: config.contentGovernanceToken,
     store: contentStore,
     manager: contentManager,
     grants: contentGrants,
     retrieval: contentRetrieval,
+    legalHolds: contentLegalHolds,
+    deletion: contentDeletion,
+    retention: contentRetention,
+    export: contentExport,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -476,6 +545,8 @@ export async function createAuditServer(config, options = {}) {
             ...content.manager.status(),
             ...(content.grants ? await content.grants.status() : {}),
           };
+          response.contentGovernanceEnabled = Boolean(content.governanceEnabled);
+          response.contentExportEnabled = Boolean(content.exportEnabled);
         }
         jsonResponse(res, 200, response, reqId);
         return;
@@ -495,6 +566,7 @@ export async function createAuditServer(config, options = {}) {
         server.close((error) => (error ? reject(error) : resolve()));
       });
     }
+    if (content.retention) await content.retention.close();
     if (content.manager) await content.manager.close();
     if (content.grants) await content.grants.close();
     if (content.store) await content.store.close();
@@ -508,6 +580,10 @@ export async function createAuditServer(config, options = {}) {
     contentManager,
     contentGrants,
     contentRetrieval,
+    contentLegalHolds,
+    contentDeletion,
+    contentRetention,
+    contentExport,
     contentStatus: () => (content.manager ? content.manager.status() : null),
     close,
   };

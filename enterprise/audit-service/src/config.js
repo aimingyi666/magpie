@@ -33,8 +33,8 @@ function boolean(env, name, fallback) {
   return raw === "true";
 }
 
-function contentEncryptionKey(env) {
-  const value = required(env, "AUDIT_CONTENT_ENCRYPTION_KEY");
+function keyOf32Bytes(env, name) {
+  const value = required(env, name);
   let key;
   if (/^[a-f0-9]{64}$/i.test(value)) {
     key = Buffer.from(value, "hex");
@@ -46,7 +46,7 @@ function contentEncryptionKey(env) {
     }
   }
   if (key.length !== 32) {
-    throw new Error("AUDIT_CONTENT_ENCRYPTION_KEY must encode exactly 32 bytes as base64 or 64 hex characters");
+    throw new Error(`${name} must encode exactly 32 bytes as base64 or 64 hex characters`);
   }
   return key;
 }
@@ -76,7 +76,9 @@ export function loadConfig(env = process.env) {
       "AUDIT_CONTENT_READ_TOKEN is retired; content body reads require a one-time content grant",
     );
   }
-  const contentEncryptionKeyValue = contentEnabled ? contentEncryptionKey(env) : null;
+  const contentEncryptionKeyValue = contentEnabled
+    ? keyOf32Bytes(env, "AUDIT_CONTENT_ENCRYPTION_KEY")
+    : null;
   const contentAdminToken = contentAdminEnabled
     ? optionalSecret(env, "AUDIT_CONTENT_ADMIN_TOKEN")
     : "";
@@ -106,11 +108,64 @@ export function loadConfig(env = process.env) {
       "AUDIT_CONTENT_ORGANIZATION_ID must be a valid organization id when AUDIT_CONTENT_ADMIN_ENABLED=true",
     );
   }
+  const contentGovernanceEnabled = boolean(
+    env,
+    "AUDIT_CONTENT_GOVERNANCE_ENABLED",
+    false,
+  );
+  if (contentGovernanceEnabled && !contentAdminEnabled) {
+    throw new Error(
+      "AUDIT_CONTENT_GOVERNANCE_ENABLED=true requires AUDIT_CONTENT_ADMIN_ENABLED=true",
+    );
+  }
+  const contentGovernanceToken = contentGovernanceEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_GOVERNANCE_TOKEN")
+    : "";
+  if (contentGovernanceEnabled && !contentGovernanceToken) {
+    throw new Error(
+      "AUDIT_CONTENT_GOVERNANCE_TOKEN is required when AUDIT_CONTENT_GOVERNANCE_ENABLED=true",
+    );
+  }
+  const contentProofSecret = contentGovernanceEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_PROOF_SECRET")
+    : "";
+  if (contentGovernanceEnabled && !contentProofSecret) {
+    throw new Error(
+      "AUDIT_CONTENT_PROOF_SECRET is required when AUDIT_CONTENT_GOVERNANCE_ENABLED=true",
+    );
+  }
+  const contentExportEnabled = boolean(env, "AUDIT_CONTENT_EXPORT_ENABLED", false);
+  if (contentExportEnabled && !contentGovernanceEnabled) {
+    throw new Error(
+      "AUDIT_CONTENT_EXPORT_ENABLED=true requires AUDIT_CONTENT_GOVERNANCE_ENABLED=true",
+    );
+  }
+  const contentExportSecret = contentExportEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_EXPORT_SECRET")
+    : "";
+  if (contentExportEnabled && !contentExportSecret) {
+    throw new Error(
+      "AUDIT_CONTENT_EXPORT_SECRET is required when AUDIT_CONTENT_EXPORT_ENABLED=true",
+    );
+  }
+  const contentExportKey = contentExportEnabled
+    ? keyOf32Bytes(env, "AUDIT_CONTENT_EXPORT_KEY")
+    : null;
+  if (contentExportKey
+      && contentEncryptionKeyValue
+      && contentExportKey.equals(contentEncryptionKeyValue)) {
+    throw new Error(
+      "AUDIT_CONTENT_EXPORT_KEY must differ from AUDIT_CONTENT_ENCRYPTION_KEY",
+    );
+  }
   const secrets = [
     ["AUDIT_SERVICE_TOKEN", serviceToken],
     ["AUDIT_CONTENT_ADMIN_TOKEN", contentAdminToken],
     ["AUDIT_CONTENT_GRANT_SECRET", contentGrantSecretValue],
     ["AUDIT_CONTENT_CURSOR_SECRET", contentCursorSecret],
+    ["AUDIT_CONTENT_GOVERNANCE_TOKEN", contentGovernanceToken],
+    ["AUDIT_CONTENT_PROOF_SECRET", contentProofSecret],
+    ["AUDIT_CONTENT_EXPORT_SECRET", contentExportSecret],
   ].filter(([, value]) => value);
   for (let left = 0; left < secrets.length; left += 1) {
     for (let right = left + 1; right < secrets.length; right += 1) {
@@ -160,8 +215,14 @@ export function loadConfig(env = process.env) {
     rateLimitPerMinute: integer(env, "AUDIT_RATE_LIMIT_PER_MINUTE", 6000, 10, 1_000_000),
     contentEnabled,
     contentAdminEnabled,
+    contentGovernanceEnabled,
     contentEncryptionKey: contentEncryptionKeyValue,
     contentAdminToken,
+    contentGovernanceToken,
+    contentProofSecret,
+    contentExportEnabled,
+    contentExportSecret,
+    contentExportKey,
     contentGrantSecret: contentGrantSecretValue,
     contentCursorSecret,
     contentOrganizationId,
@@ -195,6 +256,20 @@ export function loadConfig(env = process.env) {
       env,
       "AUDIT_CONTENT_STREAM_TTL_MS",
       15 * 60 * 1000,
+      10_000,
+      24 * 60 * 60 * 1000,
+    ),
+    contentExportTtlSeconds: integer(
+      env,
+      "AUDIT_CONTENT_EXPORT_TTL_SECONDS",
+      120,
+      15,
+      300,
+    ),
+    contentRetentionSweepIntervalMs: integer(
+      env,
+      "AUDIT_CONTENT_RETENTION_SWEEP_INTERVAL_MS",
+      60 * 60 * 1000,
       10_000,
       24 * 60 * 60 * 1000,
     ),

@@ -42,9 +42,9 @@ auth-service 已通过 26 项测试；admin-service 已通过 109 项测试（82
 已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 14 项
 单元/Mock 集成测试；client-sync 已通过 26 项单元/Mock 集成测试（18 核心 + 8 传输）；
 local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
-+ 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 47 项
-隔离测试（20 项 L0/L1 事件管道 + 27 项内容审计、检索与一次性授权核心）；当前八套合计
-312 项通过、0 失败。
++ 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 67 项
+隔离测试（20 项 L0/L1 事件管道 + 27 项内容审计、检索与一次性授权核心 + 20 项留存、
+法律保留、删除证明和加密导出核心）；当前八套合计 332 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -68,8 +68,9 @@ M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现�
 运行时、`LocalMcpHelper`、回环 HTTP server、stdio bridge、Codex 配置映射和
 `setupLocalMcpClient()` 一键配置编排核心已实现，但安装器/Windows 服务、生产 launcher/
 token 轮换、管理台员工产品流、真实外部沙箱和生产验收尚未完成。M4-A 审计事件管道核心、
-M4-B 内容审计核心和 M4-C 内容检索/一次性授权后端核心已实现；M4-D、M5 和 M6 仍未实现；
-M2-D 核心已实现，生产验收未完成。M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
+M4-B 内容审计核心、M4-C 内容检索/一次性授权后端核心和 M4-D 留存/法律保留/删除证明/
+加密导出后端核心已实现；M5 和 M6 仍未实现；M2-D 核心已实现，生产验收未完成。
+M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
 单进程内存状态，审计与注册表也不是同一事务；Compose 也未实机验收。当前不是生产就绪版本。
@@ -487,9 +488,10 @@ token 轮换/恢复和管理台员工产品流仍未实现；
    模型列表来自只读正式目录；admin-service 在写入前把选择器展开为稳定模型 ID，
    auth-service 以这些 ID 作为用户级授权事实。
    管理员目前**不能通过管理台查看员工对话正文**。M4-A 的 L0/L1 元数据审计管道核心、
-   M4-B 的 L2 脱敏正文后端核心和 M4-C 的筛选检索/一次性正文 grant 后端核心已实现，
-   但 M4-B/M4-C 默认关闭；真实网关正文采集、admin-service 的管理员 OIDC/RBAC/step-up
-   编排、管理台检索/查看 UI、留存删除和导出均未接入；M4-D 仍未实现。
+   M4-B 的 L2 脱敏正文后端核心、M4-C 的筛选检索/一次性正文 grant 后端核心和 M4-D 的
+   留存/法律保留/删除证明/加密导出后端核心已实现，但 M4-B/M4-C/M4-D 默认关闭；
+   真实网关正文采集、admin-service 的管理员 OIDC/RBAC/step-up 编排、审批联动、
+   管理台检索/查看/导出 UI 和浏览器 E2E 均未接入。
 4. M2-C1/C2 已提供四个受控写 API：停用/启用用户、吊销设备、轮换当前凭证。API 要求管理
    会话、CSRF、RBAC、组织范围和非空理由；M2-C3 已接入幂等、`operationId` 和
    intent/result 管理审计。管理页已提供对应基础操作入口，真实环境仍需浏览器 E2E 验收。
@@ -615,7 +617,7 @@ enterprise/
   gateway-control/           C4-02 受控 Key describe/policy apply 适配器
   resource-service/          M3-A 资源目录、不可变版本和签名 manifest
   mcp-gateway/               M3-B 远程 MCP 注册、策略代理和健康检查
-  audit-service/             M4-A + M4-B + M4-C 审计事件、内容管道与检索核心
+  audit-service/             M4-A + M4-B + M4-C + M4-D 审计事件、内容与治理核心
   scripts/
     provision-user.ps1      服务端：开通/配置员工密钥
     join-client.ps1         客户端：加入企业网关

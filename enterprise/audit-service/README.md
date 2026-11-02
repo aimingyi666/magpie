@@ -1,17 +1,19 @@
-# Magpie 企业审计事件与内容管道（M4-A + M4-B + M4-C 核心）
+# Magpie 企业审计事件与内容管道（M4-A + M4-B + M4-C + M4-D 核心）
 
-`audit-service` 当前包含三个核心：
+`audit-service` 当前包含四个核心：
 
 - M4-A：接收、校验、排队并持久化 L0/L1 元数据事件，按请求和会话建立索引，并提供受
   服务令牌保护的查询接口。
 - M4-B：默认关闭的 L2 脱敏正文分片管道，包含跨分片统一脱敏和 AES-256-GCM 加密对象存储。
 - M4-C：受管理令牌保护的正文流元数据检索、HMAC 签名 cursor、一次性正文读取 grant、
   管理员/组织/会话绑定和持久访问审计。
+- M4-D：正文/元数据留存、法律保留、幂等删除与元数据脱敏、HMAC 删除证明、受治理令牌
+  保护的加密 `.mge` 导出和一次性下载凭证。
 
 这个切片**不是完整的 M4**，也不是生产可用的内容审计系统。当前没有接入真实网关、
-管理台或员工页面；没有 L3、附件、二进制正文、留存/删除证明、法律保留或 WORM。
-M4-C 本轮只实现后端的组织配置边界、管理员会话头和一次性授权；仍未接入
-admin-service 的管理员 OIDC/RBAC/step-up、管理台 UI、浏览器 E2E 或生产验收。
+管理台或员工页面；没有 L3、附件、二进制正文、WORM、KMS/HSM 或对象存储版本控制。
+M4-C/M4-D 只实现后端边界；仍未接入 admin-service 的管理员 OIDC/RBAC/step-up、
+审批编排、管理台 UI、浏览器 E2E 或生产验收。
 
 ## 当前边界
 
@@ -39,13 +41,18 @@ admin-service 的管理员 OIDC/RBAC/step-up、管理台 UI、浏览器 E2E 或�
 - 成功、缺失、篡改和失败读取均尝试写入访问审计；访问审计持久化失败时返回 `503`，
   不返回正文；
 - 未完成流在重启时标记中断，已完成对象可恢复读取。
+- 正文与元数据留存期分别计算，元数据到期不得早于正文；后台或显式 `dryRun` 清扫；
+- 活动法律保留阻止正文删除和元数据脱敏，支持创建、查询、释放和有效状态判断；
+- 幂等显式删除/元数据脱敏、删除 staging 恢复、HMAC 删除证明列表/详情/验证；
+- AES-256-GCM 加密导出包、一次性短期下载 token、导出审计、过期和孤儿文件清理；
+- 内容管理令牌与治理令牌分离，治理路由默认关闭。
 
 未实现：
 
 - 真实 Magpie 网关、admin-service、管理台和员工页面的审计流接入；
 - admin-service 的管理员 OIDC、RBAC、step-up、管理员会话编排和导出审批；
 - L3、附件/二进制正文、管理台 UI 和真实网关正文采集；
-- 正文留存、删除、删除证明、法律保留、WORM、加密导出和备份恢复演练；
+- WORM/对象锁、KMS/HSM、对象存储版本控制、离线导出密钥保管流程和备份恢复演练；
 - PostgreSQL/ClickHouse、多副本、HA、负载测试和生产容量验证；
 - Compose 实机构建、真实共享卷、真实 IdP、浏览器 E2E 和生产验收。
 
@@ -60,6 +67,8 @@ $env:AUDIT_PORT = "3449"
 $env:AUDIT_STORE_PATH = ".\data\audit-store.json"
 $env:AUDIT_CONTENT_ENABLED = "false"
 $env:AUDIT_CONTENT_ADMIN_ENABLED = "false"
+$env:AUDIT_CONTENT_GOVERNANCE_ENABLED = "false"
+$env:AUDIT_CONTENT_EXPORT_ENABLED = "false"
 node src/server.js
 ```
 
@@ -80,6 +89,12 @@ hex）。M4-C 内容管理也默认关闭；启用时还必须另设相互独立
 `AUDIT_CONTENT_CURSOR_SECRET` 和可信的 `AUDIT_CONTENT_ORGANIZATION_ID`。
 旧 `AUDIT_CONTENT_READ_TOKEN` 已退役；设置它会导致服务启动失败，不能作为正文读取旁路。
 所有秘密都不得与 `AUDIT_SERVICE_TOKEN` 或其他服务令牌复用。
+
+M4-D 治理默认关闭。启用时必须先启用 M4-C 内容管理，并另设独立的
+`AUDIT_CONTENT_GOVERNANCE_TOKEN` 和 `AUDIT_CONTENT_PROOF_SECRET`。加密导出还需要
+`AUDIT_CONTENT_EXPORT_SECRET` 和第二个互不相同的 32 字节 `AUDIT_CONTENT_EXPORT_KEY`。
+治理令牌只能访问留存、法律保留、删除证明和导出路由，不能读取普通正文；内容管理令牌
+也不能调用治理路由。
 
 ## 环境变量
 
@@ -111,12 +126,20 @@ hex）。M4-C 内容管理也默认关闭；启用时还必须另设相互独立
 | `AUDIT_CONTENT_MAX_BUFFER_BYTES` | `67108864` | 所有活动流的总缓冲上限 |
 | `AUDIT_CONTENT_MAX_ACTIVE_STREAMS` | `256` | 同时活动的正文流上限 |
 | `AUDIT_CONTENT_STREAM_TTL_MS` | `900000` | 未完成流 TTL，范围 10 秒到 24 小时 |
+| `AUDIT_CONTENT_GOVERNANCE_ENABLED` | `false` | 是否启用 M4-D 留存/保留/证明/导出治理 |
+| `AUDIT_CONTENT_GOVERNANCE_TOKEN` | 治理启用时必填 | 治理 Bearer 令牌，必须独立于 ingest 和内容管理 |
+| `AUDIT_CONTENT_PROOF_SECRET` | 治理启用时必填 | 删除证明 HMAC 密钥 |
+| `AUDIT_CONTENT_EXPORT_ENABLED` | `false` | 是否启用加密导出，要求治理已启用 |
+| `AUDIT_CONTENT_EXPORT_SECRET` | 导出启用时必填 | 一次性下载 token 的 HMAC 密钥 |
+| `AUDIT_CONTENT_EXPORT_KEY` | 导出启用时必填 | 第二个 AES-256-GCM 密钥，32 字节 base64 或 64 位 hex |
+| `AUDIT_CONTENT_EXPORT_TTL_SECONDS` | `120` | 导出下载 token 默认 TTL，允许 15-300 秒 |
+| `AUDIT_CONTENT_RETENTION_SWEEP_INTERVAL_MS` | `3600000` | 后台留存清扫间隔，允许 10 秒到 24 小时 |
 
 队列或索引达到配置上限时，服务返回稳定错误，不会静默丢弃事件。
 
 ## API
 
-除 `/healthz` 外，所有路由都要求：
+M4-A 事件写入和查询路由（除 `/healthz`）要求：
 
 ```text
 Authorization: Bearer <AUDIT_SERVICE_TOKEN>
@@ -134,6 +157,17 @@ POST /api/v1/internal/audit/content/streams/{streamId}/chunks
 GET  /api/v1/admin/audit/content/streams
 POST /api/v1/admin/audit/content/{contentRef}/grants
 GET  /api/v1/admin/audit/content/{contentRef}
+POST /api/v1/admin/audit/content/retention/run
+DELETE /api/v1/admin/audit/content/{contentRef}
+GET  /api/v1/admin/audit/content/deletions
+GET  /api/v1/admin/audit/content/deletions/{deletionId}
+POST /api/v1/admin/audit/content/deletions/{deletionId}/verify
+POST /api/v1/admin/audit/content/legal-holds
+GET  /api/v1/admin/audit/content/legal-holds
+POST /api/v1/admin/audit/content/legal-holds/{holdId}/release
+POST /api/v1/admin/audit/content/exports
+GET  /api/v1/admin/audit/content/exports
+GET  /api/v1/admin/audit/content/exports/{exportId}/download
 ```
 
 内容管理路由在启用后要求：
@@ -147,6 +181,12 @@ X-Audit-Admin-Session: <不透明管理员会话标识>
 
 这些头不能来自员工终端或浏览器查询参数；生产集成必须由 admin-service 完成 OIDC、RBAC、
 step-up 和组织范围校验后转发。
+
+治理路由要求相同的管理员上下文，但使用独立治理令牌：
+
+```text
+Authorization: Bearer <AUDIT_CONTENT_GOVERNANCE_TOKEN>
+```
 
 创建正文 grant 的请求体：
 
@@ -263,6 +303,27 @@ toolName, contentKind, status, from, to, limit, cursor
 排序固定为 `createdAt DESC, streamId DESC`；cursor 绑定全部筛选条件和排序版本。
 列表响应永不包含正文、加密对象路径或密钥。
 
+## 留存、法律保留、删除证明与导出
+
+内容流请求的 `collection.retentionDays` 表示正文留存天数，可选的
+`collection.metadataRetentionDays` 表示元数据留存天数。元数据留存不得短于正文留存。
+到期后，后台清扫或 `POST .../retention/run` 删除正文；元数据在元数据到期后再脱敏。
+`dryRun: true` 只返回待处理数量，不修改索引或对象文件。
+
+法律保留按内容引用、流、员工和部门的一个或多个字段匹配，必须带理由和审批 ID。
+活动保留会阻止正文删除和元数据脱敏；`force: true` 也不能绕过。保留释放或到期后，
+普通留存重新生效，但保留记录和释放证据不会被物理删除。
+
+删除证明包含内容引用、不可逆正文摘要、字节数、留存到期、操作人/组织/会话摘要、
+请求/来源摘要、理由、审批 ID、策略版本和 HMAC，不包含正文、文件路径、密钥或下载
+token。证明通过只读列表、详情和 `verify` 路由查询，证明 MAC 被篡改时验证失败关闭。
+
+导出创建要求内容引用或筛选范围、目的、理由、审批 ID 和 `Idempotency-Key`。每个导出包
+使用独立 `AUDIT_CONTENT_EXPORT_KEY` 加密，HTTP 只返回一次性 token 和公开元数据，
+下载响应是 `.mge` 加密字节而非解密 JSON。token 绑定导出、管理员、组织、会话、范围和
+审计编号，首次下载即消费；重复、过期、篡改或上下文不匹配均失败关闭。导出审计或消费
+持久化失败时返回 `503`，不发送文件内容。
+
 ## 队列、恢复和健康
 
 写入先原子进入队列，后台按 `AUDIT_BATCH_SIZE` 提交到已提交索引。进程收到
@@ -283,6 +344,7 @@ toolName, contentKind, status, from, to, limit, cursor
 node --test test/*.test.mjs
 ```
 
-当前专项测试为 **47 passed, 0 failed**，覆盖 M4-A 事件管道、M4-B 内容分片/加密/脱敏，
-以及 M4-C 检索、签名 cursor、一次性 grant、并发消费和访问审计失败关闭。测试使用临时
-目录、端口 `0`、Mock fetch 和隔离存储，不读取真实 `usage.jsonl`、管理员会话或生产数据。
+当前专项测试为 **67 passed, 0 failed**，覆盖 M4-A 事件管道、M4-B 内容分片/加密/脱敏、
+M4-C 检索/签名 cursor/一次性 grant/并发消费，以及 M4-D 留存、法律保留、删除证明、
+加密导出、一次性下载、过期清理和索引迁移。测试使用临时目录、端口 `0`、Mock fetch 和
+隔离存储，不读取真实 `usage.jsonl`、管理员会话或生产数据。

@@ -54,6 +54,7 @@ const COLLECTION_FIELDS = new Set([
   "authorizationId",
   "confirmed",
   "retentionDays",
+  "metadataRetentionDays",
 ]);
 const CHUNK_FIELDS = new Set(["schemaVersion", "sequence", "text", "final"]);
 const CONTENT_KIND_SET = new Set(CONTENT_KINDS);
@@ -171,6 +172,21 @@ export function validateContentStreamRequest(value) {
     3650,
     "invalid_content_collection",
   );
+  const metadataRetentionDays = value.collection.metadataRetentionDays === undefined
+    ? retentionDays
+    : safeInteger(
+        value.collection.metadataRetentionDays,
+        "collection.metadataRetentionDays",
+        1,
+        3650,
+        "invalid_content_collection",
+      );
+  if (metadataRetentionDays < retentionDays) {
+    invalid(
+      "invalid_content_collection",
+      "collection.metadataRetentionDays must not be less than retentionDays",
+    );
+  }
 
   const request = {
     schemaVersion: AUDIT_CONTENT_SCHEMA_VERSION,
@@ -188,6 +204,7 @@ export function validateContentStreamRequest(value) {
       authorizationId,
       confirmed: true,
       retentionDays,
+      metadataRetentionDays,
     },
   };
   for (const [name, pattern, maximum] of [
@@ -304,6 +321,17 @@ export function publicContentStream(stream) {
     ...(metadata.redaction ? { redaction: structuredClone(metadata.redaction) } : {}),
     ...(metadata.failureCode ? { failureCode: metadata.failureCode } : {}),
     ...(metadata.finalizedAt ? { finalizedAt: metadata.finalizedAt } : {}),
+    ...(metadata.contentRetentionExpiresAt
+      ? { contentRetentionExpiresAt: metadata.contentRetentionExpiresAt }
+      : {}),
+    ...(metadata.metadataRetentionExpiresAt
+      ? { metadataRetentionExpiresAt: metadata.metadataRetentionExpiresAt }
+      : {}),
+    ...(metadata.deletedAt ? { deletedAt: metadata.deletedAt } : {}),
+    ...(metadata.deletionId ? { deletionId: metadata.deletionId } : {}),
+    ...(metadata.metadataRedactedAt
+      ? { metadataRedactedAt: metadata.metadataRedactedAt }
+      : {}),
   };
 }
 

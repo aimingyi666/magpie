@@ -190,12 +190,13 @@ services:
       retries: 3
       start_period: 10s
 
-  # M4-A/M4-B/M4-C audit core. This service is internal-only: it accepts
+  # M4-A/M4-B/M4-C/M4-D audit core. This service is internal-only: it accepts
   # L0/L1 metadata events, stores optional L2 redacted content, and exposes
-  # filtered content metadata plus one-time body grants to a trusted
-  # management gateway. Administrator OIDC/RBAC/step-up orchestration, the
-  # admin UI, retention/deletion, HA and production acceptance are not
-  # implemented here.
+  # filtered content metadata, one-time body grants, retention/legal holds,
+  # deletion proofs and encrypted export packages to a trusted management
+  # gateway. Administrator OIDC/RBAC/step-up orchestration, the admin UI,
+  # real gateway ingestion, HA and production acceptance are not implemented
+  # here.
   # Start it explicitly with:
   #   docker compose --profile audit up -d audit
   audit:
@@ -237,6 +238,14 @@ services:
       AUDIT_CONTENT_MAX_BUFFER_BYTES: ${AUDIT_CONTENT_MAX_BUFFER_BYTES:-67108864}
       AUDIT_CONTENT_MAX_ACTIVE_STREAMS: ${AUDIT_CONTENT_MAX_ACTIVE_STREAMS:-256}
       AUDIT_CONTENT_STREAM_TTL_MS: ${AUDIT_CONTENT_STREAM_TTL_MS:-900000}
+      AUDIT_CONTENT_GOVERNANCE_ENABLED: ${AUDIT_CONTENT_GOVERNANCE_ENABLED:-false}
+      AUDIT_CONTENT_GOVERNANCE_TOKEN: ${AUDIT_CONTENT_GOVERNANCE_TOKEN:-}
+      AUDIT_CONTENT_PROOF_SECRET: ${AUDIT_CONTENT_PROOF_SECRET:-}
+      AUDIT_CONTENT_EXPORT_ENABLED: ${AUDIT_CONTENT_EXPORT_ENABLED:-false}
+      AUDIT_CONTENT_EXPORT_SECRET: ${AUDIT_CONTENT_EXPORT_SECRET:-}
+      AUDIT_CONTENT_EXPORT_KEY: ${AUDIT_CONTENT_EXPORT_KEY:-}
+      AUDIT_CONTENT_EXPORT_TTL_SECONDS: ${AUDIT_CONTENT_EXPORT_TTL_SECONDS:-120}
+      AUDIT_CONTENT_RETENTION_SWEEP_INTERVAL_MS: ${AUDIT_CONTENT_RETENTION_SWEEP_INTERVAL_MS:-3600000}
     volumes:
       - audit-data:/data
     read_only: true
