@@ -25,13 +25,15 @@ M2-C5 的查询/对账和 M2-D 的基础运营页与 CSV 导出、
 M2-E1/APR-01a 的服务端审批、APR-01b 的 HMAC 外部审批回调适配器、APR-01c 的独立
 OIDC step-up、APR-01d 的审批箱/串并行步骤/quorum/转交/撤回、APR-01e 的 break-glass
 15 分钟单次授权/24 小时复核，以及 NOTIFY-01a/01b/01c
-的通知 outbox、渠道管理和 SIEM transport：
+的通知 outbox、渠道管理和 SIEM transport，以及 M3-A 的资源目录与签名服务核心：
 手工/OIDC 加入、短期 Key、设备注册与吊销、管理身份与只读治理、四个受控管理写 API、
 管理额度/模型 API、持久化幂等、管理审计、审批申请/决策/撤销、审批一次性消费、
 schema v1 的网关策略机器回读/原子写入、受控 `gateway-control` 适配器、正式只读模型目录，
-以及 auth-service 的用户级策略状态机。`gateway-control` 已通过 15 项 Mock/故障测试；
+以及 auth-service 的用户级策略状态机；M3-A 已提供资源目录、不可变版本、内容寻址对象
+存储、Ed25519 签名 manifest、发布/回滚和资源审计。`gateway-control` 已通过 15 项 Mock/故障测试；
 auth-service 已通过 25 项测试；admin-service 已通过 104 项测试（77 项管理服务集成测试 +
-7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），当前合计 144 项通过、0 失败。
+7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
+已通过 11 项单元/Mock 集成测试，当前合计 155 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -51,8 +53,9 @@ APR-01c、NOTIFY-01a、NOTIFY-01b 和 NOTIFY-01c 后端已实现，但真实渠�
 是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/Slack/ServiceNow/Jira SDK，真实
 证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收。
 NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页已实现并通过 Mock/集成测试；
-M3-M6 仍未实现；M2-D 核心已实现，
-生产验收未完成。当前不是生产就绪版本。
+M3-A 核心后端已实现，M3-B/C/D 与 M4-M6 仍未实现；M2-D 核心已实现，生产验收未完成。
+M3-A 尚未接入 admin-service 审批、管理台和客户端同步，Compose 也未实机验收。当前不是
+生产就绪版本。
 
 ## M2-C4 目标边界（C4-01/C4-02/C4-03a/C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 完整策略流 E2E 已通过）
 
@@ -310,6 +313,24 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
 完整审批/运营体验、失败恢复入口、费用趋势看板、Excel/异步导出和生产验收仍未完成。详见
 [`admin-service/README.md`](admin-service/README.md)。
 
+### 4.1 资源目录服务（M3-A：核心后端）
+
+`resource-service` 是企业资源目录与签名 manifest 的内部服务，支持 `mcp`、`skill`、
+`instructions`、`subagent` 和 `template`，并提供不可变版本、SHA-256 内容寻址对象存储、
+Ed25519 签名、发布/回滚、幂等写和资源审计链：
+
+```bash
+docker compose --profile resource up -d resource
+```
+
+该 profile 不发布主机端口，只接受持有 `RESOURCE_SERVICE_TOKEN` 的受信控制面服务调用。
+签名私钥通过 Compose secret 挂载，不能写入 `.env` 或仓库。接口、密钥生成、存储限制和
+安全边界见 [`resource-service/README.md`](resource-service/README.md)。
+
+当前边界：`approvalId` 只是必填证据，尚未查询或消费 admin-service 审批；没有管理台资源
+页面、员工端同步、强制策略、漂移、灰度、自动回滚、远程 MCP 代理、S3/MinIO、KMS/HSM
+或多副本。Docker/Compose 尚未实机启动和验收。
+
 ## 5. 当前员工与管理员流程（只列已实现）
 
 ### 5.1 员工流程
@@ -353,9 +374,10 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
    转交和申请人撤回。APR-01e 已提供 15 分钟单次紧急授权、24 小时复核、关键 step-up、
    RBAC、告警事件、审计和管理页/API；真实 OA 连接器、SIEM/告警、通知投递和浏览器 E2E
    仍未验收。
-7. 管理员当前**不能下发 MCP 服务器、企业 Skills/Instructions 或中央资源库**。MCP 治理和
-   企业资源库属于 M3，尚未实现；现有管理面只能展示只读元数据、四个受控写 API，以及
-   通过 API 调用的额度/模型策略写入。
+7. 管理员当前**不能下发 MCP 服务器、企业 Skills/Instructions 或中央资源库**。M3-A 已提供
+   内部资源目录、不可变版本、签名 manifest、发布/回滚和审计核心，但尚未接入 admin-service
+   审批、管理台或员工客户端；MCP 目录/远程代理、客户端同步、强制策略、漂移和自动回滚属于
+   M3-B/C/D，仍未实现。
 8. 管理员不能直接读取或改写员工本机 Agent 配置。后续中央策略也必须通过本地 Magpie/helper
    的受控同步接口落地，浏览器不能获得任意本机文件写权限。
 

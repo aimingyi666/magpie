@@ -12,7 +12,7 @@
 逐项生产验收证据和签字表见
 [`enterprise-acceptance-checklist.md`](enterprise-acceptance-checklist.md)。
 
-当前进度（2026-11-02，完整实施方案 v3.16）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
+当前进度（2026-11-02，完整实施方案 v3.20）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
 员工密钥开通、客户端加入、验收脚本和可重复的端到端测试；没有修改任何上游跟踪文件。
 M1 的 `enterprise-auth`、OIDC+PKCE、设备注册、短期 Key 刷新、同设备并发刷新串行化和
 加入脚本已经实现，并通过 Node 单元/Mock 集成测试（25/25）。真实 Magpie issuer E2E 已全部
@@ -23,7 +23,7 @@ MFA/ACR、已验证邮箱、管理会话、CSRF、IP 限制、RBAC、组织范�
 组织子树过滤。M2-C2 已提供停用/启用用户、吊销设备和轮换当前凭证四个受控写 API，
 接入管理会话、CSRF、RBAC、组织子树、必填理由和响应脱敏；M2-C3 已接入持久化
 `Idempotency-Key`、同键重放/冲突、执行中保护、`operationId` 和 intent/result 管理审计。
-管理端测试为 104/104（77 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），auth-service 为 25/25，gateway-control 为 15/15；合计 144/144。M2-C1 的 auth-service
+管理端测试为 104/104（77 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），auth-service 为 25/25，gateway-control 为 15/15，resource-service 为 11/11；合计 155/155。M2-C1 的 auth-service
 内部写接口也已实现并通过 Mock 测试。C4-01 的 schema v1 机器协议已经实现并通过 Go 单测、
 gateway-key CLI 回归和隔离真实二进制冒烟：`gateway-key describe <id> --json` 可安全回读，
 `gateway-key policy apply <id> --json` 可在文件锁内原子替换模型和额度。C4-02
@@ -58,6 +58,10 @@ Mock/集成测试，真实厂商渠道和生产值班闭环未验收。
 APR-01d 审批箱核心已实现并通过 Mock/集成测试，break-glass（`APR-01e`）Mock/集成核心
 也已实现并通过测试；真实审批演练和生产复核尚未验收，
 不能把现有 `approvalId` 当作未经服务端校验的审批。
+M3-A 的资源目录、不可变版本、SHA-256 内容寻址、canonical JSON、manifest digest、
+Ed25519 签名、发布/历史回滚、乐观并发、幂等和资源审计核心已实现，并通过 11 项
+resource-service 测试；M3-B 远程 MCP、M3-C 客户端同步和 M3-D 受控本地 MCP 未实现。
+M3-A 目前是内部服务 API，尚未接入 admin-service 真实审批、管理台和员工客户端同步。
 逐项真实状态见 [`enterprise-implementation-status.md`](enterprise-implementation-status.md)。
 完整需求 ID、交付包、端到端场景和每项完成定义见
 [`enterprise-feature-spec.md`](enterprise-feature-spec.md) 第 25 节。
@@ -323,7 +327,8 @@ APR-01d 审批箱核心已实现并通过 Mock/集成测试，break-glass（`APR
 | M2-E1 审批、step-up 与通知后端 | APR-01a-e 核心与 NOTIFY-01a-d 核心已实现；剩余真实环境验收 | 真实 OA、IdP/MFA、厂商渠道、SIEM 和 break-glass 生产验收 | APR-01a 高风险动作失败关闭、APR-01b HMAC/Mock 回调验签和防重放、APR-01c 独立 step-up 与 H/C 门禁、APR-01d 审批箱/串并行/quorum/转交/撤回、APR-01e 15 分钟单次授权/24 小时复核/提醒、NOTIFY-01a 原子 outbox/租约/死信/重放、NOTIFY-01b 渠道管理和 HTTPS/SSRF 防护、NOTIFY-01c SIEM transport/固定 L0 schema/dead-letters API、NOTIFY-01d 规则/抑制/聚合/升级/重放和运营页已通过 Mock/故障或集成测试；真实 OA/IdP/MFA、break-glass 告警/工单和生产复核、真实 SIEM 接收端、真实厂商连接和生产通知闭环待验收 |
 | M2-D 看板与运营 | 核心已实现，生产验收未完成 | 总览、筛选、用量/费用趋势、授权 CSV 导出和操作历史 | 可稳定输出人/部门/模型报表；真实数据、浏览器 E2E、负载和异步/对象存储导出待验收 |
 | M2-E2 内置审批与通知运营页 | 核心已实现，真实环境验收未完成 | 渠道/规则/投递/死信/聚合/抑制/升级页面已完成；补充真实审批、真实渠道、浏览器 E2E、break-glass 生产告警/工单与 24 小时复核演练 | 双人审批可证明；break-glass 15 分钟过期并 24 小时内复核；死信可受审计幂等重放 |
-| M3 中央 MCP/资源库 | 4-6 周 | 目录、远程/本地 MCP、签名资源、同步、漂移和回滚 | 授权后 5 分钟可见；未授权不可见/不可调用；失败可回滚 |
+| M3-A 资源目录与签名 | 核心已实现，11/11 测试通过 | 五类资源目录、不可变版本、SHA-256 内容寻址、Ed25519 签名、发布/历史回滚、幂等和资源审计 | 内容与签名可验证；坏存储失败关闭；真实审批、管理台和客户端尚未接入 |
+| M3-B/C/D 中央 MCP 与客户端同步 | 4-6 周 | 远程/本地 MCP、工具级权限、客户端同步、漂移和回滚 | 授权后 5 分钟可见；未授权不可见/不可调用；失败可回滚 |
 | M4 会话与工具审计 | 4-6 周 | 事件管道、流式拼接、脱敏、检索、留存和导出 | L0 完整；正文按授权可见；删除和留存可验证 |
 | M5 安全运营与可观测性 | 3-4 周 | 规则、告警、阻断、吊销、OTel、SIEM 和值班闭环 | 典型违规/故障 5 分钟可见并可处置 |
 | M6 规模化与高可用 | 4-8 周或按需 | PostgreSQL/ClickHouse、多副本、Redis、KMS、mTLS 和多地域 | 压测、故障、RPO/RTO 和回滚演练通过 |

@@ -70,6 +70,55 @@ services:
       retries: 3
       start_period: 10s
 
+  # M3-A resource catalog. This service is internal-only and is not yet wired
+  # into the admin console or client sync. Start it explicitly with:
+  #   docker compose --profile resource up -d resource
+  resource:
+    profiles: ["resource"]
+    build:
+      context: ./resource-service
+      args:
+        RESOURCE_UID: ${RESOURCE_UID:-10001}
+        RESOURCE_GID: ${RESOURCE_GID:-10001}
+    container_name: magpie-enterprise-resource
+    restart: unless-stopped
+    user: "${RESOURCE_UID:-10001}:${RESOURCE_GID:-10001}"
+    expose:
+      - "3447"
+    environment:
+      RESOURCE_BIND: 0.0.0.0
+      RESOURCE_PORT: 3447
+      RESOURCE_SERVICE_TOKEN: ${RESOURCE_SERVICE_TOKEN:-}
+      RESOURCE_STORE_PATH: ${RESOURCE_STORE_PATH:-/data/resource-store.json}
+      RESOURCE_CONTENT_PATH: ${RESOURCE_CONTENT_PATH:-/content/objects}
+      RESOURCE_SIGNING_PRIVATE_KEY_PATH: /run/secrets/resource-signing-key.pem
+      RESOURCE_SIGNING_KEY_ID: ${RESOURCE_SIGNING_KEY_ID:-}
+      RESOURCE_MAX_CONTENT_BYTES: ${RESOURCE_MAX_CONTENT_BYTES:-1048576}
+      RESOURCE_MAX_RESOURCES: ${RESOURCE_MAX_RESOURCES:-1000}
+      RESOURCE_MAX_RELEASES_PER_RESOURCE: ${RESOURCE_MAX_RELEASES_PER_RESOURCE:-200}
+      RESOURCE_RATE_LIMIT_PER_MINUTE: ${RESOURCE_RATE_LIMIT_PER_MINUTE:-600}
+    volumes:
+      - resource-data:/data
+      - resource-content:/content
+    secrets:
+      - source: resource-signing-key
+        target: resource-signing-key.pem
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3447/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   auth:
     profiles: ["auth", "admin"]
     build:
@@ -215,3 +264,9 @@ volumes:
   magpie-data:
   auth-data:
   admin-data:
+  resource-data:
+  resource-content:
+
+secrets:
+  resource-signing-key:
+    file: ${RESOURCE_SIGNING_KEY_FILE:-./secrets/resource-signing-key.pem}

@@ -38,7 +38,8 @@ binding 摘要；授权只能原子消费一次，审批与 break-glass 禁止�
 step-up、理由和幂等。admin-service 当前通过 **104 passed, 0 failed**（77 项管理服务
 集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），
 auth-service 通过 **25 passed, 0 failed**，gateway-control 通过 **15 passed, 0 failed**，
-总计 **144 passed, 0 failed**。**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
+resource-service 通过 **11 passed, 0 failed**，总计 **155 passed, 0 failed**。
+**C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
 冒烟；**C4-02** `gateway-control` 受控适配器已通过 15 项 Mock/故障测试；**C4-03a**
 正式只读模型目录、**C4-03b/C4-03c** 用户级策略、幂等签发、issuance journal、自动
 apply/独立回读、失败补偿、启动恢复和同步后交付均已实现，并通过 Mock/故障测试。
@@ -63,7 +64,10 @@ Break-glass Mock/integration core is implemented. Real IdP/MFA, SIEM/alerting,
 OA/ticketing, browser E2E, and production post-incident review rehearsal remain unaccepted.
 渠道关闭、没有启用渠道或缺少 transport 时不创建 dispatcher，也不会伪造
 “已投递”；
-**M2-D 核心已实现，Mock/集成测试通过；生产验收尚未完成。** M3-M6 仍未实现；当前仍没有员工对话正文审计。本状态只描述仓库中已经存在并有测试
+**M2-D 核心已实现，Mock/集成测试通过；生产验收尚未完成。** M3-A 的资源目录、不可变版本、
+SHA-256 内容寻址、Ed25519 签名、发布/历史回滚、乐观并发、幂等和资源审计核心已实现，
+并通过 11 项测试；M3-B/C/D 与 M4-M6 仍未实现。M3-A 尚未接入 admin-service 真实审批、
+管理台、员工客户端同步和生产验收。当前仍没有员工对话正文审计。本状态只描述仓库中已经存在并有测试
 证据的能力。
 
 ## 1. 一句话结论
@@ -72,7 +76,7 @@ OA/ticketing, browser E2E, and production post-incident review rehearsal remain 
 身份/设备服务**、一个 **M2-A 管理身份底座**、一个 **M2-B 只读治理切片**、
 **M2-C2/C3 管理写接口、幂等与管理审计切片**、**M2-C4 的网关策略控制核心链路**，
 以及 **APR-01/APR-01b/APR-01c 和 NOTIFY-01a/01b 的审批、step-up、outbox 与渠道适配器
-切片**。
+切片**，并新增 **M3-A 的签名资源目录后端核心**。
 真实 Magpie
 issuer、Mock OIDC、设备注册、短期 Key 签发、员工调用、用量归属、刷新撤销、停用吊销和
 auth-service 重启均已通过端到端测试；管理服务已通过独立 OIDC、MFA/ACR、会话、CSRF、
@@ -141,7 +145,8 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | NOTIFY-01c SIEM transport | 已实现并通过 6 项专项及管理回归 | `http-collector`/`otlp-http`/`syslog-tls`；固定 L0 schema；HTTPS:443/TLS:6514；host allowlist、固定 DNS、私网/回环/链路本地/云元数据拒绝；HTTP/OTLP 可选 Bearer `secretRef`，Syslog 禁止 `secretRef`；默认 32 KiB 上限；critical 优先；5 分钟轮询上限；dead-letters API；新增 4 个安全事件类型；真实 SIEM/Collector/Syslog/生产证书未验收 |
 | NOTIFY-01d 通知规则与运营 | 已实现并通过 Mock/集成测试 | 通知规则 CRUD、按事件/严重级别/目标/组织选择渠道；抑制窗口、聚合维度与窗口、阈值和延迟升级、单条升级失败隔离；`aggregates`/`suppressions`/`escalations` 运营查询；dead-letter 受审计幂等重放；管理页提供渠道、规则、投递、死信、聚合、抑制和升级视图；规则/渠道写操作要求会话、CSRF、RBAC、H 级 step-up、理由和 `Idempotency-Key`；真实邮件/IM/Webhook/工单/SIEM 厂商、生产证书和值班闭环未验收 |
 | M2-D 管理运营 | 核心已实现，Mock/集成测试通过；生产验收尚未完成 | 基础管理写页面、审批页面、operation/audit 查询、人工对账、CSV 导出和操作历史已实现；浏览器 E2E、失败恢复入口、完整看板和异步/对象存储导出未完成 |
-| M3 中央 MCP/资源库 | 未实现 | 只有产品/架构设计 |
+| M3-A 资源目录与签名 | 核心后端已实现，11 项测试通过 | `mcp`/`skill`/`instructions`/`subagent`/`template` 目录、`forced`/`recommended`、不可变版本、SHA-256 内容寻址、canonical JSON、manifest digest、Ed25519 签名、发布/历史回滚、乐观并发、幂等、资源审计和损坏存储失败关闭；真实审批、管理台、客户端同步和生产验收未完成 |
+| M3-B/C/D | 未实现 | 远程 MCP 代理、工具级 allow/deny、健康检查、客户端同步、强制策略执行、漂移、自动回滚和受控本地 MCP 均未实现 |
 | M4 会话内容审计 | 未实现 | 目前只有请求元数据和用量 |
 | M5 安全运营 | 未实现 | 无 SIEM 告警、阻断和值班闭环 |
 | M6 高可用/规模化 | 未实现 | 当前单实例、JSON 存储 |
@@ -851,7 +856,8 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 6. M2-C3 已完成 Mock 验证：幂等重放/冲突、`operationId`、intent/result 审计和审计失败阻断
    均已覆盖；下一步把同一流程接入真实存储和真实管理请求链路。
 7. C4-02 受控适配器已通过 15 项 Mock/故障测试；C4-03b/C4-03c 的 auth-service 核心链路
-   已通过 25 项 auth 回归、104 项 admin 测试和 15 项 gateway-control 测试，共 144 项。下一步在
+   已通过 25 项 auth 回归、104 项 admin 测试、15 项 gateway-control 测试和 11 项
+   resource-service 测试，共 155 项。下一步在
    Docker 可用环境验证镜像、Compose、
    健康检查和真实共享卷故障恢复；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。
 8. M2-C5 的 `audit-logs`、`operations/{id}`、人工对账和补偿后端已通过 Mock/故障测试；
@@ -906,3 +912,4 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 | APR-01d 审批箱与多步骤审批 | `feat/m2-e2-approval-inbox` / `enterprise/admin-service/` | 审批箱视图、串行/并行步骤、显式 `stepId`、quorum、转交、申请人撤回、外部回调 `stepId`、步骤摘要和管理页操作 | `node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs enterprise/admin-service/test/notification-channels.test.mjs enterprise/admin-service/test/notification-siem.test.mjs` | 该阶段 admin `90 passed, 0 failed`（75 项管理集成 + 7 项目录 + 7 项通知渠道 + 6 项 SIEM）；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `130 passed, 0 failed` | 该阶段真实 OA/IdP/MFA、浏览器 E2E、审批通知和生产验收未完成；后续 APR-01e 已补 break-glass 核心 |
 | APR-01e break-glass | `feat/apr-01e-break-glass` / `enterprise/admin-service/` | 15 分钟单次授权、24 小时复核、`active/expired/consumed/review_overdue/reviewed` 状态、申请/复核 RBAC、critical step-up、环境/策略版本/申请人/动作/目标/组织/风险/理由/payload/binding 绑定、原子消费、复核提醒、四类通知事件、审计、API 和管理页 | `node --test enterprise/admin-service/test/*.test.mjs`；auth 与 gateway-control 全回归 | admin `95 passed, 0 failed`（75 项管理集成 + 7 项目录 + 7 项通知渠道 + 6 项 SIEM）；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `135 passed, 0 failed` | 真实 IdP/MFA、SIEM/告警、OA/工单、外部工单 ID 回读、浏览器 E2E、5 分钟告警/工单 SLA 和 24 小时生产事后复核演练未验收 |
 | NOTIFY-01d 通知规则与运营 | `feat/notify-01d-notification-ops` / `enterprise/admin-service/` | 通知规则 CRUD、事件/严重级别/目标/组织匹配、抑制窗口、聚合维度和窗口、阈值/延迟升级、失败隔离、aggregates/suppressions/escalations 查询、dead-letter 受审计幂等重放，以及渠道/规则/投递/死信/聚合/抑制/升级管理页；规则和渠道写操作要求会话、CSRF、RBAC、H 级 step-up、理由和 `Idempotency-Key`，规则更新支持 `expectedUpdatedAt` | `node --test enterprise/admin-service/test/admin-service.test.mjs enterprise/admin-service/test/model-catalog.test.mjs enterprise/admin-service/test/notification-channels.test.mjs enterprise/admin-service/test/notification-rules.test.mjs enterprise/admin-service/test/notification-siem.test.mjs`；auth 与 gateway-control 全回归 | admin `104 passed, 0 failed`（77 项管理集成 + 7 项目录 + 7 项通知渠道 + 7 项通知规则 + 6 项 SIEM）；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `144 passed, 0 failed` | 真实邮件/IM/Webhook/工单/SIEM 厂商、真实 IdP/MFA、生产证书与域名、浏览器 E2E、生产高可用/负载、留存和灾备未验收 |
+| M3-A 资源目录与签名 | `feat/m3-a-resource-catalog` / `enterprise/resource-service/` | 五类资源目录、强制/推荐交付模式、不可变版本、SHA-256 内容寻址、canonical JSON、manifest digest、Ed25519 签名、发布/历史回滚、乐观并发、`Idempotency-Key` 与 actor 绑定、JSON 原子存储、Bearer 服务令牌、限流、请求 ID、秘密/私钥/未知字段失败关闭和资源审计 | `node --test enterprise/resource-service/test/resource-service.test.mjs`；admin、auth、gateway-control 全回归 | resource `11 passed, 0 failed`；admin `104 passed, 0 failed`；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；合计 `155 passed, 0 failed` | 真实审批状态查询/一次性消费、admin-service 编排与管理台、客户端同步、远程 MCP、S3/MinIO、KMS/HSM、多副本、Docker/Compose 实机和生产验收未完成 |

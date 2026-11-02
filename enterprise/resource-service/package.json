@@ -1,0 +1,15 @@
+{
+  "name": "@magpie-enterprise/resource-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Magpie Enterprise resource catalog, immutable releases and signed manifests",
+  "scripts": {
+    "keygen": "node scripts/generate-signing-key.mjs",
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}

@@ -43,6 +43,10 @@ SIEM transport、固定 L0 schema 和 dead-letters API 已实现并通过 6 项�
 SIEM/Collector/Syslog/生产证书未验收。NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和
 运营页已实现并通过 Mock/集成测试。真实 OA
 连接器、真实 IdP/MFA/反向代理、浏览器流程、break-glass 告警/工单与 24 小时生产复核也未验证。
+M3-A 的 `enterprise/resource-service/` 已实现资源目录、不可变版本、SHA-256 内容寻址、
+Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项测试；当前本地/Mock 回归合计
+155 项。它只有内部服务 API，尚未接入 admin-service 真实审批、管理台和员工客户端同步；
+远程 MCP、客户端同步、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
 反向代理和生产环境均未验收。
 第 10 节描述的是 C4-01/C4-02/C4-03a/C4-04 的已实现边界和待验收项；当前不能把受控适配器、
@@ -298,6 +302,42 @@ docker compose exec gateway-control node -e \
 当前 auth-service 已接入该适配器执行策略 apply 和独立回读；适配器或容器启动成功本身仍不
 代表额度修改或模型范围授权已经生效，必须检查 issuance journal 和同步状态。
 
+### 9.1.1 M3-A 资源目录服务
+
+`resource` 是独立 profile，不会随 `--profile admin` 启动。它只暴露内部端口 `3447`，
+不发布宿主机端口，使用独立 `resource-data` 和 `resource-content` 卷；签名私钥通过
+Compose secret 挂载，入口脚本复制到 tmpfs 后设置为 `0600`。先在 `enterprise/` 下生成
+密钥并配置 `.env`：
+
+```bash
+node resource-service/scripts/generate-signing-key.mjs \
+  secrets/resource-signing-key.pem
+```
+
+`RESOURCE_SERVICE_TOKEN` 必须是独立的长随机值，只提供给受信控制面服务，不得进入浏览器、
+员工客户端、URL、日志或 Git。`RESOURCE_SIGNING_KEY_ID` 必须稳定；轮换公钥时要保留旧公钥
+的验签窗口。关键变量见 `enterprise/.env.example`：
+
+```text
+RESOURCE_SIGNING_KEY_FILE=./secrets/resource-signing-key.pem
+RESOURCE_SIGNING_KEY_ID=resource-2026-11-v1
+RESOURCE_SERVICE_TOKEN=<separate-long-random-token>
+RESOURCE_STORE_PATH=/data/resource-store.json
+RESOURCE_CONTENT_PATH=/content/objects
+```
+
+启动并检查容器内健康状态：
+
+```bash
+docker compose --profile resource up -d resource
+docker compose exec resource node -e \
+  "fetch('http://127.0.0.1:3447/healthz').then(r=>r.text()).then(console.log)"
+```
+
+当前机器未安装 Docker CLI，因此上述 Compose 构建、启动、健康检查、卷权限和 secret 复制
+都还没有实机证据。该 profile 成功启动也只说明目录服务可用，不代表真实审批、管理台、
+客户端同步、S3/MinIO、KMS/HSM、多副本或生产验收完成。
+
 Compose 必须把网关数据卷只读挂载到管理容器：
 
 ```yaml
@@ -378,6 +418,10 @@ C4-03b/C4-03c 核心已有 25 项 auth 测试，管理端已接入额度/模型 
 - C4-04 已通过隔离真实 Magpie 的管理链路，仍须完成真实共享卷/Docker 部署复核；C4-03d/C5
    的基础写操作、审批、operation/audit 查询、人工对账和 CSV 导出页面已接入，但浏览器 E2E、
    失败恢复入口、完整运营体验和生产环境证据尚未验收。本地 Mock/故障测试不能替代这些部署验收。
+- M3-A 已通过 11 项 resource-service 单元/Mock 集成测试；仍须在真实 Compose 中验证镜像构建、
+  secret 文件权限、`resource-data`/`resource-content` 卷、健康检查、重启恢复、签名密钥轮换，
+  并接入 admin-service 真实审批和管理台后再做发布/回滚演练。客户端同步、远程 MCP 和漂移检测
+  属于 M3-B/C/D，当前未实现。
 - 备份恢复、灰度、回滚、至少一次跨部门越权和设备丢失演练。
 
 上述任何一项没有证据，发布结论只能是“受控试点”，不能写“企业生产已完成”。
