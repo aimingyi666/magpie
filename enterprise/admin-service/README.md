@@ -17,7 +17,7 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 90 项管理测试通过（70 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项）。
+当前总计 95 项管理测试通过（75 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项）。
 auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
@@ -490,7 +490,7 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\admin-service.test.mjs test\model-catalog.test.mjs test\notification-channels.test.mjs test\notification-siem.test.mjs
 ```
 
-2026-11-02 的实际结果：`90 passed, 0 failed`（70 项管理服务集成测试 + 7 项目录专项测试 +
+2026-11-02 的实际结果：`95 passed, 0 failed`（75 项管理服务集成测试 + 7 项目录专项测试 +
 7 项通知渠道专项测试 + 6 项 SIEM 专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
@@ -524,9 +524,9 @@ essential `auth_time`/ACR 请求、未配置时失败关闭、站外返回路径
 人工重放、审批/结果审计与 outbox 原子提交、渠道 RBAC/CSRF/step-up/理由/幂等/审计、
 渠道投影与收件人限制、Webhook HMAC、HTTPS/allowlist/DNS 固定解析、SSRF 和重定向拒绝、
 fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。管理服务当前为
-`90 passed, 0 failed`，
+`95 passed, 0 failed`（75 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项），
 auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，合计
-`130 passed, 0 failed`。
+`135 passed, 0 failed`。
 
 尚未验证：
 
@@ -538,9 +538,12 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
   回读和故障恢复 E2E，但真实共享卷、真实 IdP、反向代理和浏览器仍未验收。C4-03d/C5/M2-D
   的基础页面和 CSV 导出已接入，浏览器 E2E、失败恢复入口、完整运营体验和生产验收仍未完成。
 - APR-01c 的代码和 Mock IdP 集成测试已完成；APR-01d 的审批箱、串并行步骤、quorum、
-  转交和撤回代码已实现并通过 Mock/故障测试；APR-01e break-glass、真实管理 IdP
-  step-up/MFA/ACR、真实飞书/OA/ServiceNow/Jira 适配器、生产回调演练、浏览器审批 E2E
-  和审批通知仍未实现/未验收。
+  转交和撤回代码已实现并通过 Mock/故障测试；APR-01e 的 15 分钟单次 break-glass、
+  24 小时复核、关键 step-up、RBAC、告警事件、审计、API 和管理页已完成 Mock/集成核心。
+  真实管理 IdP step-up/MFA/ACR、真实飞书/OA/ServiceNow/Jira 适配器、SIEM/告警、
+  生产回调演练、浏览器审批 E2E 和生产事后复核演练仍未验收。
+  Break-glass Mock/integration core is implemented. Real IdP/MFA, SIEM/alerting,
+  OA/ticketing, browser E2E, and production post-incident review rehearsal remain unaccepted.
 - NOTIFY-01a/01b/01c 默认不启用渠道；未启用渠道或没有 transport 时正常启动不创建 dispatcher。
   `operation.audit_failed` 只有 schema、暂无可靠触发点；deliveries 查询无 cursor。
   邮件/IM/工单是统一 HTTPS 网关契约，不是原生厂商 SDK；真实网关、证书、租户配置和投递
@@ -556,8 +559,8 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
   对账，但自动补偿、告警队列和真实运维演练仍未实现/验收。
 - 审批已有服务端 API、一次性消费、HMAC 外部回调适配器、APR-01c step-up 和 APR-01d
   审批箱/多步骤核心；NOTIFY-01a/01b/01c 已有 outbox、渠道 API、统一 HTTPS/SIEM transport
-  与死信重放，但没有真实 OA 连接器、break-glass、真实 SIEM 接入、通知运营页或真实厂商
-  网关验收；审批、step-up、
+  与死信重放。APR-01e 已有 break-glass Mock/集成核心，但没有真实 OA 连接器、
+  SIEM/告警、通知运营页、生产事后复核演练或真实厂商网关验收；审批、step-up、
   渠道和 outbox 状态存储仍是
   单实例 JSON，尚未做多实例并发和真实 OA/IdP 验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。

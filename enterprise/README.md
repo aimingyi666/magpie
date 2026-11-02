@@ -23,14 +23,15 @@ Agent → magpie(客户端，本地网关) ──→ magpie(服务端网关) ─
 外加 C4-03d 的管理页额度/模型写表单、停用/吊销/轮换基础操作、员工只读状态门户、
 M2-C5 的查询/对账和 M2-D 的基础运营页与 CSV 导出、
 M2-E1/APR-01a 的服务端审批、APR-01b 的 HMAC 外部审批回调适配器、APR-01c 的独立
-OIDC step-up、APR-01d 的审批箱/串并行步骤/quorum/转交/撤回，以及 NOTIFY-01a/01b/01c
+OIDC step-up、APR-01d 的审批箱/串并行步骤/quorum/转交/撤回、APR-01e 的 break-glass
+15 分钟单次授权/24 小时复核，以及 NOTIFY-01a/01b/01c
 的通知 outbox、渠道管理和 SIEM transport：
 手工/OIDC 加入、短期 Key、设备注册与吊销、管理身份与只读治理、四个受控管理写 API、
 管理额度/模型 API、持久化幂等、管理审计、审批申请/决策/撤销、审批一次性消费、
 schema v1 的网关策略机器回读/原子写入、受控 `gateway-control` 适配器、正式只读模型目录，
 以及 auth-service 的用户级策略状态机。`gateway-control` 已通过 15 项 Mock/故障测试；
-auth-service 已通过 25 项测试；admin-service 已通过 90 项测试（70 项管理服务集成测试 +
-7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项），当前合计 130 项通过、0 失败。
+auth-service 已通过 25 项测试；admin-service 已通过 95 项测试（75 项管理服务集成测试 +
+7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项），当前合计 135 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -152,11 +153,17 @@ APR-01c 已实现独立管理 OIDC step-up、MFA/ACR、`auth_time` 新鲜度、�
 角色范围绑定和 H/C 风险门禁，并通过 Mock IdP 集成测试。NOTIFY-01a 已实现 transactional
 outbox、租约、幂等、退避、死信、重启恢复、deliveries 查询和受审计人工重放；NOTIFY-01b
 已实现渠道管理 API、渠道测试和统一 HTTPS 渠道适配器；NOTIFY-01c 的 SIEM transport、固定
-L0 schema 和 dead-letters API 也已实现。APR-01d 已部分交付：内置审批箱、串行/并行步骤、
-显式 `stepId`、quorum、转交和申请人撤回已接入管理页。仍未实现或未验收的是 APR-01e 的
-break-glass、真实 OA/厂商连接器、真实 IdP/MFA、浏览器 E2E、NOTIFY-01d 的规则/抑制、
-聚合、升级和运营页，真实 SIEM/Collector/Syslog/生产证书。不能把 Mock/API 证据描述成
-生产审批或通知闭环。
+L0 schema 和 dead-letters API 也已实现。APR-01d 已交付：内置审批箱、串行/并行步骤、
+显式 `stepId`、quorum、转交和申请人撤回已接入管理页。APR-01e 的 15 分钟单次
+break-glass、强制 step-up、24 小时事后复核、RBAC、告警事件、审计、API 和管理页已完成
+Mock/集成核心。仍未验收的是真实 OA/厂商连接器、真实 IdP/MFA、SIEM/告警、浏览器 E2E、
+NOTIFY-01d 的规则/抑制、聚合、升级和运营页，以及真实生产复核演练。不能把 Mock/API
+证据描述成生产审批或通知闭环。
+
+```text
+Break-glass Mock/integration core is implemented. Real IdP/MFA, SIEM/alerting,
+OA/ticketing, browser E2E, and production post-incident review rehearsal remain unaccepted.
+```
 
 M2-E 的统一边界是：
 
@@ -164,7 +171,7 @@ M2-E 的统一边界是：
 APR-01a/b/c
   -> NOTIFY-01a/b/c
   -> M2-D
-  -> APR-01d [done] -> APR-01e + NOTIFY-01d
+  -> APR-01d [done] -> APR-01e [core done] + NOTIFY-01d [pending]
 ```
 
 - `APR-01a`：风险分级、规范化 payload、绑定摘要、审批状态机、自审批拒绝、一次性消费和
@@ -173,9 +180,11 @@ APR-01a/b/c
   连接器和生产回调验收未完成。
 - `APR-01c`：独立管理 OIDC Client 的 step-up/MFA/ACR、短有效期和会话/IP/角色绑定；
   代码和 Mock IdP 集成测试已完成，真实 IdP/MFA/反向代理和生产验收未完成。
-- `APR-01d`：内置审批箱、串并行步骤、显式 `stepId`、quorum、转交、撤回和审批页已部分
-  交付；浏览器 E2E、真实 OA 和生产审批演练未完成。
-- `APR-01e`：15 分钟 break-glass、强制高风险告警和 24 小时事后复核。
+- `APR-01d`：内置审批箱、串并行步骤、显式 `stepId`、quorum、转交、撤回和审批页已交付；
+  浏览器 E2E、真实 OA 和生产审批演练未完成。
+- `APR-01e`：15 分钟单次 break-glass、强制关键 step-up、绑定动作/目标/payload、24 小时
+  事后复核、单独高风险告警事件和管理页/API 已完成 Mock/集成核心；真实 IdP/MFA、
+  SIEM/告警、OA/工单和浏览器 E2E 未验收。
 - `NOTIFY-01a`：与业务状态和审计同事务/同文件锁提交的 transactional outbox、租约、
   幂等、指数退避、重启恢复、死信和人工重放已实现并通过 Mock/故障测试。
 - `NOTIFY-01b`：渠道管理 API、渠道测试、邮件/企业 IM/HMAC Webhook/工单统一 HTTPS 网关
@@ -193,7 +202,9 @@ APR-01a/b/c
 原生厂商 SDK、真实 SIEM 接入、rules/suppress 或完整通知运营页面。默认禁用渠道，
 未启用渠道或没有 transport 时不创建 dispatcher，不会伪造“已投递”。业务请求不能同步调用
 外部通知渠道；渠道故障不能回滚已成功的业务事务。APR-01a/b/c 和 NOTIFY-01a/b/c 不证明真实
-OA、真实 IdP step-up、break-glass、真实厂商网关、真实 SIEM 接入或生产通知闭环已完成。
+OA、真实 IdP step-up、真实 break-glass 告警/工单、真实厂商网关、真实 SIEM 接入或生产通知
+闭环已完成。Break-glass Mock/integration core is implemented. Real IdP/MFA, SIEM/alerting,
+OA/ticketing, browser E2E, and production post-incident review rehearsal remain unaccepted.
 
 ## 快速开始
 
@@ -337,7 +348,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
    申请人不能审批自己的请求。APR-01b 可由受信任外部系统通过 HMAC 回调批准/拒绝，但回调
    只改变审批状态，不直接执行管理动作。APR-01c 要求 H/C 风险审批创建、决策和写入通过
    新鲜独立 step-up；未配置时失败关闭。审批箱已支持串行/并行步骤、quorum、显式 `stepId`、
-   转交和申请人撤回；break-glass、真实 OA 连接器、通知投递和浏览器 E2E 仍未完成。
+   转交和申请人撤回。APR-01e 已提供 15 分钟单次紧急授权、24 小时复核、关键 step-up、
+   RBAC、告警事件、审计和管理页/API；真实 OA 连接器、SIEM/告警、通知投递和浏览器 E2E
+   仍未验收。
 7. 管理员当前**不能下发 MCP 服务器、企业 Skills/Instructions 或中央资源库**。MCP 治理和
    企业资源库属于 M3，尚未实现；现有管理面只能展示只读元数据、四个受控写 API，以及
    通过 API 调用的额度/模型策略写入。
@@ -351,9 +364,9 @@ M2-C2 已在管理服务提供四个受控写接口：停用/启用用户、吊�
 控制台”，当前具备身份底座、只读治理、四个受控写 API 与基础页面、额度/模型策略写表单、
 完整证据链状态、C5 查询/对账、M2-D CSV 导出、APR-01a 基础审批、APR-01b HMAC 回调
 适配器和 APR-01c step-up 门禁；C4-04 的真实管理链路 E2E 已通过，但仍缺少完整审批/运营
-体验、失败恢复入口、真实 OA 连接器、break-glass、通知、Docker/共享卷、真实企业 IdP、
-浏览器和生产验收。在 M2-D 生产验收、M2-E 剩余项、M3/M4 和生产验收完成前，整体只能
-描述为“可演示、可受控技术试点”。
+体验、失败恢复入口、真实 OA 连接器、生产 break-glass 告警/复核、通知、Docker/共享卷、
+真实企业 IdP、浏览器和生产验收。在 M2-D 生产验收、M2-E 剩余项、M3/M4 和生产验收完成前，
+整体只能描述为“可演示、可受控技术试点”。
 
 ## 6. 验收
 
@@ -414,8 +427,9 @@ auth-service 重启和凭据脱敏。脚本通过本机非回环 IPv4 访问网�
    已补管理页额度/模型写表单、完整证据链状态和员工只读状态门户。C4-04 已通过隔离真实
    Magpie 的完整管理链路 E2E；M2-C5/M2-D 已接入 operation/audit 基础查询、人工对账、
    停用/吊销/轮换、基础审批和 CSV 导出页面；APR-01a 已提供审批 API、绑定校验、职责分离
-    和一次性消费。审批箱、串并行步骤、quorum、转交和撤回已部分实现；真实外部 OA、
-    break-glass 和浏览器 E2E 未实现/未验收；NOTIFY-01a/01b 的 outbox、渠道 API 和统一 HTTPS
+    和一次性消费。审批箱、串并行步骤、quorum、转交和撤回已实现；真实外部 OA、
+    break-glass 告警/工单和浏览器 E2E 未验收。APR-01e 的 15 分钟单次授权、24 小时复核、
+    RBAC、step-up、API、管理页和审计已完成 Mock/集成核心；NOTIFY-01a/01b 的 outbox、渠道 API 和统一 HTTPS
   transport 已实现，但 SIEM、规则/抑制、运营页、真实厂商连接器、证书/租户配置和生产
    投递未验收。APR-01c step-up 已实现代码和 Mock IdP 集成测试，但真实 IdP/MFA/反向代理和
    生产验收未完成。基础筛选、分页和 CSV 导出已实现，费用趋势看板、Excel、异步/对象存储

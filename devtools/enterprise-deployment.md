@@ -18,7 +18,7 @@
 `gateway-key describe --json` 与原子 `gateway-key policy apply --json` 机器协议已实现，
 并通过 Go 单测、gateway-key CLI 回归和隔离真实二进制冒烟。C4-02
 `enterprise/gateway-control/` 受控适配器也已实现，并通过 15 项 Mock/故障测试。C4-03a
-正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 90 项测试通过（70 项管理
+正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 95 项测试通过（75 项管理
 服务集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项），`GET /api/v1/admin/models` 已使用正式目录，
 `ADMIN_MODELS` 仅保留
 无正式目录时的兼容显示。C4-03b 用户级 `gatewayPolicy` 核心已在 auth-service 实现，
@@ -32,8 +32,8 @@ E2E 已通过，覆盖管理 OIDC/CSRF、quota/models 分步设置、双设备�
 拒绝、多凭证部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复
 同步；M2-C5 的查询/对账与 M2-D 核心已实现，基础页面已接入，生产验收尚未完成。admin-service
 负责展开正式目录选择器，auth-service 接收
-稳定模型 ID；APR-01a 审批后端、APR-01b HMAC/Mock 外部审批回调适配器和 APR-01c 独立 OIDC
-step-up 已实现并通过测试；NOTIFY-01a 的 transactional outbox、租约、幂等、退避、死信、
+稳定模型 ID；APR-01a 审批后端、APR-01b HMAC/Mock 外部审批回调适配器、APR-01c 独立 OIDC
+step-up、APR-01d 审批箱/多步骤审批和 APR-01e break-glass 核心已实现并通过测试；NOTIFY-01a 的 transactional outbox、租约、幂等、退避、死信、
 重启恢复、deliveries 查询和受审计人工重放也已通过 Mock/故障测试；NOTIFY-01b 的渠道管理
 API 与统一 HTTPS 渠道适配器已实现，覆盖 `email`/`im`/`webhook`/`ticketing`、HMAC Webhook、
 host allowlist、DNS 固定解析和私网/重定向防护。默认不启用渠道；未启用渠道或没有 transport
@@ -41,7 +41,7 @@ host allowlist、DNS 固定解析和私网/重定向防护。默认不启用渠�
 证书/租户配置和真实投递未验证。NOTIFY-01c 的 `http-collector`/`otlp-http`/`syslog-tls`
 SIEM transport、固定 L0 schema 和 dead-letters API 已实现并通过 6 项专项测试；真实
 SIEM/Collector/Syslog/生产证书未验收，NOTIFY-01d 的规则/抑制、聚合、升级和运营页未实现。真实 OA
-连接器、真实 IdP/MFA/反向代理和浏览器流程也未验证。
+连接器、真实 IdP/MFA/反向代理、浏览器流程、break-glass 告警/工单与 24 小时生产复核也未验证。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
 反向代理和生产环境均未验收。
 第 10 节描述的是 C4-01/C4-02/C4-03a/C4-04 的已实现边界和待验收项；当前不能把受控适配器、
@@ -570,7 +570,7 @@ Mock/故障测试已覆盖这些映射；真实 Docker/共享卷故障恢复仍�
 - 任何“页面值已变但实际请求未被限制/未被拒绝”的结果都视为 C4 失败。
 - C4-01 机器协议和 C4-02 `gateway-control` 已实现；C4-02 通过 15 项 Mock/故障测试，
   但 Docker/Compose、真实共享卷、健康检查和故障恢复尚未实机验收。C4-03a 正式只读目录
-  已通过 7 项目录专项；管理服务当前 90 项通过（含 7 项通知渠道专项和 6 项 SIEM 专项），
+  已通过 7 项目录专项；管理服务当前 95 项通过（含 7 项通知渠道专项和 6 项 SIEM 专项），
   但仍待真实部署验收。
   C4-03b/C4-03c 已接通本地 Mock/故障链路，C4-04 完整管理链路 E2E 已通过；C4-03d、C5
   和 M2-D 核心已实现，基础查询、对账和导出页面已接入，但浏览器 E2E、失败恢复入口和

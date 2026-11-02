@@ -6,6 +6,11 @@ import {
   ensureApprovalWorkflow,
 } from "./approval.js";
 import {
+  BREAK_GLASS_STATUSES,
+  BREAK_GLASS_REVIEW_CONCLUSIONS,
+  breakGlassExpectedBinding,
+} from "./break-glass.js";
+import {
   NOTIFICATION_EVENT_TYPES,
   NOTIFICATION_SEVERITIES,
   NOTIFICATION_STATUSES,
@@ -28,6 +33,9 @@ function emptyStore() {
     approvalConsumptions: {},
     approvalCallbackEvents: {},
     approvalCallbackNonces: {},
+    breakGlassGrants: {},
+    breakGlassReviews: {},
+    breakGlassReviewRequests: {},
     stepUpAssertions: {},
     notificationDeliveries: {},
     notificationReplayRequests: {},
@@ -73,6 +81,9 @@ function validateLoaded(value) {
     "approvalConsumptions",
     "approvalCallbackEvents",
     "approvalCallbackNonces",
+    "breakGlassGrants",
+    "breakGlassReviews",
+    "breakGlassReviewRequests",
     "stepUpAssertions",
     "notificationDeliveries",
     "notificationReplayRequests",
@@ -248,6 +259,168 @@ function validateLoaded(value) {
         || !Number.isFinite(Date.parse(nonce.receivedAt))
         || !Number.isFinite(Date.parse(nonce.expiresAt))) {
       throw new Error("admin store approvalCallbackNonces contains an invalid nonce");
+    }
+  }
+  const breakGlassReviewConclusions = new Set(BREAK_GLASS_REVIEW_CONCLUSIONS);
+  const breakGlassStatuses = new Set(BREAK_GLASS_STATUSES);
+  const reviewedGrantIds = new Set();
+  for (const [grantId, grant] of Object.entries(value.breakGlassGrants)) {
+    if (!grant
+        || typeof grant !== "object"
+        || Array.isArray(grant)
+        || grant.id !== grantId
+        || !grantId.startsWith("bgr_")) {
+      throw new Error("admin store breakGlassGrants contains an invalid grant");
+    }
+    for (const key of [
+      "requesterSubjectId",
+      "requesterEmail",
+      "action",
+      "targetType",
+      "targetId",
+      "targetOrgUnitId",
+      "riskLevel",
+      "environmentId",
+      "policyVersion",
+      "incidentId",
+      "reason",
+      "payloadDigest",
+      "bindingDigest",
+      "createdAt",
+      "updatedAt",
+      "expiresAt",
+    ]) {
+      if (typeof grant[key] !== "string" || !grant[key]) {
+        throw new Error(`admin store break-glass grant ${key} is invalid`);
+      }
+    }
+    for (const key of [
+      "consumedAt",
+      "consumedBySubjectId",
+      "operationId",
+      "reviewDueAt",
+      "reviewOverdueAt",
+      "reviewedAt",
+    ]) {
+      if (typeof grant[key] !== "string") {
+        throw new Error(`admin store break-glass grant ${key} is invalid`);
+      }
+    }
+    if (!grant.payloadSummary
+        || typeof grant.payloadSummary !== "object"
+        || Array.isArray(grant.payloadSummary)
+        || !/^[a-f0-9]{64}$/.test(grant.payloadDigest)
+        || !/^[a-f0-9]{64}$/.test(grant.bindingDigest)
+        || !Number.isFinite(Date.parse(grant.createdAt))
+        || !Number.isFinite(Date.parse(grant.updatedAt))
+        || !Number.isFinite(Date.parse(grant.expiresAt))) {
+      throw new Error("admin store break-glass grant metadata is invalid");
+    }
+    if ((grant.consumedAt && !Number.isFinite(Date.parse(grant.consumedAt)))
+        || (grant.reviewDueAt && !Number.isFinite(Date.parse(grant.reviewDueAt)))
+        || (grant.reviewOverdueAt && !Number.isFinite(Date.parse(grant.reviewOverdueAt)))
+        || (grant.reviewedAt && !Number.isFinite(Date.parse(grant.reviewedAt)))) {
+      throw new Error("admin store break-glass grant timestamp is invalid");
+    }
+    if (grant.consumedAt) {
+      if (!grant.consumedBySubjectId
+          || !grant.operationId
+          || !grant.reviewDueAt
+          || Date.parse(grant.reviewDueAt) <= Date.parse(grant.consumedAt)) {
+        throw new Error(
+          "admin store consumed break-glass grants require an actor, operation, and review due time",
+        );
+      }
+    }
+    if (!grant.notificationEventIds
+        || typeof grant.notificationEventIds !== "object"
+        || Array.isArray(grant.notificationEventIds)
+        || !["used", "reviewDue", "reviewOverdue", "reviewed"].every(
+          (key) => typeof grant.notificationEventIds[key] === "string",
+        )
+        || !Array.isArray(grant.stateHistory)
+        || grant.stateHistory.length === 0) {
+      throw new Error("admin store break-glass grant history is invalid");
+    }
+    for (const entry of grant.stateHistory) {
+      if (!entry
+          || typeof entry !== "object"
+          || Array.isArray(entry)
+          || !breakGlassStatuses.has(entry.status)
+          || typeof entry.at !== "string"
+          || !Number.isFinite(Date.parse(entry.at))
+          || typeof entry.actorSubjectId !== "string"
+          || typeof entry.reason !== "string") {
+        throw new Error("admin store break-glass grant state history is invalid");
+      }
+    }
+    let expected;
+    try {
+      expected = breakGlassExpectedBinding({
+        environmentId: grant.environmentId,
+        policyVersion: grant.policyVersion,
+        requesterSubjectId: grant.requesterSubjectId,
+        action: grant.action,
+        targetType: grant.targetType,
+        targetId: grant.targetId,
+        targetOrgUnitId: grant.targetOrgUnitId,
+        riskLevel: grant.riskLevel,
+        reason: grant.reason,
+        payload: grant.payloadSummary,
+      });
+    } catch {
+      throw new Error("admin store break-glass grant payload is invalid");
+    }
+    if (grant.payloadDigest !== expected.payloadDigest
+        || grant.bindingDigest !== expected.bindingDigest) {
+      throw new Error("admin store break-glass grant digests do not match its binding");
+    }
+  }
+  for (const [reviewId, review] of Object.entries(value.breakGlassReviews)) {
+    const grant = review?.grantId ? value.breakGlassGrants[review.grantId] : null;
+    if (!grant
+        || !review
+        || typeof review !== "object"
+        || Array.isArray(review)
+        || review.id !== reviewId
+        || !reviewId.startsWith("bgrv_")
+        || reviewedGrantIds.has(review.grantId)
+        || !breakGlassReviewConclusions.has(review.conclusion)
+        || review.reviewerSubjectId === grant.requesterSubjectId) {
+      throw new Error("admin store breakGlassReviews contains an invalid review");
+    }
+    for (const key of [
+      "grantId",
+      "reviewerSubjectId",
+      "reviewerEmail",
+      "conclusion",
+      "reason",
+      "reviewedAt",
+      "notificationEventId",
+    ]) {
+      if (typeof review[key] !== "string" || !review[key]) {
+        throw new Error(`admin store break-glass review ${key} is invalid`);
+      }
+    }
+    if (!Number.isFinite(Date.parse(review.reviewedAt)) || !grant.consumedAt) {
+      throw new Error("admin store break-glass review must follow a consumed grant");
+    }
+    reviewedGrantIds.add(review.grantId);
+  }
+  for (const [requestHash, request] of Object.entries(value.breakGlassReviewRequests)) {
+    const review = request?.reviewId ? value.breakGlassReviews[request.reviewId] : null;
+    if (!/^[a-f0-9]{64}$/.test(requestHash)
+        || !request
+        || typeof request !== "object"
+        || Array.isArray(request)
+        || request.requestHash !== requestHash
+        || typeof request.grantId !== "string"
+        || !value.breakGlassGrants[request.grantId]
+        || !review
+        || review.grantId !== request.grantId
+        || !/^[a-f0-9]{64}$/.test(String(request.requestFingerprint || ""))
+        || !Number.isFinite(Date.parse(request.createdAt))) {
+      throw new Error("admin store breakGlassReviewRequests contains an invalid request");
     }
   }
   for (const [sessionHash, assertion] of Object.entries(value.stepUpAssertions)) {

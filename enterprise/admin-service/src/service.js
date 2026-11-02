@@ -75,6 +75,18 @@ import {
   updateNotificationChannel,
 } from "./notification-channels.js";
 import { SIEM_CRITICAL_VISIBILITY_TARGET_MS } from "./notification-siem.js";
+import {
+  BREAK_GLASS_GRANT_TTL_MS,
+  BREAK_GLASS_POLICY_VERSION,
+  BREAK_GLASS_REVIEW_CONCLUSIONS,
+  BREAK_GLASS_STATUSES,
+  BreakGlassReviewScheduler,
+  breakGlassConsumptionFailure,
+  breakGlassExpectedBinding,
+  breakGlassReviewDueAt,
+  projectedBreakGlassStatus,
+  publicBreakGlassGrant,
+} from "./break-glass.js";
 
 const MAX_BODY = 16 * 1024;
 const DEFAULT_USAGE_WINDOW_DAYS = 7;
@@ -147,12 +159,22 @@ const NON_RETRYABLE_OPERATION_ERRORS = new Set([
   "approval_step_ineligible",
   "approval_step_unavailable",
   "approval_unavailable",
+  "approval_and_break_glass_exclusive",
+  "break_glass_required",
+  "break_glass_invalid",
+  "break_glass_expired",
+  "break_glass_consumed",
+  "break_glass_target_mismatch",
+  "break_glass_payload_mismatch",
+  "break_glass_separation_required",
+  "break_glass_review_exists",
   "csrf_invalid",
   "forbidden_role",
   "forbidden_scope",
   "idempotency_conflict",
   "invalid_approval_id",
   "invalid_approval_action",
+  "invalid_break_glass_id",
   "invalid_json",
   "invalid_reason",
   "invalid_request",
@@ -331,6 +353,17 @@ function cleanOptionalApprovalId(value) {
   return approvalId;
 }
 
+function cleanOptionalBreakGlassId(value) {
+  const breakGlassId = String(value ?? "").trim();
+  if (!breakGlassId) return "";
+  if (!breakGlassId.startsWith("bgr_")
+      || [...breakGlassId].length > 128
+      || /[\u0000-\u001f\u007f]/.test(breakGlassId)) {
+    throw new HttpError(400, "invalid_break_glass_id", "breakGlassId is invalid");
+  }
+  return breakGlassId;
+}
+
 function cleanIdentifier(value, name, code = "invalid_request") {
   const identifier = String(value ?? "").trim();
   if (!identifier) throw new HttpError(400, code, `${name} is required`);
@@ -493,13 +526,22 @@ function compareAuditRecords(left, right) {
   return String(right.id || "").localeCompare(String(left.id || ""));
 }
 
-function writeRequestFingerprint(action, targetType, targetId, reason, approvalId, payload = {}) {
+function writeRequestFingerprint(
+  action,
+  targetType,
+  targetId,
+  reason,
+  approvalId,
+  breakGlassId,
+  payload = {},
+) {
   return sha256(JSON.stringify(canonicalValue({
     action,
     targetType,
     targetId,
     reason,
     approvalId,
+    breakGlassId,
     payload,
   })));
 }
@@ -919,6 +961,7 @@ function policyEditor(user, evidence, operation, access) {
         </label>
         <label>Reason <input name="reason" maxlength="500" required></label>
         <label>Approval ID (optional) <input name="approvalId" maxlength="128"></label>
+        <label>Break-glass ID (optional) <input name="breakGlassId" maxlength="128"></label>
         <input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}">
         <button type="submit">Save quota</button>
         <p class="write-result" role="status" aria-live="polite"></p>
@@ -936,6 +979,7 @@ function policyEditor(user, evidence, operation, access) {
         </label>
         <label>Reason <input name="reason" maxlength="500" required></label>
         <label>Approval ID (optional) <input name="approvalId" maxlength="128"></label>
+        <label>Break-glass ID (optional) <input name="breakGlassId" maxlength="128"></label>
         <input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}">
         <button type="submit">Save models</button>
         <p class="write-result" role="status" aria-live="polite"></p>
@@ -1145,6 +1189,66 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
+  const canRequestBreakGlass = can("breakglass.request") && approvalActions.length > 0;
+  const breakGlassRequest = canRequestBreakGlass
+    ? `<form id="break-glass-request-form" class="stack-form">
+        <h3>Request emergency break-glass authorization</h3>
+        <p>Requests are short-lived and single-use. The requester cannot review their own use.</p>
+        <label>Action
+          <select name="action">${approvalActions.map(([value, label]) => (
+            `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
+          )).join("")}</select>
+        </label>
+        <label>Target ID <input name="targetId" maxlength="128"></label>
+        <label>Incident ID <input name="incidentId" maxlength="128" required></label>
+        <label>Emergency reason <input name="reason" maxlength="500" required></label>
+        <label>Business payload (JSON)
+          <textarea name="payload" rows="5" placeholder='{"orgUnitId":"org-platform","from":"2026-10-01T00:00:00Z","to":"2026-10-02T00:00:00Z","filters":{}}'>{}</textarea>
+        </label>
+        <button type="submit">Request break-glass grant</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : `<p class="notice">Your role cannot request break-glass authorization.</p>`;
+  const breakGlassList = can("breakglass.review")
+    ? `<form id="break-glass-filter" class="toolbar">
+        <label>Status
+          <select name="status">
+            <option value="">All states</option>
+            <option value="active">Active</option>
+            <option value="expired">Expired</option>
+            <option value="consumed">Consumed</option>
+            <option value="review_overdue">Review overdue</option>
+            <option value="reviewed">Reviewed</option>
+          </select>
+        </label>
+        <label>Action <input name="action" maxlength="128"></label>
+        <label>Incident ID <input name="incidentId" maxlength="128"></label>
+        <label>Requester subject <input name="requesterSubjectId" maxlength="128"></label>
+        <label>Target ID <input name="targetId" maxlength="128"></label>
+        <button type="submit">Load break-glass grants</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="break-glass-list" aria-live="polite"></div>
+      <section class="detail-panel">
+        <h3>Break-glass detail</h3>
+        <pre id="break-glass-detail">Select a grant to inspect its safe metadata.</pre>
+      </section>`
+    : `<p class="notice">Your role cannot review break-glass grants.</p>`;
+  const breakGlassReview = can("breakglass.review")
+    ? `<form id="break-glass-review-form" class="stack-form">
+        <h3>Review selected break-glass use</h3>
+        <p id="break-glass-selection">No break-glass grant selected.</p>
+        <label>Conclusion
+          <select name="conclusion">
+            <option value="justified">Justified</option>
+            <option value="not_justified">Not justified</option>
+          </select>
+        </label>
+        <label>Review reason <input name="reason" maxlength="500" required></label>
+        <button type="submit">Record post-incident review</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
   const exportPanel = exportKinds.length > 0
     ? `<form id="export-form" class="stack-form">
         <h3>Approved metadata export</h3>
@@ -1159,7 +1263,8 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         <label>To <input name="to" placeholder="2026-10-08T00:00:00Z" required></label>
         <label>Filters (JSON) <textarea name="filters" rows="3">{}</textarea></label>
         <label>Reason <input name="reason" maxlength="500" required></label>
-        <label>Approved approval ID <input name="approvalId" maxlength="128" required></label>
+        <label>Approved approval ID <input name="approvalId" maxlength="128"></label>
+        <label>Break-glass ID <input name="breakGlassId" maxlength="128"></label>
         <label>Idempotency key <input name="idempotencyKey" maxlength="200" placeholder="Leave blank to generate one"></label>
         <div class="button-row">
           <button type="button" id="export-request-approval">Request matching approval</button>
@@ -1198,7 +1303,8 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         </label>
         <label>Evidence reference <input name="evidenceRef" maxlength="500"></label>
         <label>Reason <input name="reason" maxlength="500" required></label>
-        <label>Approved approval ID <input name="approvalId" maxlength="128" required></label>
+        <label>Approved approval ID <input name="approvalId" maxlength="128"></label>
+        <label>Break-glass ID <input name="breakGlassId" maxlength="128"></label>
         <button type="submit">Reconcile</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
@@ -1259,12 +1365,14 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
   <p class="eyebrow">Magpie Enterprise · Management plane</p>
   <h1>Administration</h1>
   <p>Signed in as <strong>${escapeHtml(session.email)}</strong>.</p>
+  <p class="notice">This browser console cannot directly change an employee device's local Agent configuration. Employees still need the Agent one-click enrollment flow to write local settings; the admin console controls policy, models, MCP, resources, and access.</p>
   <div class="grid">
     <section class="box"><h2>Roles</h2><p>${escapeHtml(roles)}</p></section>
     <section class="box"><h2>Organization scope</h2><p><code>${escapeHtml(scopes)}</code></p></section>
   </div>
   <h2>Usage explorer</h2>${usageExplorer}
   <h2>Approvals</h2>${approvalRequest}${approvalList}${approvalDecision}${approvalRevoke}${approvalWithdraw}${approvalTransfer}
+  <h2>Break-glass</h2>${breakGlassRequest}${breakGlassList}${breakGlassReview}
   <h2>Exports</h2>${exportPanel}
   <h2>Operations</h2>${operationPanel}
   <h2>Audit metadata</h2>${auditPanel}
@@ -1296,7 +1404,8 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
     <h3>Apply selected account, device, or credential action</h3>
     <p id="operation-write-selection">Select a row action above.</p>
     <label>Reason <input name="reason" maxlength="500" required></label>
-    <label>Approved approval ID (required for high-risk actions) <input name="approvalId" maxlength="128"></label>
+    <label>Approved approval ID <input name="approvalId" maxlength="128"></label>
+    <label>Break-glass ID <input name="breakGlassId" maxlength="128"></label>
     <button type="submit">Apply action</button>
     <p class="write-result" role="status" aria-live="polite"></p>
   </form>
@@ -1432,6 +1541,14 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   const approvalEnvironmentId = `env_${sha256(new URL(config.publicUrl).origin).slice(0, 24)}`;
   await notificationOutbox.recoverExpired();
 
+  function breakGlassNow() {
+    if (typeof options.breakGlassNow === "function") {
+      return new Date(options.breakGlassNow());
+    }
+    if (options.breakGlassNow != null) return new Date(options.breakGlassNow);
+    return new Date();
+  }
+
   function currentApprovalPolicyVersion() {
     const catalogVersion = Number.isSafeInteger(modelCatalog.status.catalogVersion)
       ? modelCatalog.status.catalogVersion
@@ -1474,6 +1591,82 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       organizationId: approvalEnvironmentId,
       requestId: options.requestId || "",
     });
+  }
+
+  function breakGlassHttpError(code, message = "Break-glass authorization failed") {
+    const statusCode = code === "break_glass_invalid"
+      ? 404
+      : ["break_glass_expired", "break_glass_consumed"].includes(code)
+        ? 409
+        : 403;
+    return new HttpError(statusCode, code, message);
+  }
+
+  function appendBreakGlassSystemAudit(data, action, grant, options = {}) {
+    const record = {
+      id: `audit_${crypto.randomUUID()}`,
+      action,
+      timestamp: String(options.timestamp || new Date().toISOString()),
+      breakGlassId: String(grant?.id || ""),
+      incidentId: String(grant?.incidentId || ""),
+      result: String(options.result || action.split(".").at(-1) || ""),
+      errorCode: String(options.errorCode || ""),
+      actorSubjectId: String(options.actorSubjectId || ""),
+      actorEmail: String(options.actorEmail || ""),
+      requesterSubjectId: String(grant?.requesterSubjectId || ""),
+      breakGlassAction: String(grant?.action || ""),
+      targetType: String(grant?.targetType || ""),
+      targetId: String(grant?.targetId || ""),
+      targetOrgUnitId: String(grant?.targetOrgUnitId || ""),
+      riskLevel: String(grant?.riskLevel || ""),
+      payloadDigest: String(grant?.payloadDigest || ""),
+      bindingDigest: String(grant?.bindingDigest || ""),
+      operationId: String(options.operationId || grant?.operationId || ""),
+      reason: String(options.reason || ""),
+    };
+    data.adminSystemAuditLogs.push(record);
+  }
+
+  function consumeBreakGlassForOperation(data, breakGlassId, expected, operation, nowDate) {
+    const grant = data.breakGlassGrants[breakGlassId];
+    const now = nowDate instanceof Date ? nowDate : new Date(nowDate);
+    const nowMs = now.getTime();
+    if (!Number.isFinite(nowMs)) {
+      throw new HttpError(503, "storage_unavailable", "Break-glass consumption time is invalid");
+    }
+    const failure = breakGlassConsumptionFailure(grant, expected, nowMs);
+    if (failure) {
+      throw breakGlassHttpError(failure);
+    }
+    const consumedAt = now.toISOString();
+    grant.consumedAt = consumedAt;
+    grant.consumedBySubjectId = String(operation.actorSubjectId || "");
+    grant.operationId = String(operation.id || "");
+    grant.reviewDueAt = breakGlassReviewDueAt(consumedAt);
+    grant.updatedAt = consumedAt;
+    grant.stateHistory.push({
+      status: "consumed",
+      at: consumedAt,
+      actorSubjectId: grant.consumedBySubjectId,
+      reason: `consumed by ${operation.action}`,
+    });
+    notificationOutbox.enqueueBreakGlass(data, "used", grant, {
+      occurredAt: consumedAt,
+      actorSubjectId: operation.actorSubjectId,
+      actorEmail: operation.actorEmail,
+      operationId: operation.id,
+      requestId: operation.requestId,
+      organizationId: approvalEnvironmentId,
+    });
+    appendBreakGlassSystemAudit(data, "break_glass.used", grant, {
+      timestamp: consumedAt,
+      result: "consumed",
+      actorSubjectId: operation.actorSubjectId,
+      actorEmail: operation.actorEmail,
+      operationId: operation.id,
+      reason: operation.reason,
+    });
+    return grant;
   }
 
   function approvalStepById(approval, stepId) {
@@ -2598,6 +2791,341 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     json(res, 201, { approval: publicApproval(approval) });
   }
 
+  function breakGlassQuery(searchParams) {
+    const one = (name, maxLength = 256) => {
+      const value = String(searchParams.get(name) || "").trim();
+      if ([...value].length > maxLength || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new HttpError(400, "invalid_break_glass_filter", `${name} is invalid`);
+      }
+      return value;
+    };
+    const rawLimit = one("limit", 20);
+    if (rawLimit && !/^[1-9]\d*$/.test(rawLimit)) {
+      throw new HttpError(400, "invalid_limit", "limit must be a positive integer");
+    }
+    const limit = rawLimit ? Number(rawLimit) : DEFAULT_OPERATION_LIMIT;
+    if (!Number.isSafeInteger(limit) || limit > MAX_OPERATION_LIMIT) {
+      throw new HttpError(400, "invalid_limit", `limit must not exceed ${MAX_OPERATION_LIMIT}`);
+    }
+    const status = one("status", 32);
+    if (status && !BREAK_GLASS_STATUSES.includes(status)) {
+      throw new HttpError(400, "invalid_break_glass_filter", "status is not supported");
+    }
+    const action = one("action", 128);
+    if (action) approvalActionDefinition(action);
+    return {
+      status,
+      action,
+      incidentId: one("incidentId", 128),
+      requesterSubjectId: one("requesterSubjectId", 128),
+      targetId: one("targetId", 128),
+      limit,
+    };
+  }
+
+  async function listBreakGlassGrants(req, res, searchParams) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    const result = await requirePermission(current.session, "breakglass.review");
+    const query = breakGlassQuery(searchParams);
+    const now = breakGlassNow().getTime();
+    const grants = await store.read((data) => Object.values(data.breakGlassGrants)
+      .filter((grant) => {
+        if (query.action && grant.action !== query.action) return false;
+        if (query.incidentId && grant.incidentId !== query.incidentId) return false;
+        if (query.requesterSubjectId
+            && grant.requesterSubjectId !== query.requesterSubjectId) return false;
+        if (query.targetId && grant.targetId !== query.targetId) return false;
+        if (!organizationScopeAllows(result.access, grant.targetOrgUnitId)) return false;
+        const review = Object.values(data.breakGlassReviews)
+          .find((candidate) => candidate.grantId === grant.id) || null;
+        if (query.status
+            && projectedBreakGlassStatus(grant, review, now) !== query.status) return false;
+        return true;
+      })
+      .sort((left, right) => String(right.createdAt || "")
+        .localeCompare(String(left.createdAt || ""))
+        || String(right.id || "").localeCompare(String(left.id || "")))
+      .slice(0, query.limit)
+      .map((grant) => publicBreakGlassGrant(
+        structuredClone(grant),
+        Object.values(data.breakGlassReviews)
+          .find((candidate) => candidate.grantId === grant.id) || null,
+        now,
+      )));
+    json(res, 200, { grants });
+  }
+
+  async function getBreakGlassGrant(req, res, breakGlassId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    const found = await store.read((data) => {
+      const grant = data.breakGlassGrants[breakGlassId];
+      if (!grant) return null;
+      return {
+        grant: structuredClone(grant),
+        review: Object.values(data.breakGlassReviews)
+          .find((candidate) => candidate.grantId === breakGlassId) || null,
+      };
+    });
+    if (!found) throw new HttpError(404, "break_glass_invalid", "Break-glass grant not found");
+    await requirePermission(current.session, "breakglass.review", found.grant.targetOrgUnitId);
+    json(res, 200, {
+      grant: publicBreakGlassGrant(
+        found.grant,
+        found.review,
+        breakGlassNow().getTime(),
+      ),
+    });
+  }
+
+  async function createBreakGlassGrant(req, res) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const action = String(body.action || "").trim();
+    approvalActionDefinition(action);
+    if (!approvalRequiredForAction(action)) {
+      throw new HttpError(
+        400,
+        "break_glass_not_required",
+        "This action does not require break-glass authorization",
+      );
+    }
+    const incidentId = cleanIdentifier(body.incidentId, "incidentId", "incident_required");
+    const reason = cleanReason(body.reason);
+    const payload = approvalBusinessPayload(action, body);
+    let targetId;
+    if (action === "usage.export.create" || action === "audit.export.create") {
+      targetId = exportTargetId(action, payload);
+      if (body.targetId != null && String(body.targetId).trim()) {
+        const suppliedTargetId = cleanIdentifier(body.targetId, "targetId", "invalid_request");
+        if (suppliedTargetId !== targetId) {
+          throw new HttpError(
+            400,
+            "invalid_export_target",
+            "targetId does not match the export query",
+          );
+        }
+      }
+    } else {
+      targetId = cleanIdentifier(body.targetId, "targetId", "invalid_request");
+    }
+    const target = await resolveApprovalTarget(current.session, action, targetId, payload);
+    await requirePermission(current.session, "breakglass.request", target.targetOrgUnitId);
+    await requireStepUp(current, req, action, "C");
+    const expected = breakGlassExpectedBinding({
+      environmentId: approvalEnvironmentId,
+      policyVersion: BREAK_GLASS_POLICY_VERSION,
+      requesterSubjectId: current.session.subjectId,
+      action,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      targetOrgUnitId: target.targetOrgUnitId,
+      riskLevel: riskForAction(action),
+      reason,
+      payload,
+    });
+    const now = breakGlassNow();
+    if (!Number.isFinite(now.getTime())) {
+      throw new HttpError(503, "storage_unavailable", "Break-glass clock is invalid");
+    }
+    const createdAt = now.toISOString();
+    const grant = {
+      id: `bgr_${crypto.randomUUID()}`,
+      requesterSubjectId: current.session.subjectId,
+      requesterEmail: current.session.email,
+      action,
+      targetType: target.targetType,
+      targetId: target.targetId,
+      targetOrgUnitId: target.targetOrgUnitId,
+      riskLevel: riskForAction(action),
+      environmentId: approvalEnvironmentId,
+      policyVersion: BREAK_GLASS_POLICY_VERSION,
+      incidentId,
+      reason,
+      payloadDigest: expected.payloadDigest,
+      bindingDigest: expected.bindingDigest,
+      payloadSummary: expected.payload,
+      createdAt,
+      updatedAt: createdAt,
+      expiresAt: new Date(now.getTime() + BREAK_GLASS_GRANT_TTL_MS).toISOString(),
+      consumedAt: "",
+      consumedBySubjectId: "",
+      operationId: "",
+      reviewDueAt: "",
+      reviewOverdueAt: "",
+      reviewedAt: "",
+      notificationEventIds: {
+        used: "",
+        reviewDue: "",
+        reviewOverdue: "",
+        reviewed: "",
+      },
+      stateHistory: [{
+        status: "active",
+        at: createdAt,
+        actorSubjectId: current.session.subjectId,
+        reason: "break-glass requested",
+      }],
+    };
+    await store.mutate((data) => {
+      data.breakGlassGrants[grant.id] = structuredClone(grant);
+      appendBreakGlassSystemAudit(data, "break_glass.requested", grant, {
+        timestamp: createdAt,
+        result: "requested",
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+      });
+    });
+    json(res, 201, {
+      grant: publicBreakGlassGrant(grant, null, now.getTime()),
+    });
+  }
+
+  async function reviewBreakGlassGrant(req, res, breakGlassId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const conclusion = String(body.conclusion || "").trim();
+    if (!BREAK_GLASS_REVIEW_CONCLUSIONS.includes(conclusion)) {
+      throw new HttpError(
+        400,
+        "invalid_break_glass_review",
+        "conclusion must be justified or not_justified",
+      );
+    }
+    const reason = cleanReason(body.reason);
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    const storedGrant = await store.read((data) => {
+      const grant = data.breakGlassGrants[breakGlassId];
+      return grant ? structuredClone(grant) : null;
+    });
+    if (!storedGrant) throw new HttpError(404, "break_glass_invalid", "Break-glass grant not found");
+    await requirePermission(current.session, "breakglass.review", storedGrant.targetOrgUnitId);
+    if (storedGrant.requesterSubjectId === current.session.subjectId) {
+      throw new HttpError(
+        403,
+        "break_glass_separation_required",
+        "The requester cannot review their own break-glass use",
+      );
+    }
+    await requireStepUp(current, req, "break_glass.review", "C");
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const requestFingerprint = sha256(JSON.stringify(canonicalValue({
+      grantId: breakGlassId,
+      conclusion,
+      reason,
+    })));
+    const now = breakGlassNow();
+    if (!Number.isFinite(now.getTime())) {
+      throw new HttpError(503, "storage_unavailable", "Break-glass clock is invalid");
+    }
+    const outcome = await store.mutate((data) => {
+      const existingRequest = data.breakGlassReviewRequests[idempotencyKeyHash];
+      if (existingRequest) {
+        if (existingRequest.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "break_glass_review_conflict",
+            "Idempotency-Key was already used for a different break-glass review",
+          );
+        }
+        const existingReview = data.breakGlassReviews[existingRequest.reviewId];
+        if (!existingReview) {
+          throw new HttpError(
+            503,
+            "storage_unavailable",
+            "The break-glass review record is unavailable",
+          );
+        }
+        return {
+          replayed: true,
+          grant: structuredClone(data.breakGlassGrants[existingRequest.grantId]),
+          review: structuredClone(existingReview),
+        };
+      }
+      const grant = data.breakGlassGrants[breakGlassId];
+      if (!grant) throw new HttpError(404, "break_glass_invalid", "Break-glass grant not found");
+      if (grant.requesterSubjectId === current.session.subjectId) {
+        throw new HttpError(
+          403,
+          "break_glass_separation_required",
+          "The requester cannot review their own break-glass use",
+        );
+      }
+      if (!grant.consumedAt) {
+        throw new HttpError(
+          409,
+          "break_glass_review_unavailable",
+          "Break-glass review requires a consumed grant",
+        );
+      }
+      if (Object.values(data.breakGlassReviews)
+        .some((candidate) => candidate.grantId === breakGlassId)) {
+        throw new HttpError(
+          409,
+          "break_glass_review_exists",
+          "This break-glass grant was already reviewed",
+        );
+      }
+      const reviewedAt = now.toISOString();
+      const review = {
+        id: `bgrv_${crypto.randomUUID()}`,
+        grantId: breakGlassId,
+        reviewerSubjectId: current.session.subjectId,
+        reviewerEmail: current.session.email,
+        conclusion,
+        reason,
+        reviewedAt,
+        notificationEventId: "",
+      };
+      data.breakGlassReviews[review.id] = review;
+      data.breakGlassReviewRequests[idempotencyKeyHash] = {
+        requestHash: idempotencyKeyHash,
+        requestFingerprint,
+        grantId: breakGlassId,
+        reviewId: review.id,
+        createdAt: reviewedAt,
+      };
+      grant.reviewedAt = reviewedAt;
+      grant.updatedAt = reviewedAt;
+      grant.stateHistory.push({
+        status: "reviewed",
+        at: reviewedAt,
+        actorSubjectId: current.session.subjectId,
+        reason: conclusion,
+      });
+      notificationOutbox.enqueueBreakGlass(data, "reviewed", grant, {
+        occurredAt: reviewedAt,
+        eventKey: review.id,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        organizationId: approvalEnvironmentId,
+      });
+      review.notificationEventId = grant.notificationEventIds.reviewed;
+      appendBreakGlassSystemAudit(data, "break_glass.reviewed", grant, {
+        timestamp: reviewedAt,
+        result: conclusion,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+      });
+      return {
+        replayed: false,
+        grant: structuredClone(grant),
+        review: structuredClone(review),
+      };
+    });
+    json(res, outcome.replayed ? 200 : 201, {
+      replayed: outcome.replayed,
+      grant: publicBreakGlassGrant(outcome.grant, outcome.review, now.getTime()),
+    });
+  }
+
   function approvalQuery(searchParams) {
     const one = (name, maxLength = 256) => {
       const value = String(searchParams.get(name) || "").trim();
@@ -3516,6 +4044,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       actorEmail: String(value.actorEmail || ""),
       reason: String(value.reason || ""),
       approvalId: String(value.approvalId || ""),
+      breakGlassId: String(value.breakGlassId || ""),
       status: String(value.status || "unknown"),
       state: String(result?.state || value.status || "unknown"),
       createdAt: String(value.createdAt || ""),
@@ -3551,6 +4080,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       scopeOrgUnitIds: safeStringList(operation.scopeOrgUnitIds),
       createdAt: String(operation.createdAt || ""),
       updatedAt: String(operation.updatedAt || ""),
+      approvalId: String(operation.approvalId || ""),
+      breakGlassId: String(operation.breakGlassId || ""),
       dependencyInvokedAt: String(operation.dependencyInvokedAt || dependencyInvokedAt || ""),
       completedAt: String(operation.completedAt || ""),
       policyVersion: Number.isSafeInteger(result?.policy?.version)
@@ -3962,6 +4493,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       userAgentHash: String(record.userAgentHash || ""),
       reason: String(record.reason || ""),
       approvalId: String(record.approvalId || ""),
+      breakGlassId: String(record.breakGlassId || ""),
       approvalAction: String(record.approvalAction || ""),
       riskLevel: String(record.riskLevel || ""),
       payloadDigest: String(record.payloadDigest || ""),
@@ -4203,6 +4735,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       userAgentHash: operation.userAgentHash,
       reason: operation.reason,
       approvalId: operation.approvalId,
+      breakGlassId: operation.breakGlassId,
       parentOperationId: String(options.parentOperationId || operation.parentOperationId || ""),
       reconciliationAction: String(
         options.reconciliationAction || operation.reconciliationAction || "",
@@ -5104,6 +5637,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       record.result || "",
       record.errorCode || "",
       record.approvalId || "",
+      record.breakGlassId || "",
       record.parentOperationId || "",
       record.reason || "",
     ]);
@@ -5120,6 +5654,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       "result",
       "errorCode",
       "approvalId",
+      "breakGlassId",
       "parentOperationId",
       "reason",
     ], rows);
@@ -5168,7 +5703,17 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     const body = await readJsonBody(req);
     const reason = cleanReason(body.reason);
     const approvalId = cleanOptionalApprovalId(body.approvalId);
-    if (!approvalId) throw new HttpError(400, "approval_required", "approvalId is required");
+    const breakGlassId = cleanOptionalBreakGlassId(body.breakGlassId);
+    if (approvalId && breakGlassId) {
+      throw new HttpError(
+        400,
+        "approval_and_break_glass_exclusive",
+        "approvalId and breakGlassId cannot be used together",
+      );
+    }
+    if (!approvalId && !breakGlassId) {
+      throw new HttpError(400, "approval_required", "approvalId or breakGlassId is required");
+    }
     const idempotencyKey = validateRequiredIdempotencyKey(req);
     const request = normalizedExportRequest(action, body);
     const definition = approvalActionDefinition(action);
@@ -5197,6 +5742,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       targetId,
       reason,
       approvalId,
+      breakGlassId,
       request,
     );
     const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
@@ -5303,6 +5849,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           targetOrgUnitId: request.orgUnitId,
           reason,
           approvalId,
+          breakGlassId,
           beforeSummary: {
             id: targetId,
             exportType: request.exportType,
@@ -5324,17 +5871,39 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           sourceIp: String(req.socket.remoteAddress || ""),
           userAgentHash: sha256(String(req.headers["user-agent"] || "")),
         };
-        const expected = approvalExpectedBinding({
-          requesterSubjectId: current.session.subjectId,
-          action,
-          targetType: "export",
-          targetId,
-          targetOrgUnitId: request.orgUnitId,
-          riskLevel: riskForAction(action),
-          reason,
-          payload: request,
-        });
-        reserveApprovalForOperation(data, approvalId, expected, operation);
+        if (breakGlassId) {
+          const expected = breakGlassExpectedBinding({
+            environmentId: approvalEnvironmentId,
+            policyVersion: BREAK_GLASS_POLICY_VERSION,
+            requesterSubjectId: current.session.subjectId,
+            action,
+            targetType: "export",
+            targetId,
+            targetOrgUnitId: request.orgUnitId,
+            riskLevel: riskForAction(action),
+            reason,
+            payload: request,
+          });
+          consumeBreakGlassForOperation(
+            data,
+            breakGlassId,
+            expected,
+            operation,
+            breakGlassNow(),
+          );
+        } else {
+          const expected = approvalExpectedBinding({
+            requesterSubjectId: current.session.subjectId,
+            action,
+            targetType: "export",
+            targetId,
+            targetOrgUnitId: request.orgUnitId,
+            riskLevel: riskForAction(action),
+            reason,
+            payload: request,
+          });
+          reserveApprovalForOperation(data, approvalId, expected, operation);
+        }
 
         const token = exportToken(
           exportId,
@@ -5385,7 +5954,9 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         operation.intentAuditId = intent.id;
         operation.resultAuditId = result.id;
         data.adminAuditLogs.push(intent, result);
-        consumeApprovalForOperation(data, approvalId, operation, "succeeded");
+        if (approvalId) {
+          consumeApprovalForOperation(data, approvalId, operation, "succeeded");
+        }
         data.adminExports[exportId] = exportRecord;
         data.adminExportTokens[tokenHash] = {
           tokenHash,
@@ -5514,7 +6085,17 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     const body = await readJsonBody(req);
     const reason = cleanReason(body.reason);
     const approvalId = cleanOptionalApprovalId(body.approvalId);
-    if (!approvalId) throw new HttpError(400, "approval_required", "approvalId is required");
+    const breakGlassId = cleanOptionalBreakGlassId(body.breakGlassId);
+    if (approvalId && breakGlassId) {
+      throw new HttpError(
+        400,
+        "approval_and_break_glass_exclusive",
+        "approvalId and breakGlassId cannot be used together",
+      );
+    }
+    if (!approvalId && !breakGlassId) {
+      throw new HttpError(400, "approval_required", "approvalId or breakGlassId is required");
+    }
     const idempotencyKey = validateRequiredIdempotencyKey(req);
     const reconciliationAction = String(body.action || "").trim();
     if (!RECONCILIATION_ACTIONS.has(reconciliationAction)) {
@@ -5544,6 +6125,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       parent.targetId,
       reason,
       approvalId,
+      breakGlassId,
       { parentOperationId: parent.id, reconciliationAction, evidenceRef },
     );
     const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
@@ -5631,6 +6213,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       targetOrgUnitId,
       reason,
       approvalId,
+      breakGlassId,
       parentOperationId: parent.id,
       reconciliationAction,
       reconciliationEvidenceRef: evidenceRef,
@@ -5685,21 +6268,38 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         if (inProgress) {
           throw new HttpError(409, "reconciliation_in_progress", "Another reconciliation is still in progress");
         }
-        const expected = approvalExpectedBinding({
-          requesterSubjectId: current.session.subjectId,
-          action: "operation.reconcile",
-          targetType: parent.targetType,
-          targetId: parent.targetId,
-          targetOrgUnitId,
-          riskLevel: riskForAction("operation.reconcile"),
-          reason,
-          payload: {
-            parentOperationId: parent.id,
-            reconciliationAction,
-            evidenceRef,
-          },
-        });
-        reserveApprovalForOperation(data, approvalId, expected, childOperation);
+        const payload = {
+          parentOperationId: parent.id,
+          reconciliationAction,
+          evidenceRef,
+        };
+        if (breakGlassId) {
+          const expected = breakGlassExpectedBinding({
+            environmentId: approvalEnvironmentId,
+            policyVersion: BREAK_GLASS_POLICY_VERSION,
+            requesterSubjectId: current.session.subjectId,
+            action: "operation.reconcile",
+            targetType: parent.targetType,
+            targetId: parent.targetId,
+            targetOrgUnitId,
+            riskLevel: riskForAction("operation.reconcile"),
+            reason,
+            payload,
+          });
+          consumeBreakGlassForOperation(data, breakGlassId, expected, childOperation, breakGlassNow());
+        } else {
+          const expected = approvalExpectedBinding({
+            requesterSubjectId: current.session.subjectId,
+            action: "operation.reconcile",
+            targetType: parent.targetType,
+            targetId: parent.targetId,
+            targetOrgUnitId,
+            riskLevel: riskForAction("operation.reconcile"),
+            reason,
+            payload,
+          });
+          reserveApprovalForOperation(data, approvalId, expected, childOperation);
+        }
         data.adminOperations[childOperation.id] = structuredClone(childOperation);
         data.adminIdempotency[idempotencyKeyHash] = {
           operationId: childOperation.id,
@@ -5835,6 +6435,14 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     const body = await readJsonBody(req);
     const reason = cleanReason(body.reason);
     const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const breakGlassId = cleanOptionalBreakGlassId(body.breakGlassId);
+    if (approvalId && breakGlassId) {
+      throw new HttpError(
+        400,
+        "approval_and_break_glass_exclusive",
+        "approvalId and breakGlassId cannot be used together",
+      );
+    }
     const idempotencyKey = validateOptionalIdempotencyKey(req);
 
     const targetResult = await writeTarget(
@@ -5858,6 +6466,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       targetId,
       reason,
       approvalId,
+      breakGlassId,
       prepared,
     );
     const idempotencyKeyHash = idempotencyKey
@@ -5879,6 +6488,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       targetOrgUnitId,
       reason,
       approvalId,
+      breakGlassId,
       beforeSummary: writeTargetSnapshot(options.targetType, targetResult.target),
       status: "received",
       createdAt: now,
@@ -5922,10 +6532,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         }
 
         if (approvalRequiredForAction(options.action)) {
-          if (!approvalId) {
+          if (!approvalId && !breakGlassId) {
             throw approvalHttpError(
               "approval_required",
-              "approvalId is required for this action",
+              "approvalId or breakGlassId is required for this action",
             );
           }
           if (!targetOrgUnitId) {
@@ -5935,21 +6545,37 @@ export async function createEnterpriseAdminServer(config, options = {}) {
               "An approval target must belong to an active organization unit",
             );
           }
-          const expected = approvalExpectedBinding({
-            requesterSubjectId: current.session.subjectId,
-            action: options.action,
-            targetType: options.targetType,
-            targetId,
-            targetOrgUnitId,
-            riskLevel: riskForAction(options.action),
-            reason,
-            payload: prepared,
-          });
-          reserveApprovalForOperation(data, approvalId, expected, operation);
-        } else if (approvalId) {
+          if (breakGlassId) {
+            const expected = breakGlassExpectedBinding({
+              environmentId: approvalEnvironmentId,
+              policyVersion: BREAK_GLASS_POLICY_VERSION,
+              requesterSubjectId: current.session.subjectId,
+              action: options.action,
+              targetType: options.targetType,
+              targetId,
+              targetOrgUnitId,
+              riskLevel: riskForAction(options.action),
+              reason,
+              payload: prepared,
+            });
+            consumeBreakGlassForOperation(data, breakGlassId, expected, operation, breakGlassNow());
+          } else {
+            const expected = approvalExpectedBinding({
+              requesterSubjectId: current.session.subjectId,
+              action: options.action,
+              targetType: options.targetType,
+              targetId,
+              targetOrgUnitId,
+              riskLevel: riskForAction(options.action),
+              reason,
+              payload: prepared,
+            });
+            reserveApprovalForOperation(data, approvalId, expected, operation);
+          }
+        } else if (approvalId || breakGlassId) {
           throw approvalHttpError(
             "approval_invalid",
-            "This action must not consume an approval",
+            "This action must not consume an approval or break-glass grant",
           );
         }
 
@@ -6042,12 +6668,14 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           afterSummary: responseBody?.result || {},
           errorCode,
         });
-        consumeApprovalForOperation(
-          data,
-          operation.approvalId,
-          operation,
-          operationError ? "failed" : "succeeded",
-        );
+        if (operation.approvalId) {
+          consumeApprovalForOperation(
+            data,
+            operation.approvalId,
+            operation,
+            operationError ? "failed" : "succeeded",
+          );
+        }
         data.adminAuditLogs.push(resultAudit);
         stored.resultAuditId = resultAudit.id;
         notificationOutbox.enqueueOperation(data, stored, {
@@ -6619,6 +7247,30 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/break-glass") {
+      await listBreakGlassGrants(req, res, url.searchParams);
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/break-glass") {
+      await createBreakGlassGrant(req, res);
+      return;
+    }
+
+    const breakGlassReviewMatch =
+      /^\/api\/v1\/admin\/break-glass\/(bgr_[A-Za-z0-9_-]+)\/review$/.exec(url.pathname);
+    if (req.method === "POST" && breakGlassReviewMatch) {
+      await reviewBreakGlassGrant(req, res, breakGlassReviewMatch[1]);
+      return;
+    }
+
+    const breakGlassMatch =
+      /^\/api\/v1\/admin\/break-glass\/(bgr_[A-Za-z0-9_-]+)$/.exec(url.pathname);
+    if (req.method === "GET" && breakGlassMatch) {
+      await getBreakGlassGrant(req, res, breakGlassMatch[1]);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/v1/admin/approvals") {
       await listApprovals(req, res, url.searchParams);
       return;
@@ -7019,6 +7671,15 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;
   notificationDispatcher?.start();
+  const breakGlassScheduler = new BreakGlassReviewScheduler(
+    store,
+    notificationOutbox,
+    {
+      now: () => breakGlassNow().getTime(),
+      intervalMs: options.breakGlassIntervalMs,
+    },
+  );
+  breakGlassScheduler.start();
   return {
     server,
     store,
@@ -7027,5 +7688,6 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     modelCatalog,
     notificationOutbox,
     notificationDispatcher,
+    breakGlassScheduler,
   };
 }

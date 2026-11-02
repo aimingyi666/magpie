@@ -16,6 +16,9 @@ export const NOTIFICATION_EVENT_TYPES = Object.freeze([
   "security.access_denied",
   "security.auth_failed",
   "security.break_glass_used",
+  "security.break_glass_review_due",
+  "security.break_glass_review_overdue",
+  "security.break_glass_reviewed",
   "security.anomaly_detected",
 ]);
 

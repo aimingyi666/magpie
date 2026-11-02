@@ -71,6 +71,7 @@ export const ROLES = Object.freeze({
     "alerts.respond",
     "approvals.read",
     "approvals.decide",
+    "breakglass.review",
     "notifications.channels.read",
   ],
   ops_admin: [
@@ -108,6 +109,8 @@ export const ROLES = Object.freeze({
     "approvals.decide",
     "approvals.configure",
     "approvals.revoke",
+    "breakglass.request",
+    "breakglass.review",
     "notifications.read",
     "notifications.replay",
     "notifications.channels.read",

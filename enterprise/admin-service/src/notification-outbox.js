@@ -270,6 +270,54 @@ export function enqueueApprovalNotification(data, action, approval, options = {}
   });
 }
 
+const BREAK_GLASS_EVENT_TYPES = Object.freeze({
+  used: "security.break_glass_used",
+  review_due: "security.break_glass_review_due",
+  review_overdue: "security.break_glass_review_overdue",
+  reviewed: "security.break_glass_reviewed",
+});
+
+const BREAK_GLASS_EVENT_KEYS = Object.freeze({
+  used: "used",
+  review_due: "reviewDue",
+  review_overdue: "reviewOverdue",
+  reviewed: "reviewed",
+});
+
+export function enqueueBreakGlassNotification(data, action, grant, options = {}) {
+  const eventType = BREAK_GLASS_EVENT_TYPES[action];
+  if (!eventType || !grant?.id) return null;
+  const eventKey = String(options.eventKey || "")
+    .replace(/[^A-Za-z0-9_-]/g, "")
+    .slice(0, 72);
+  const eventId = `evt_${eventType.replaceAll(".", "_")}_${grant.id}`
+    + `${eventKey ? `_${eventKey}` : ""}`;
+  const severity = ["used", "review_overdue"].includes(action) ? "critical" : "warning";
+  const result = enqueueWithChannels(data, {
+    eventId,
+    eventType,
+    severity,
+    occurredAt: options.occurredAt || new Date().toISOString(),
+    organizationId: options.organizationId || grant.environmentId,
+    actorSubjectId: options.actorSubjectId || grant.requesterSubjectId,
+    actorEmail: options.actorEmail || grant.requesterEmail,
+    targetType: grant.targetType,
+    targetId: grant.targetId,
+    targetOrgUnitId: grant.targetOrgUnitId,
+    operationId: options.operationId || grant.operationId,
+    requestId: options.requestId || "",
+    errorCode: options.errorCode || "",
+    summary: `Break-glass ${grant.id} ${action.replaceAll("_", " ")} for ${grant.action}`,
+  }, {
+    maxAttempts: options.maxAttempts,
+    channels: options.channels,
+  });
+  grant.notificationEventIds ||= {};
+  const field = BREAK_GLASS_EVENT_KEYS[action];
+  if (!grant.notificationEventIds[field]) grant.notificationEventIds[field] = eventId;
+  return result;
+}
+
 export function enqueueOperationNotification(data, operation, options = {}) {
   const state = String(options.state || operation?.responseBody?.result?.state || "");
   let eventType = "";
@@ -540,6 +588,14 @@ export class NotificationOutbox {
 
   enqueueApproval(data, action, approval, options = {}) {
     return enqueueApprovalNotification(data, action, approval, {
+      ...options,
+      maxAttempts: this.maxAttempts,
+      channels: this.channelProvider ? this.channelProvider(data) : undefined,
+    });
+  }
+
+  enqueueBreakGlass(data, action, grant, options = {}) {
+    return enqueueBreakGlassNotification(data, action, grant, {
       ...options,
       maxAttempts: this.maxAttempts,
       channels: this.channelProvider ? this.channelProvider(data) : undefined,

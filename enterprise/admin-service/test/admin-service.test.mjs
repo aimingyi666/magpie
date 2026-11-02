@@ -16,6 +16,10 @@ import {
   riskForAction,
 } from "../src/approval.js";
 import {
+  BREAK_GLASS_GRANT_TTL_MS,
+  BREAK_GLASS_REVIEW_DUE_MS,
+} from "../src/break-glass.js";
+import {
   NotificationDispatcher,
   NotificationOutbox,
   claimNotificationDelivery,
@@ -875,6 +879,7 @@ async function fixture(options = {}) {
         callbackSecret,
       },
       async close() {
+        await admin.breakGlassScheduler?.stop();
         await admin.notificationDispatcher?.stop();
         await close(admin.server);
         await close(oidc.server);
@@ -883,6 +888,7 @@ async function fixture(options = {}) {
       },
     };
   } catch (error) {
+    await admin?.breakGlassScheduler?.stop();
     await admin?.notificationDispatcher?.stop();
     if (admin?.server?.listening) await close(admin.server);
     if (oidc?.server?.listening) await close(oidc.server);
@@ -1092,6 +1098,73 @@ async function decideApproval(
   );
   assert.equal(result.response.status, 200, JSON.stringify(result.body));
   return result.body.approval;
+}
+
+async function requestBreakGlass(f, jar, current, body = {}) {
+  const result = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/break-glass",
+    {
+      action: "user.disable",
+      targetId: "usr_alice",
+      incidentId: `INC-${crypto.randomUUID().slice(0, 12)}`,
+      reason: "Emergency incident response",
+      payload: {},
+      ...body,
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(result.response.status, 201, JSON.stringify(result.body));
+  assert.match(result.body.grant.breakGlassId, /^bgr_/);
+  return result.body.grant;
+}
+
+async function consumeBreakGlass(f, jar, current, grant, options = {}) {
+  const result = await adminPost(
+    f,
+    jar,
+    options.pathname || "/api/v1/admin/users/usr_alice/disable",
+    {
+      reason: options.reason ?? grant.reason,
+      breakGlassId: grant.breakGlassId,
+      ...(options.body || {}),
+    },
+    current.body.csrfToken,
+    {
+      "idempotency-key": options.idempotencyKey
+        || `break-glass-consume-${crypto.randomUUID()}`,
+    },
+  );
+  assert.equal(
+    result.response.status,
+    options.expectedStatus ?? 200,
+    JSON.stringify(result.body),
+  );
+  return result;
+}
+
+async function reviewBreakGlass(f, reviewer, grantId, options = {}) {
+  const result = await adminPost(
+    f,
+    reviewer.jar,
+    `/api/v1/admin/break-glass/${grantId}/review`,
+    {
+      conclusion: options.conclusion || "justified",
+      reason: options.reason || "Post-incident review complete",
+    },
+    reviewer.current.body.csrfToken,
+    {
+      "idempotency-key": options.idempotencyKey
+        || `break-glass-review-${crypto.randomUUID()}`,
+    },
+  );
+  assert.equal(
+    result.response.status,
+    options.expectedStatus ?? 201,
+    JSON.stringify(result.body),
+  );
+  return result;
 }
 
 function callbackPayload(approvalId, overrides = {}) {
@@ -5360,6 +5433,7 @@ test("startup recovery turns a reserved approval into a fail-closed consumed app
   });
 
   const restarted = await createEnterpriseAdminServer(f.config);
+  t.after(() => restarted.breakGlassScheduler?.stop());
   const recovered = await restarted.store.read((data) => ({
     approval: structuredClone(data.approvalRequests[approval.approvalId]),
     consumption: structuredClone(data.approvalConsumptions[approval.approvalId]),
@@ -5376,6 +5450,364 @@ test("startup recovery turns a reserved approval into a fail-closed consumed app
     && audit.result === "failed_closed"
   )));
   assertNoWriteSecrets(recovered, f, jar);
+});
+
+test("break-glass requests enforce CSRF, critical step-up, role, and organization scope", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f, new CookieJar(), undefined, { stepUp: false });
+  const current = await me(f, jar);
+  const requestBody = {
+    action: "user.disable",
+    targetId: "usr_alice",
+    incidentId: "INC-RBAC-1",
+    reason: "Emergency incident response",
+    payload: {},
+  };
+
+  const noCsrf = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/break-glass",
+    requestBody,
+  );
+  assert.equal(noCsrf.response.status, 403);
+  assert.equal(noCsrf.body.error.code, "csrf_invalid");
+
+  const noStepUp = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/break-glass",
+    requestBody,
+    current.body.csrfToken,
+  );
+  assert.equal(noStepUp.response.status, 403);
+  assert.equal(noStepUp.body.error.code, "step_up_required");
+
+  await stepUp(f, jar);
+  const grant = await requestBreakGlass(f, jar, current, requestBody);
+
+  const security = await independentApprover(f, { role: "security_admin" });
+  const listed = await adminGet(f, security.jar, "/api/v1/admin/break-glass?status=active");
+  assert.equal(listed.response.status, 200, JSON.stringify(listed.body));
+  assert.ok(listed.body.grants.some((candidate) => (
+    candidate.breakGlassId === grant.breakGlassId
+  )));
+  assert.ok(!JSON.stringify(listed.body).includes("payloadSummary"));
+
+  const securityCannotRequest = await adminPost(
+    f,
+    security.jar,
+    "/api/v1/admin/break-glass",
+    {
+      ...requestBody,
+      incidentId: "INC-RBAC-2",
+    },
+    security.current.body.csrfToken,
+  );
+  assert.equal(securityCannotRequest.response.status, 403);
+  assert.equal(securityCannotRequest.body.error.code, "forbidden_role");
+
+  const ops = await independentApprover(f, { role: "ops_admin" });
+  const opsCannotReview = await adminGet(f, ops.jar, "/api/v1/admin/break-glass");
+  assert.equal(opsCannotReview.response.status, 403);
+  assert.equal(opsCannotReview.body.error.code, "forbidden_role");
+
+  const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  assert.match(html, /Request emergency break-glass authorization/);
+  assert.match(html, /Review selected break-glass use/);
+
+  const securityPage = await fetch(
+    `${f.base}/admin/`,
+    { headers: { cookie: security.jar.header() } },
+  );
+  assert.equal(securityPage.status, 200);
+  const securityHtml = await securityPage.text();
+  assert.match(securityHtml, /Your role cannot request break-glass authorization/);
+  assert.match(securityHtml, /Review selected break-glass use/);
+  assert.doesNotMatch(securityHtml, /id="break-glass-request-form"/);
+  assertNoWriteSecrets(listed.body, f, jar);
+});
+
+test("break-glass grants bind one target, expire, and cannot be consumed twice", { timeout: 30000 }, async (t) => {
+  const clock = { now: Date.now() };
+  const f = await fixture({
+    adminServerOptions: {
+      breakGlassNow: () => clock.now,
+      breakGlassIntervalMs: 24 * 60 * 60 * 1000,
+    },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const grant = await requestBreakGlass(f, jar, current);
+
+  const exclusive = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/disable",
+    {
+      reason: grant.reason,
+      approvalId: "apr_exclusive",
+      breakGlassId: grant.breakGlassId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "break-glass-exclusive" },
+  );
+  assert.equal(exclusive.response.status, 400);
+  assert.equal(exclusive.body.error.code, "approval_and_break_glass_exclusive");
+
+  const wrongTarget = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/disable",
+    {
+      reason: grant.reason,
+      breakGlassId: grant.breakGlassId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "break-glass-wrong-target" },
+  );
+  assert.equal(wrongTarget.response.status, 403);
+  assert.equal(wrongTarget.body.error.code, "break_glass_target_mismatch");
+
+  const payloadGrant = await requestBreakGlass(f, jar, current, {
+    action: "user.policy.models",
+    targetId: "usr_bob",
+    incidentId: "INC-PAYLOAD-1",
+    reason: "Bind model policy payload",
+    expectedVersion: 1,
+    models: ["openai/gpt-test"],
+  });
+  const wrongPayload = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_bob/policy/models",
+    {
+      reason: payloadGrant.reason,
+      expectedVersion: 0,
+      models: ["openai/gpt-test"],
+      breakGlassId: payloadGrant.breakGlassId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "break-glass-wrong-payload" },
+  );
+  assert.equal(wrongPayload.response.status, 403);
+  assert.equal(wrongPayload.body.error.code, "break_glass_payload_mismatch");
+
+  const consumed = await consumeBreakGlass(f, jar, current, grant, {
+    idempotencyKey: "break-glass-consume-once",
+  });
+  assert.equal(consumed.body.action, "user.disable");
+
+  const replay = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/disable",
+    {
+      reason: grant.reason,
+      breakGlassId: grant.breakGlassId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "break-glass-consume-repeat" },
+  );
+  assert.equal(replay.response.status, 409);
+  assert.equal(replay.body.error.code, "break_glass_consumed");
+
+  const concurrentGrant = await requestBreakGlass(f, jar, current, {
+    incidentId: "INC-CONCURRENT-1",
+  });
+  const writesBefore = f.auth.writeCalls.length;
+  const attempts = await Promise.all([
+    adminPost(
+      f,
+      jar,
+      "/api/v1/admin/users/usr_alice/disable",
+      {
+        reason: concurrentGrant.reason,
+        breakGlassId: concurrentGrant.breakGlassId,
+      },
+      current.body.csrfToken,
+      { "idempotency-key": "break-glass-concurrent-left" },
+    ),
+    adminPost(
+      f,
+      jar,
+      "/api/v1/admin/users/usr_alice/disable",
+      {
+        reason: concurrentGrant.reason,
+        breakGlassId: concurrentGrant.breakGlassId,
+      },
+      current.body.csrfToken,
+      { "idempotency-key": "break-glass-concurrent-right" },
+    ),
+  ]);
+  attempts.sort((left, right) => left.response.status - right.response.status);
+  assert.deepEqual(attempts.map((attempt) => attempt.response.status), [200, 409]);
+  assert.equal(attempts[1].body.error.code, "break_glass_consumed");
+  assert.equal(f.auth.writeCalls.length, writesBefore + 1);
+
+  const expiringGrant = await requestBreakGlass(f, jar, current, {
+    incidentId: "INC-EXPIRED-1",
+  });
+  clock.now += BREAK_GLASS_GRANT_TTL_MS + 1;
+  const expired = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/users/usr_alice/disable",
+    {
+      reason: expiringGrant.reason,
+      breakGlassId: expiringGrant.breakGlassId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "break-glass-expired" },
+  );
+  assert.equal(expired.response.status, 409);
+  assert.equal(expired.body.error.code, "break_glass_expired");
+});
+
+test("break-glass use is atomically notified and audited before business failure", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const grant = await requestBreakGlass(f, jar, current, {
+    incidentId: "INC-ATOMIC-1",
+  });
+
+  f.auth.setWriteFailing(true);
+  const failed = await consumeBreakGlass(f, jar, current, grant, {
+    expectedStatus: 502,
+    idempotencyKey: "break-glass-business-failure",
+  });
+  assert.equal(failed.body.error.code, "dependency_unavailable");
+
+  const stored = await readAdminData(f);
+  const storedGrant = stored.breakGlassGrants[grant.breakGlassId];
+  assert.ok(storedGrant.consumedAt);
+  assert.ok(storedGrant.reviewDueAt);
+  assert.ok(storedGrant.operationId);
+  assert.match(storedGrant.notificationEventIds.used, /^evt_/);
+  assert.ok(storedGrant.stateHistory.some((entry) => entry.status === "consumed"));
+  assert.ok(stored.notificationDeliveries[storedGrant.notificationEventIds.used]
+    || Object.values(stored.notificationDeliveries)
+      .some((delivery) => delivery.eventId === storedGrant.notificationEventIds.used));
+  const usedDelivery = Object.values(stored.notificationDeliveries)
+    .find((delivery) => delivery.eventId === storedGrant.notificationEventIds.used);
+  assert.equal(usedDelivery.eventType, "security.break_glass_used");
+  assert.equal(usedDelivery.operationId, storedGrant.operationId);
+  assert.ok(stored.adminSystemAuditLogs.some((audit) => (
+    audit.action === "break_glass.used"
+    && audit.breakGlassId === grant.breakGlassId
+    && audit.operationId === storedGrant.operationId
+    && audit.result === "consumed"
+  )));
+  assert.ok(stored.adminOperations[storedGrant.operationId]);
+  assert.equal(stored.adminOperations[storedGrant.operationId].breakGlassId, grant.breakGlassId);
+  assertNoWriteSecrets(failed.body, f, jar);
+  assertNoWriteSecrets(storedGrant, f, jar);
+  assertNoWriteSecrets(usedDelivery, f, jar);
+});
+
+test("break-glass reviews enforce separation, idempotency, reminders, and immutability", { timeout: 30000 }, async (t) => {
+  const clock = { now: Date.now() };
+  const f = await fixture({
+    adminServerOptions: {
+      breakGlassNow: () => clock.now,
+      breakGlassIntervalMs: 24 * 60 * 60 * 1000,
+    },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const grant = await requestBreakGlass(f, jar, current, {
+    incidentId: "INC-REVIEW-1",
+  });
+  await consumeBreakGlass(f, jar, current, grant, {
+    idempotencyKey: "break-glass-review-consume",
+  });
+
+  clock.now += BREAK_GLASS_REVIEW_DUE_MS - 30 * 60 * 1000;
+  const dueResult = await f.admin.breakGlassScheduler.runOnce();
+  assert.equal(dueResult.due, 1);
+  assert.equal(dueResult.overdue, 0);
+
+  clock.now += 90 * 60 * 1000;
+  const overdueResult = await f.admin.breakGlassScheduler.runOnce();
+  assert.equal(overdueResult.due, 0);
+  assert.equal(overdueResult.overdue, 1);
+
+  const selfReview = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/break-glass/${grant.breakGlassId}/review`,
+    {
+      conclusion: "justified",
+      reason: "Self review must fail",
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "break-glass-self-review" },
+  );
+  assert.equal(selfReview.response.status, 403);
+  assert.equal(selfReview.body.error.code, "break_glass_separation_required");
+
+  const reviewer = await independentApprover(f, { role: "security_admin" });
+  const reviewKey = "break-glass-independent-review";
+  const reviewed = await reviewBreakGlass(f, reviewer, grant.breakGlassId, {
+    idempotencyKey: reviewKey,
+  });
+  assert.equal(reviewed.body.replayed, false);
+  assert.equal(reviewed.body.grant.status, "reviewed");
+  assert.equal(reviewed.body.grant.review.conclusion, "justified");
+  const reviewId = reviewed.body.grant.review.reviewId;
+
+  const replay = await reviewBreakGlass(f, reviewer, grant.breakGlassId, {
+    idempotencyKey: reviewKey,
+    expectedStatus: 200,
+  });
+  assert.equal(replay.response.status, 200);
+  assert.equal(replay.body.replayed, true);
+  assert.equal(replay.body.grant.review.reviewId, reviewId);
+
+  const keyConflict = await reviewBreakGlass(f, reviewer, grant.breakGlassId, {
+    idempotencyKey: reviewKey,
+    reason: "Changed review material",
+    expectedStatus: 409,
+  });
+  assert.equal(keyConflict.body.error.code, "break_glass_review_conflict");
+
+  const immutable = await reviewBreakGlass(f, reviewer, grant.breakGlassId, {
+    idempotencyKey: "break-glass-second-review",
+    expectedStatus: 409,
+  });
+  assert.equal(immutable.body.error.code, "break_glass_review_exists");
+
+  const stored = await readAdminData(f);
+  const storedGrant = stored.breakGlassGrants[grant.breakGlassId];
+  assert.ok(storedGrant.reviewOverdueAt);
+  assert.match(storedGrant.notificationEventIds.reviewDue, /^evt_/);
+  assert.match(storedGrant.notificationEventIds.reviewOverdue, /^evt_/);
+  assert.match(storedGrant.notificationEventIds.reviewed, /^evt_/);
+  assert.ok(Object.values(stored.breakGlassReviews).some((review) => (
+    review.id === reviewId
+    && review.reviewerSubjectId === reviewer.current.body.user.id
+  )));
+  assert.ok(stored.adminSystemAuditLogs.some((audit) => (
+    audit.action === "break_glass.reviewed"
+    && audit.breakGlassId === grant.breakGlassId
+    && audit.result === "justified"
+  )));
+  assertNoWriteSecrets(reviewed.body, f, jar);
 });
 
 test("usage storage failures are not rendered as partial reports", { timeout: 30000 }, async (t) => {
@@ -5989,6 +6421,27 @@ test("a malformed admin store is not treated as empty", async () => {
     const store = new JsonStore(file);
     await assert.rejects(() => store.load());
     assert.equal(await fs.readFile(file, "utf8"), "{not-json");
+  } finally {
+    await fs.rm(temp, { recursive: true, force: true });
+  }
+});
+
+test("invalid persisted break-glass records fail closed", async () => {
+  const temp = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-admin-break-glass-store-"));
+  try {
+    const file = path.join(temp, "admin-store.json");
+    const store = new JsonStore(file);
+    await store.load();
+    await assert.rejects(
+      () => store.mutate((data) => {
+        data.breakGlassGrants.bgr_invalid = {
+          id: "bgr_invalid",
+        };
+      }),
+      /break-glass/,
+    );
+    const persisted = await fs.readFile(file, "utf8");
+    assert.ok(!persisted.includes("bgr_invalid"));
   } finally {
     await fs.rm(temp, { recursive: true, force: true });
   }

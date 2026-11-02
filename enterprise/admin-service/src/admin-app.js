@@ -2,6 +2,7 @@ const csrfToken = document.querySelector('meta[name="csrf-token"]')?.content || 
 const stepUpStartUrl = document.querySelector('meta[name="step-up-start-url"]')?.content || "";
 
 let selectedApprovalId = "";
+let selectedBreakGlassId = "";
 let selectedOperationId = "";
 let operationCursor = "";
 let auditCursor = "";
@@ -187,6 +188,8 @@ function policyRequestBody(form) {
   };
   const approvalId = fieldValue(form, "approvalId");
   if (approvalId) body.approvalId = approvalId;
+  const breakGlassId = fieldValue(form, "breakGlassId");
+  if (breakGlassId) body.breakGlassId = breakGlassId;
   if (part === "quota") {
     let limits;
     try {
@@ -233,18 +236,46 @@ async function submitPolicy(form) {
   }
 }
 
-function selectApproval(approvalId, status = "", approval = null) {
-  selectedApprovalId = approvalId;
-  const text = `${approvalId}${status ? ` (${status})` : ""}`;
-  for (const selector of [
+function setSelectionText(selectors, text) {
+  for (const selector of selectors) {
+    const selection = document.querySelector(selector);
+    if (selection) selection.textContent = text;
+  }
+}
+
+function clearApprovalSelection() {
+  selectedApprovalId = "";
+  setSelectionText([
     "#approval-selection",
     "#approval-revoke-selection",
     "#approval-withdraw-selection",
     "#approval-transfer-selection",
-  ]) {
-    const selection = document.querySelector(selector);
-    if (selection) selection.textContent = text;
-  }
+  ], "No approval selected.");
+  document.querySelectorAll('input[name="approvalId"]').forEach((input) => {
+    input.value = "";
+  });
+}
+
+function clearBreakGlassSelection() {
+  selectedBreakGlassId = "";
+  setSelectionText(["#break-glass-selection"], "No break-glass grant selected.");
+  document.querySelectorAll('input[name="breakGlassId"]').forEach((input) => {
+    input.value = "";
+  });
+  const detail = document.querySelector("#break-glass-detail");
+  if (detail) detail.textContent = "Select a grant to inspect its safe metadata.";
+}
+
+function selectApproval(approvalId, status = "", approval = null) {
+  clearBreakGlassSelection();
+  selectedApprovalId = approvalId;
+  const text = `${approvalId}${status ? ` (${status})` : ""}`;
+  setSelectionText([
+    "#approval-selection",
+    "#approval-revoke-selection",
+    "#approval-withdraw-selection",
+    "#approval-transfer-selection",
+  ], text);
   const activeStepIds = Array.isArray(approval?.activeStepIds) ? approval.activeStepIds : [];
   const suggestedStepId = activeStepIds.length === 1 ? activeStepIds[0] : "";
   for (const formSelector of ["#approval-decision-form", "#approval-transfer-form"]) {
@@ -252,10 +283,132 @@ function selectApproval(approvalId, status = "", approval = null) {
     const step = field(form, "stepId");
     if (step && suggestedStepId) step.value = suggestedStepId;
   }
-  const exportApproval = field(document.querySelector("#export-form"), "approvalId");
-  if (exportApproval) exportApproval.value = approvalId;
-  const reconcileApproval = field(document.querySelector("#reconcile-form"), "approvalId");
-  if (reconcileApproval) reconcileApproval.value = approvalId;
+  document.querySelectorAll('input[name="approvalId"]').forEach((input) => {
+    input.value = approvalId;
+  });
+}
+
+function selectBreakGlass(grant) {
+  clearApprovalSelection();
+  selectedBreakGlassId = String(grant?.breakGlassId || "");
+  setSelectionText(
+    ["#break-glass-selection"],
+    `${selectedBreakGlassId} (${grant?.status || "unknown"})`,
+  );
+  document.querySelectorAll('input[name="breakGlassId"]').forEach((input) => {
+    input.value = selectedBreakGlassId;
+  });
+  const detail = document.querySelector("#break-glass-detail");
+  if (detail) detail.textContent = JSON.stringify(grant || {}, null, 2);
+}
+
+function renderBreakGlass(grants) {
+  const target = document.querySelector("#break-glass-list");
+  if (!target) return;
+  clear(target);
+  if (grants.length === 0) {
+    target.append(node("p", "No break-glass grants matched these filters."));
+    return;
+  }
+  target.append(dataTable(
+    ["Created", "Grant", "Status", "Action", "Requester", "Target", "Scope", "Expires", "Review due"],
+    grants.map((grant) => [
+      grant.createdAt,
+      grant.breakGlassId,
+      grant.status,
+      grant.action,
+      grant.requesterEmail || grant.requesterSubjectId,
+      `${grant.targetType}:${grant.targetId}`,
+      grant.targetOrgUnitId,
+      grant.expiresAt,
+      grant.reviewDueAt,
+    ]),
+    grants.map((grant) => ({
+      label: "Select",
+      run: () => selectBreakGlass(grant),
+    })),
+  ));
+}
+
+async function loadBreakGlass() {
+  const form = document.querySelector("#break-glass-filter");
+  if (!form) return;
+  const params = queryFromForm(form);
+  setResult(form, "Loading break-glass grants.", "pending");
+  try {
+    const payload = await api(`/api/v1/admin/break-glass?${params}`);
+    renderBreakGlass(payload.grants || []);
+    setResult(form, `${(payload.grants || []).length} break-glass grant(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
+async function requestBreakGlass(form) {
+  let payload;
+  try {
+    payload = jsonObject(fieldValue(form, "payload"), "Business payload");
+  } catch (error) {
+    setResult(form, error.message, "error");
+    return;
+  }
+  const body = {
+    ...payload,
+    action: fieldValue(form, "action"),
+    incidentId: fieldValue(form, "incidentId"),
+    reason: fieldValue(form, "reason"),
+  };
+  const targetId = fieldValue(form, "targetId");
+  if (targetId) body.targetId = targetId;
+  setBusy(form, true);
+  try {
+    const response = await api("/api/v1/admin/break-glass", { method: "POST", body });
+    const grant = response.grant || {};
+    selectBreakGlass(grant);
+    setResult(
+      form,
+      `Break-glass grant ${grant.breakGlassId || "unknown"} created and expires at ${grant.expiresAt || "unknown"}.`,
+      "result",
+    );
+    await loadBreakGlass();
+  } catch (error) {
+    showError(form, error);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function reviewSelectedBreakGlass(form) {
+  if (!selectedBreakGlassId) {
+    setResult(form, "Select a break-glass grant first.", "error");
+    return;
+  }
+  const key = idempotencyKey();
+  setBusy(form, true);
+  try {
+    const response = await api(
+      `/api/v1/admin/break-glass/${encodeURIComponent(selectedBreakGlassId)}/review`,
+      {
+        method: "POST",
+        body: {
+          conclusion: fieldValue(form, "conclusion"),
+          reason: fieldValue(form, "reason"),
+        },
+        idempotencyKey: key,
+      },
+    );
+    selectBreakGlass(response.grant || { breakGlassId: selectedBreakGlassId, status: "reviewed" });
+    setResult(
+      form,
+      `Break-glass review recorded${response.replayed ? " (idempotent replay)" : ""}.`,
+      "result",
+    );
+    await loadBreakGlass();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
 }
 
 function approvalStepSummary(approval) {
@@ -585,6 +738,7 @@ async function createExport(form) {
     return;
   }
   const approvalId = fieldValue(form, "approvalId");
+  const breakGlassId = fieldValue(form, "breakGlassId");
   const key = fieldValue(form, "idempotencyKey") || idempotencyKey();
   setBusy(form, true);
   setResult(form, `Creating export with Idempotency-Key ${key}.`, "pending");
@@ -595,7 +749,7 @@ async function createExport(form) {
         : "/api/v1/admin/audit/export",
       {
         method: "POST",
-        body: { ...request, approvalId },
+        body: { ...request, approvalId, breakGlassId },
         idempotencyKey: key,
       },
     );
@@ -642,7 +796,7 @@ function renderOperations(operations) {
     return;
   }
   target.append(dataTable(
-    ["Created", "Operation", "Action", "State", "Target", "Actor", "Approval", "Reconciliation"],
+    ["Created", "Operation", "Action", "State", "Target", "Actor", "Approval", "Break-glass", "Reconciliation"],
     operations.map((operation) => [
       operation.createdAt,
       operation.operationId,
@@ -651,6 +805,7 @@ function renderOperations(operations) {
       `${operation.targetType}:${operation.targetId}`,
       operation.actorEmail || operation.actorSubjectId,
       operation.approvalId,
+      operation.breakGlassId,
       operation.reconciliationState,
     ]),
     operations.map((operation) => ({
@@ -712,6 +867,8 @@ async function submitOperationWrite(form) {
     const body = { reason: fieldValue(form, "reason") };
     const approvalId = fieldValue(form, "approvalId");
     if (approvalId) body.approvalId = approvalId;
+    const breakGlassId = fieldValue(form, "breakGlassId");
+    if (breakGlassId) body.breakGlassId = breakGlassId;
     const payload = await api(endpoint, {
       method: "POST",
       body,
@@ -740,6 +897,7 @@ async function submitReconciliation(form) {
     evidenceRef: fieldValue(form, "evidenceRef"),
     reason: fieldValue(form, "reason"),
     approvalId: fieldValue(form, "approvalId"),
+    breakGlassId: fieldValue(form, "breakGlassId"),
   };
   setBusy(form, true);
   setResult(form, `Submitting reconciliation with Idempotency-Key ${key}.`, "pending");
@@ -953,7 +1111,8 @@ document.addEventListener("submit", async (event) => {
   const known = form.matches(
     ".policy-write-form, #usage-filter, #approval-request-form, #approval-filter, "
     + "#approval-decision-form, #approval-revoke-form, #approval-withdraw-form, "
-    + "#approval-transfer-form, #export-form, "
+    + "#approval-transfer-form, #break-glass-request-form, #break-glass-filter, "
+    + "#break-glass-review-form, #export-form, "
     + "#operation-write-form, #operation-filter, #reconcile-form, #audit-filter",
   );
   if (!known) return;
@@ -974,6 +1133,12 @@ document.addEventListener("submit", async (event) => {
     await withdrawSelectedApproval(form);
   } else if (form.id === "approval-transfer-form") {
     await transferSelectedApproval(form);
+  } else if (form.id === "break-glass-request-form") {
+    await requestBreakGlass(form);
+  } else if (form.id === "break-glass-filter") {
+    await loadBreakGlass();
+  } else if (form.id === "break-glass-review-form") {
+    await reviewSelectedBreakGlass(form);
   } else if (form.id === "export-form") {
     await createExport(form);
   } else if (form.id === "operation-write-form") {
@@ -1004,5 +1169,6 @@ document.querySelector("#audit-next")?.addEventListener("click", () => {
 
 document.querySelector("#usage-filter")?.requestSubmit();
 document.querySelector("#approval-filter")?.requestSubmit();
+document.querySelector("#break-glass-filter")?.requestSubmit();
 document.querySelector("#operation-filter")?.requestSubmit();
 document.querySelector("#audit-filter")?.requestSubmit();
