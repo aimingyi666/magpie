@@ -44,9 +44,11 @@ SIEM/Collector/Syslog/生产证书未验收。NOTIFY-01d 的规则/抑制、聚�
 运营页已实现并通过 Mock/集成测试。真实 OA
 连接器、真实 IdP/MFA/反向代理、浏览器流程、break-glass 告警/工单与 24 小时生产复核也未验证。
 M3-A 的 `enterprise/resource-service/` 已实现资源目录、不可变版本、SHA-256 内容寻址、
-Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项测试；当前本地/Mock 回归合计
-155 项。它只有内部服务 API，尚未接入 admin-service 真实审批、管理台和员工客户端同步；
-远程 MCP、客户端同步、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
+Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项测试；M3-B 远程 MCP 治理
+核心已通过 14 项测试；当前本地/Mock 回归合计 169 项。M3-A/M3-B 只有核心服务 API，
+尚未接入 admin-service 真实审批、管理台、OIDC 组织分配和员工客户端同步；M3-B 的审批
+nonce/限流器仅单进程，注册表/审计/幂等不是同一事务，存在提交后审计失败窗口。客户端同步、
+M3-C/D、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
 反向代理和生产环境均未验收。
 第 10 节描述的是 C4-01/C4-02/C4-03a/C4-04 的已实现边界和待验收项；当前不能把受控适配器、
@@ -418,10 +420,11 @@ C4-03b/C4-03c 核心已有 25 项 auth 测试，管理端已接入额度/模型 
 - C4-04 已通过隔离真实 Magpie 的管理链路，仍须完成真实共享卷/Docker 部署复核；C4-03d/C5
    的基础写操作、审批、operation/audit 查询、人工对账和 CSV 导出页面已接入，但浏览器 E2E、
    失败恢复入口、完整运营体验和生产环境证据尚未验收。本地 Mock/故障测试不能替代这些部署验收。
-- M3-A 已通过 11 项 resource-service 单元/Mock 集成测试；仍须在真实 Compose 中验证镜像构建、
-  secret 文件权限、`resource-data`/`resource-content` 卷、健康检查、重启恢复、签名密钥轮换，
-  并接入 admin-service 真实审批和管理台后再做发布/回滚演练。客户端同步、远程 MCP 和漂移检测
-  属于 M3-B/C/D，当前未实现。
+- M3-A 已通过 11 项 resource-service 单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
+  单元/Mock 集成测试。仍须在真实 Compose 中验证镜像构建、secret 文件权限、
+  `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
+  MCP 单副本限制，并接入 admin-service 真实审批、管理台和 OIDC 组织分配后再做发布/回滚
+  与 MCP 故障演练。M3-C/D 客户端同步、受控本地 MCP 和漂移检测当前未实现。
 - 备份恢复、灰度、回滚、至少一次跨部门越权和设备丢失演练。
 
 上述任何一项没有证据，发布结论只能是“受控试点”，不能写“企业生产已完成”。

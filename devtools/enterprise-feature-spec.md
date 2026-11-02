@@ -20,8 +20,10 @@ refresh/rotate 策略继承、故障后 `unknown/pending_sync`、Journal/孤儿 
 M2-D 核心已实现，Mock/集成测试通过；生产验收尚未完成。M2-D 当前使用受限 JSON 存储，
 没有对象存储、异步大批量导出、Excel 导出或分布式锁。M3-A 的资源目录、不可变版本、
 SHA-256 内容寻址、Ed25519 签名、发布/历史回滚和资源审计核心已实现并通过 11 项测试；
-M3-B/C/D 与 M4-M6 尚未实现，M3-A 也尚未接入 admin-service 真实审批、管理台、员工
-客户端同步和生产验收。M2-E 的 APR-01a
+M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查、上游凭据隔离和元数据审计
+核心已实现并通过 14 项测试；M3-C/D 与 M4-M6 尚未实现。M3-A/M3-B 尚未接入 admin-service
+真实审批、管理台、OIDC 组织分配和员工客户端同步；M3-B 的审批 nonce 仅单进程内存，
+注册表与审计不是同一事务，且 Docker/Compose 尚未实机验收。M2-E 的 APR-01a
 服务端审批、绑定校验、职责分离、
 一次性消费和启动恢复已实现并通过 Mock/故障测试；APR-01b 的 HMAC 外部审批回调适配器
 已实现并通过 Mock/故障测试，但真实飞书/OA/ServiceNow/Jira 连接器未验证；APR-01c 的
@@ -59,6 +61,7 @@ M2-D 核心已实现并待真实环境验收。
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| v3.21 | 2026-11-02 | 记录 M3-B 远程 MCP 治理核心交付：元数据注册表、管理员注册/更新/健康检查、客户端凭据签发/吊销、tools-only Streamable HTTP JSON-RPC 企业端点、user/org/device/server scope、工具级 allow/deny/风险/可见性、short-lived HMAC 审批门禁、HTTPS/host allowlist、固定 DNS、私网/元数据地址与重定向拒绝、请求/响应/超时/速率限制、每服务器熔断、SHA-256 客户端 token 摘要、环境 Secret Reference 和元数据审计。mcp-gateway 14 项、admin 104 项、auth 25 项、gateway-control 15 项、resource 11 项，总计 169 项通过。审批 nonce/限流器仍仅单进程；注册表、审计和幂等非同一事务，审计失败窗口可能留下不可恢复 token 的孤立 client；admin-service 真实审批查询/一次性消费、管理台、OIDC 组织分配、客户端同步、M3-C/D、共享事务存储、KMS/HSM、mTLS、真实 MCP/IdP、浏览器 E2E、Docker/Compose 实机和生产验收仍未完成。 |
 | v3.20 | 2026-11-02 | 记录 M3-A 资源目录与签名服务核心交付：五类资源目录、`forced`/`recommended` 交付模式、不可变版本、SHA-256 内容寻址、canonical JSON、manifest digest、Ed25519 签名、发布/历史回滚、乐观并发、`Idempotency-Key` 与 actor 绑定、JSON 原子存储、Bearer 服务令牌、限流、请求 ID、明文秘密/私钥/未知字段失败关闭和资源审计。resource-service 11 项、admin 104 项、auth 25 项、gateway-control 15 项，总计 155 项通过。`approvalId` 目前只是必填证据，尚未接入真实审批状态查询/一次性消费；远程 MCP、客户端同步、管理台、S3/MinIO、KMS/HSM、多副本、Docker/Compose 实机和生产验收仍未完成。 |
 | v3.19 | 2026-11-02 | 记录 NOTIFY-01d 通知规则与运营交付：通知规则 CRUD、事件/严重级别/目标/组织匹配、抑制窗口、聚合维度与窗口、阈值/延迟升级、单条升级失败隔离、`aggregates`/`suppressions`/`escalations` 查询、dead-letter 受审计幂等重放，以及渠道/规则/投递/死信/聚合/抑制/升级运营页；规则和渠道写操作要求管理会话、CSRF、RBAC、H 级 step-up、理由和 `Idempotency-Key`，规则更新支持 `expectedUpdatedAt`。admin 104 项、auth 25 项、gateway-control 15 项，总计 144 项通过。真实 IdP/MFA、真实 SIEM、真实邮件/IM/Webhook/工单厂商、生产证书与域名、浏览器 E2E、生产高可用/负载、留存和灾备未验收。 |
 | v3.18 | 2026-11-02 | 记录 APR-01e break-glass Mock/集成核心交付：15 分钟单次紧急授权、24 小时事后复核、`active/expired/consumed/review_overdue/reviewed` 状态、申请/复核 RBAC、关键 step-up、环境/策略版本/申请人/动作/目标/组织/风险/理由/payload/绑定摘要、原子消费、复核提醒、通知事件、审计、API 和管理页；禁止审批与 break-glass 同时使用。admin 95 项、auth 25 项、gateway-control 15 项，总计 135 项通过。真实 IdP/MFA、SIEM/告警、OA/工单、浏览器 E2E 和生产事后复核演练仍未验收。 |
@@ -126,8 +129,8 @@ Magpie 单机 Web UI：
 | 管理登录、RBAC、组织范围 | 是，见第 4、18、12.1 节 | M2-A/M2-B 已实现认证、会话、CSRF、角色、组织范围和只读治理；M2-C1 内部写接口、M2-C2 四个管理写 API 和 M2-C3 幂等/intent-result 管理审计已实现；C4-01 底层机器协议、C4-02 受控适配器、C4-03b/C4-03c 策略核心与额度/模型 API 已实现；C4-03d 已部分交付管理页额度/模型写表单和员工只读状态门户；M2-C5 的 operation/audit 查询和人工对账后端已实现并通过 Mock/故障测试；M2-D 已交付审批、operation、查询、CSV 导出和基础停用/吊销/轮换页面；失败恢复、浏览器 E2E、完整运营体验和生产验收未完成 |
 | 员工/管理员页面与操作流程 | 是，见第 5、6.2、6.3、12.1 节 | 已有 M1 员工页、M2-A 管理页、M2-B 只读摘要、C4-03d 额度/模型写表单和员工只读状态门户，以及 M2-D 的审批/operation、用量/审计查询、导出和基础停用/吊销/轮换页面；完整运营看板、浏览器 E2E、失败恢复入口和生产验收未完成 |
 | 模型网关、额度、白名单 | 是，见第 6.4、6.8、12.8.1 节 | M0 已有手工网关能力；C4-01 的 schema v1 机器回读和原子策略写入已实现并通过本地测试；C4-02 的受控适配器已实现并通过 15 项 Mock/故障测试；C4-03a 的正式只读模型目录、C4-03b 的用户级策略核心和 C4-03c 的管理/签发/同步/交付核心已实现；C4-03d 仅部分实现；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，但 Docker/真实共享卷、真实 IdP 和生产验收仍未完成 |
-| MCP 目录、远程/本地 MCP、工具权限 | 是，见第 5.4、6.5 节 | 未实现 |
-| 中央资源库、版本、签名、同步、漂移 | 是，见第 5.5、6.6 节 | 未实现 |
+| MCP 目录、远程/本地 MCP、工具权限 | 是，见第 5.4、6.5 节 | M3-B 远程 MCP 治理核心已实现并通过 14 项测试；M3-C/D 本地 MCP、客户端同步、管理台、admin-service 真实审批联动、OIDC 组织分配和生产验收未实现 |
+| 中央资源库、版本、签名、同步、漂移 | 是，见第 5.5、6.6 节 | M3-A 资源目录、版本、签名和审计核心已实现；客户端同步、强制策略、漂移和自动回滚未实现 |
 | 客户端策略与防绕过 | 是，见第 6.7、9 节 | 只有现有网关和 IP 白名单，完整强制未实现 |
 | 会话/工具审计、脱敏、留存 | 是，见第 5.6、6.9、19 节 | 未实现；当前只有元数据用量 |
 | 审批、二次认证、职责分离 | 是，见第 5.11、6.12、8.2、9 节 | APR-01a 的服务端审批、绑定校验、职责分离、组织范围、一次性消费和启动恢复已实现并通过 Mock/故障测试；APR-01b 的 HMAC 外部审批回调适配器已实现并通过 Mock/故障测试，但真实 OA 连接器未验证；APR-01c 独立 OIDC step-up 已实现并通过 Mock IdP 集成测试；APR-01d 审批箱、串行/并行步骤、quorum、转交/撤回和基础管理 UI 已实现；APR-01e break-glass 的 15 分钟单次授权、24 小时复核、提醒、通知、审计、API 和管理页已完成 Mock/集成核心；真实 OA、SIEM/告警、工单、浏览器 E2E、真实 IdP/MFA、反向代理和生产验收未完成 |
@@ -135,7 +138,7 @@ Magpie 单机 Web UI：
 | 部署、备份、灰度、回滚 | 是，见第 10、20、21 节 | Compose 模板已有，Docker/计划任务待实机验收 |
 | 上游同步与 fork 兼容 | 是，见第 14、17 节 | 分支工具可用，但当前 `sync-upstream.yml` 仍是合并后直推 `main`；企业目标态必须改为“同步分支 -> 合并 upstream -> CI -> 自动 PR -> 受保护 main 合并”，并完成规则与回归验收 |
 | 项目职责、协作、分支保护、环境晋级、成本容量和培训 | 是，见 [`enterprise-operating-model.md`](enterprise-operating-model.md) | 完整运营规则已定义；GitHub 规则、预算和人员任命需企业实际落地 |
-| 测试与上线门槛 | 是，见第 13、22、23、25 节 | 已记录 M0/M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3 实测结果；C4-01 有本地单测、CLI 回归和隔离二进制冒烟证据；C4-02 有 15 项 Mock/故障测试证据；C4-03a 有 7 项目录专项和 77 项管理服务集成测试证据；C4-03b/C4-03c 有 25 项 auth-service 测试；M3-A 有 11 项资源目录/签名/存储/幂等/审计测试证据；M2-C5、M2-D、APR-01a、APR-01b、APR-01c、APR-01d、APR-01e、NOTIFY-01a、NOTIFY-01b、NOTIFY-01c 和 NOTIFY-01d 有 operation/audit/reconcile/export/approval/callback/step-up/inbox/break-glass/outbox/channel/SIEM/rules/aggregation/escalation 的 Mock/故障测试证据；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。当前总计 admin 104/104、auth 25/25、gateway-control 15/15、resource 11/11，共 155/155。浏览器 E2E、真实企业 IdP/OA、break-glass 的 5 分钟告警/工单 SLA 和 24 小时生产复核演练、恢复入口、Docker/共享卷、真实审批、客户端资源同步、真实厂商通知连接器、真实 SIEM/Collector/Syslog/证书、M2-C5/M2-D 生产验收和 M3-B/C/D/M4-M6 尚无完整生产环境验收证据 |
+| 测试与上线门槛 | 是，见第 13、22、23、25 节 | 已记录 M0/M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3 实测结果；C4-01 有本地单测、CLI 回归和隔离二进制冒烟证据；C4-02 有 15 项 Mock/故障测试证据；C4-03a 有 7 项目录专项和 77 项管理服务集成测试证据；C4-03b/C4-03c 有 25 项 auth-service 测试；M3-A 有 11 项资源目录/签名/存储/幂等/审计测试证据；M3-B 有 14 项注册表、scope、工具授权、审批、SSRF、健康/熔断、边界和审计测试证据；M2-C5、M2-D、APR-01a、APR-01b、APR-01c、APR-01d、APR-01e、NOTIFY-01a、NOTIFY-01b、NOTIFY-01c 和 NOTIFY-01d 有 operation/audit/reconcile/export/approval/callback/step-up/inbox/break-glass/outbox/channel/SIEM/rules/aggregation/escalation 的 Mock/故障测试证据；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。当前总计 admin 104/104、auth 25/25、gateway-control 15/15、resource 11/11、mcp-gateway 14/14，共 169/169。浏览器 E2E、真实企业 IdP/OA、break-glass 的 5 分钟告警/工单 SLA 和 24 小时生产复核演练、恢复入口、Docker/共享卷、真实审批、客户端资源同步、真实厂商通知连接器、真实 SIEM/Collector/Syslog/证书、M2-C5/M2-D 生产验收、M3-B 生产验收和 M3-C/D/M4-M6 尚无完整生产环境验收证据 |
 
 ### 0.3 本文档不替代的事实
 
@@ -173,7 +176,7 @@ Magpie 单机 Web UI：
 | E4 管理控制台 | 独立管理登录、RBAC、组织范围、只读治理、敏感写操作、审批/step-up、操作与审计查询、看板 | M2-A..E | M2-A/B/C1/C2/C3、C4-01/02/03a/03b、C4-03c 核心、M2-C5 后端、APR-01a 服务端审批、APR-01b HMAC 回调适配器、APR-01c 独立 step-up、APR-01d 审批箱/多步骤核心和 APR-01e break-glass 核心已有；C4-03d 部分实现；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过；M2-D 已交付审批/break-glass、operation、用量/审计查询、CSV 导出和基础停用/吊销/轮换页面；浏览器 E2E、失败恢复入口、完整运营体验、C5/M2-D 生产验收、真实 IdP/MFA/反向代理、真实 OA/SIEM/告警/工单和 break-glass 生产演练未完成 |
 | E5 模型网关 | 正式模型目录、稳定模型 ID、Provider 隔离、用户级额度、限流、路由、回退和策略回读 | M0/M2-C4 | 手工网关、C4-01 机器协议、C4-02 受控适配器、C4-03a 目录和 C4-03b 策略核心已有；管理员自助调额/模型授权到真实网关生效未完成 |
 | E6 用量与成本 | 人/部门/设备/Agent/模型/Key 的 Token、费用、错误、趋势、预算、导出和告警 | M2-B/M2-D/M5 | `usage.jsonl` 元数据归属、只读汇总、筛选/分页、费用趋势和 CSV 授权导出核心已有；预算告警、生产用量卷、对象存储和异步大批量导出未验收 |
-| E7 MCP 治理 | 中央目录、远程 MCP 代理、本地 MCP、工具级 allow/deny、健康检查、限流和熔断 | M3/M5 | M3-A 可登记 `mcp` 资源类型和签名版本；远程代理、工具级 allow/deny、健康检查、限流和熔断未实现，当前实际调用仍来自每台电脑的本地 Library |
+| E7 MCP 治理 | 中央目录、远程 MCP 代理、本地 MCP、工具级 allow/deny、健康检查、限流和熔断 | M3/M5 | M3-A 可登记 `mcp` 资源类型和签名版本；M3-B 已提供远程 MCP 注册、企业统一端点、工具级 allow/deny、健康检查、限流和每服务器熔断核心；管理台、admin-service 真实审批联动、OIDC 组织分配、客户端同步、本地 MCP/M3-D 和生产验收未实现 |
 | E8 企业资源库 | Skills、Instructions、Subagents、模板、不可变版本、签名、审批、同步、漂移和回滚 | M3 | M3-A 核心后端已实现并通过 11 项测试：企业资源目录、不可变版本、SHA-256 内容寻址、Ed25519 签名、发布/历史回滚和资源审计；真实审批、管理台、客户端同步、漂移和自动回滚未实现 |
 | E9 客户端策略 | 企业 Provider/网关锁定、最低版本、强制/推荐资源、离线策略和防绕过 | M3/M5 | 现有网关、IP 和 Key 约束可用；客户端强制、MDM/EDR 联动和离线策略未实现 |
 | E10 审计与通知 | L0-L3 分级、脱敏、留存、访问审计；transactional outbox、邮件/IM/Webhook/SIEM/工单和死信 | M2-E/M4/M5 | 当前有 L0 元数据、审批系统审计、NOTIFY-01a outbox 核心、NOTIFY-01b 渠道管理/统一 HTTPS 网关适配器、NOTIFY-01c SIEM transport/固定 L0 schema/dead-letters API，以及 NOTIFY-01d 规则/抑制/聚合/升级/受审计重放和运营页；真实 SIEM/Collector/Syslog/证书、真实厂商连接、正文审计、生产值班闭环和生产验收未实现/未验收 |
@@ -194,8 +197,8 @@ Magpie 单机 Web UI：
 - 本机 Agent 配置只能由已安装的本地 Magpie/helper 在设备上执行，并受设备身份、签名配置和版本策略约束。
 - 管理员默认只能查看 L0 元数据；对话正文、导出和删除必须独立授予权限、二次确认并记录访问审计。
 - 服务端 RBAC、组织范围、资源范围和依赖调用才是安全边界，前端隐藏按钮不构成权限控制。
-- M3-A 已提供内部资源目录、不可变版本和签名 manifest 核心；远程/本地 MCP、客户端同步、
-  强制策略执行和漂移回滚属于 M3-B/C/D，当前尚未实现。
+- M3-A 已提供内部资源目录、不可变版本和签名 manifest 核心；M3-B 已提供远程 MCP 治理
+  核心；客户端同步、强制策略执行、漂移回滚和受控本地 MCP 属于 M3-C/D，当前尚未实现。
 
 | 能力域 | 员工流程 | 管理员入口 | 服务端权限与事实来源 | 主要 API/执行面 | 失败与补偿 | 审计与脱敏 | 部署验收 | 阶段 |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- |
@@ -231,7 +234,7 @@ Magpie 单机 Web UI：
 | C5 操作、审计查询与对账 | C4-03c/C4-03d/C4-04 | `operations/{id}`、`audit-logs`、过滤分页、人工确认/重试/补偿子 operation | 管理员可追溯失败、部分成功和依赖结果，完成人工对账 | 已有 operation/audit/reconcile Mock/故障测试和 M2-D 基础页面：权限、组织范围、签名 cursor、脱敏、幂等/冲突、旧快照、依赖/审计失败、父子 operation 和原审计不可改写 | 真实审计存储、浏览器 E2E 和生产运维演练未验收 | 保留原 operation 和审计，新增补偿 operation；不覆盖历史结果 |
 | M2-E 审批、step-up 与通知投递 | C3/C5、真实管理 IdP、外部 OA/IM/SIEM | APR-01a-e、NOTIFY-01a-d、外部审批验签、一次性消费、break-glass、outbox 和死信 | 高风险操作有审批和 ACR，通知异步可靠且可运营 | 已有 APR-01a 审批风险/绑定/职责分离/一次性消费/启动恢复、APR-01b HMAC 回调验签/防重放/幂等、APR-01c 独立 step-up/ACR/auth_time/绑定/失败关闭、APR-01d 审批箱/串并行/quorum/转交/撤回、APR-01e 15 分钟单次授权/24 小时复核/提醒/通知、NOTIFY-01a outbox/租约/退避/死信/重启恢复、NOTIFY-01b 渠道管理/HTTPS 适配器/SSRF 防护、NOTIFY-01c SIEM transport/固定 L0 schema/dead-letters API，以及 NOTIFY-01d 规则/抑制/聚合/阈值与延迟升级/受审计重放/运营页的 Mock/故障证据；仍需真实 OA 连接器、真实 IdP/MFA、真实厂商渠道、真实 SIEM/Collector/Syslog/证书、5 分钟告警/工单 SLA 和 24 小时生产复核演练作为生产验收证据 | APR-01b 仅有 HMAC/Mock 适配器，真实 OA/飞书/ServiceNow/Jira 未接入；APR-01e 仅有 Mock/集成核心，真实告警/工单和外部工单 ID 回读未验收；NOTIFY-01d 已实现核心和运营页，真实 SIEM 接入、NOTIFY-01b 的真实厂商连接、浏览器审批流程和生产值班闭环未验收 | 关闭对应审批/通知功能；保留待消费审批、break-glass、outbox 和死信供人工处置 |
 | M2-D 管理体验与员工门户 | C2-C5、M2-E、真实数据卷 | 管理写 UI、用量/成本看板、授权导出、操作历史和员工状态页 | 管理员可日常运营，员工可自助恢复，不暴露秘密 | 已有 104 项管理测试覆盖筛选/分页、operation、人工对账、审批箱/多步骤、break-glass、通知规则/聚合/抑制/升级、用量/审计查询、CSV 导出权限/审批/step-up/一次性下载/幂等/公式注入防护；页面 E2E、真实浏览器和导出生产验收未完成 | C4-03d 已部分交付额度/模型写表单和员工只读状态页；M2-D 核心已实现，浏览器 E2E、失败恢复入口、完整运营体验和大规模异步导出未验收 | 回退前端资源；保留导出审计和 operation，不丢弃已生成证据 |
-| M3-M6 资源、审计、安全与规模化 | R2 生产候选全部通过 | 中央 MCP、资源库、客户端策略、L0-L3 审计、安全运营、PostgreSQL/HA/KMS/mTLS | 50-500+ 人可治理、可审计、可扩展和可恢复 | M3-A 已有 11 项单元/Mock 集成测试；远程 MCP、客户端同步、L0-L3 审计、安全运营、HA 和合规签字仍无证据 | M3-A 仅资源目录核心已实现，M3-B/C/D 与 M4-M6 未实现，且 M3-A 未接入真实审批、管理台和客户端；不得引用本表作为上线证明 | 按阶段独立回退；资源回滚到已发布签名版本，数据迁移必须有逆向脚本和隔离恢复演练 |
+| M3-M6 资源、审计、安全与规模化 | R2 生产候选全部通过 | 中央 MCP、资源库、客户端策略、L0-L3 审计、安全运营、PostgreSQL/HA/KMS/mTLS | 50-500+ 人可治理、可审计、可扩展和可恢复 | M3-A 已有 11 项、M3-B 已有 14 项单元/Mock 集成测试；M3-B 仍有单进程 nonce、注册表/审计事务、管理台/审批/客户端接入和真实部署缺口；客户端同步、L0-L3 审计、安全运营、HA 和合规签字仍无证据 | M3-A/M3-B 仅为核心后端，M3-C/D 与 M4-M6 未实现，且 M3-A/M3-B 未接入真实审批、管理台和客户端；不得引用本表作为上线证明 | 按阶段独立回退；资源回滚到已发布签名版本，MCP 注册表/审计/幂等迁移必须有逆向脚本和隔离恢复演练 |
 
 ## 1. 目标与边界
 
@@ -3084,7 +3087,7 @@ feat/m2-e-notification-outbox
 | 阶段 | 工作包 | 关键产物 | 完成定义 |
 | --- | --- | --- | --- |
 | M3 | M3-A 目录与签名（核心已实现） | `resource-service`、manifest schema、内容寻址对象存储、签名校验 | 资源可创建不可变版本并校验哈希/签名；11 项测试已覆盖，真实审批、管理台、客户端同步和生产验收未完成 |
-| M3 | M3-B 远程 MCP（未实现） | MCP 注册、网关代理、工具级权限、健康检查 | 未授权工具不可调用；上游凭据不进入客户端 |
+| M3 | M3-B 远程 MCP（核心已实现） | MCP 注册、企业统一端点、工具级权限、健康检查 | 14 项测试已覆盖未授权 MCP/工具不可见/不可调用、scope、审批门禁、SSRF、凭据隔离、健康/熔断和审计边界；管理台、admin-service 真实审批联动、OIDC 组织分配、客户端同步、共享事务存储、多副本和生产验收未完成 |
 | M3 | M3-C 客户端同步（未实现） | 拉取、校验、安装、回滚、版本/漂移上报 | 新版本失败自动回到上一版本；漂移可见 |
 | M3 | M3-D 本地 MCP（未实现） | 签名包、运行权限、Secret Reference、健康检查 | 未签名包不能运行；本地访问范围可证明 |
 | M4 | M4-A 事件管道 | 请求/回复事件 schema、请求 ID、幂等、异步投递 | 元数据可按会话和请求串联；写入可重试 |

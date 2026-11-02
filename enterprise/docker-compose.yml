@@ -119,6 +119,68 @@ services:
       retries: 3
       start_period: 10s
 
+  # M3-B remote MCP governance core. This service is internal-only and is not
+  # yet wired into the admin console, auth-service or client synchronization.
+  # Start it explicitly with:
+  #   docker compose --profile mcp-gateway up -d mcp-gateway
+  mcp-gateway:
+    profiles: ["mcp-gateway"]
+    build:
+      context: ./mcp-gateway
+      args:
+        MCP_UID: ${MCP_UID:-10002}
+        MCP_GID: ${MCP_GID:-10002}
+    container_name: magpie-enterprise-mcp-gateway
+    restart: unless-stopped
+    user: "${MCP_UID:-10002}:${MCP_GID:-10002}"
+    expose:
+      - "3448"
+    environment:
+      MCP_BIND: 0.0.0.0
+      MCP_PORT: 3448
+      MCP_PUBLIC_URL: ${MCP_PUBLIC_URL:-}
+      MCP_SERVICE_TOKEN: ${MCP_SERVICE_TOKEN:-}
+      MCP_APPROVAL_HMAC_SECRET: ${MCP_APPROVAL_HMAC_SECRET:-}
+      MCP_STORE_PATH: ${MCP_STORE_PATH:-/data/mcp-registry.json}
+      MCP_AUDIT_PATH: ${MCP_AUDIT_PATH:-/data/mcp-audit.jsonl}
+      MCP_UPSTREAM_ALLOWED_HOSTS: ${MCP_UPSTREAM_ALLOWED_HOSTS:-}
+      MCP_ALLOWED_ORIGINS: ${MCP_ALLOWED_ORIGINS:-}
+      MCP_ALLOW_HTTP_UPSTREAMS: ${MCP_ALLOW_HTTP_UPSTREAMS:-false}
+      MCP_ALLOW_PRIVATE_UPSTREAMS: ${MCP_ALLOW_PRIVATE_UPSTREAMS:-false}
+      MCP_UPSTREAM_CA_PATH: ${MCP_UPSTREAM_CA_PATH:-}
+      MCP_MAX_BODY_BYTES: ${MCP_MAX_BODY_BYTES:-262144}
+      MCP_MAX_SERVERS: ${MCP_MAX_SERVERS:-500}
+      MCP_MAX_CLIENTS: ${MCP_MAX_CLIENTS:-10000}
+      MCP_MAX_TOOLS_PER_SERVER: ${MCP_MAX_TOOLS_PER_SERVER:-500}
+      MCP_CATALOG_TTL_MS: ${MCP_CATALOG_TTL_MS:-60000}
+      MCP_UPSTREAM_TIMEOUT_MS: ${MCP_UPSTREAM_TIMEOUT_MS:-10000}
+      MCP_UPSTREAM_MAX_RESPONSE_BYTES: ${MCP_UPSTREAM_MAX_RESPONSE_BYTES:-1048576}
+      MCP_HEALTH_INTERVAL_MS: ${MCP_HEALTH_INTERVAL_MS:-30000}
+      MCP_HEALTH_TIMEOUT_MS: ${MCP_HEALTH_TIMEOUT_MS:-5000}
+      MCP_BREAKER_FAILURE_THRESHOLD: ${MCP_BREAKER_FAILURE_THRESHOLD:-3}
+      MCP_BREAKER_COOLDOWN_MS: ${MCP_BREAKER_COOLDOWN_MS:-30000}
+      MCP_RATE_LIMIT_PER_MINUTE: ${MCP_RATE_LIMIT_PER_MINUTE:-600}
+      MCP_AUTH_RATE_LIMIT_PER_MINUTE: ${MCP_AUTH_RATE_LIMIT_PER_MINUTE:-60}
+      MCP_CLIENT_TOKEN_TTL_DAYS: ${MCP_CLIENT_TOKEN_TTL_DAYS:-30}
+      MCP_APPROVAL_MAX_TTL_SECONDS: ${MCP_APPROVAL_MAX_TTL_SECONDS:-900}
+    volumes:
+      - mcp-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3448/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   auth:
     profiles: ["auth", "admin"]
     build:
@@ -266,6 +328,7 @@ volumes:
   admin-data:
   resource-data:
   resource-content:
+  mcp-data:
 
 secrets:
   resource-signing-key:

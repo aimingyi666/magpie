@@ -1,0 +1,14 @@
+{
+  "name": "@magpie-enterprise/mcp-gateway",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Magpie Enterprise remote MCP registry, policy gateway and health monitor",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
