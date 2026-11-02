@@ -12,11 +12,16 @@ The package now includes the client-facing integration core:
   runtime without accepting a package id from the caller.
 - `createLocalMcpServer()` exposes the helper only on loopback with a Bearer
   token, a bounded JSON API, stable error codes, and a single-helper lock.
+- `LocalMcpBridge` and the `magpie-local-mcp-bridge` executable expose a
+  bounded newline-delimited JSON-RPC MCP server over stdio.
+- `applyCodexAgentConfig()` manages only Magpie's marked block in Codex's
+  `config.toml`, preserves other user configuration, and references the helper
+  token by environment-variable name rather than writing its value.
 
 This is still a runtime and helper core, not a complete employee product. The
 installer, Windows service/MDM packaging, code signing, upgrade/rollback flow,
-admin-console integration, browser E2E, production secret broker, and real
-external OS sandbox remain unfinished.
+admin-console integration, real Codex client acceptance, browser E2E,
+production secret broker, and real external OS sandbox remain unfinished.
 
 ## Security boundary
 
@@ -129,26 +134,70 @@ limit is 256 KiB (configurable from 1 to 1024 KiB), responses use
 permission is granted. A second helper using the same lock fails with
 `helper_locked` (HTTP 409); `close()` is idempotent.
 
+## Agent stdio bridge and Codex config
+
+`magpie-local-mcp-bridge` speaks newline-delimited JSON-RPC over stdio and
+supports only `initialize`, `tools/list`, and `tools/call`. Its helper URL must
+be an HTTP loopback origin, and all three values below are required:
+
+```text
+MAGPIE_LOCAL_MCP_HELPER_URL=http://127.0.0.1:<port>
+MAGPIE_LOCAL_MCP_HELPER_TOKEN=<opaque token>
+MAGPIE_LOCAL_MCP_RESOURCE_ID=<signed MCP resource id>
+```
+
+The bridge never accepts a caller-supplied package path or release id. It
+applies request, response, timeout, tool-name, and error-code bounds, and it
+does not follow redirects or connect to non-loopback helpers.
+
+Codex can be configured without editing unrelated entries:
+
+```js
+import {
+  applyCodexAgentConfig,
+  codexConfigPath,
+} from "@magpie-enterprise/local-mcp";
+
+const result = await applyCodexAgentConfig({
+  configPath: codexConfigPath(),
+  nodePath: process.execPath,
+  bridgePath: "C:\\Program Files\\Magpie\\local-mcp-bridge.mjs",
+  helperUrl: "http://127.0.0.1:3426",
+  resourceId: "res_local_echo",
+  tokenEnvName: "MAGPIE_LOCAL_MCP_HELPER_TOKEN",
+});
+```
+
+The function supports `CODEX_HOME`, writes a marked `[mcp_servers.*]` block,
+preserves BOM/CRLF and unrelated configuration, is idempotent, and uses an
+atomic replacement. If a user changes the managed block outside Magpie, the
+default result is `agent_config_drift`; pass `force: true` to replace it
+explicitly. It refuses to overwrite an unmanaged server with the same name.
+
 ## Tests
 
 ```powershell
 & 'D:\Environment\node-v26.12.1\node.exe' --test .\enterprise\local-mcp\test\*.test.mjs
 ```
 
-Current result: **37 passed, 0 failed** (21 runtime, 7 helper integration, and
-9 HTTP server tests). They use isolated temporary roots, in-memory test
-helpers, and local child processes only. They do not read production audit,
-health, usage, session, agent, or secret files.
+Current result: **50 passed, 0 failed** (21 runtime, 7 helper integration,
+9 HTTP server, 5 bridge, 7 Codex config, and 1 real-subprocess end-to-end
+test). They use isolated temporary roots, in-memory test helpers, and local
+child processes only. They do not read production audit, health, usage,
+session, agent, or secret files.
 
-The tests prove the individual contracts with mock client-sync and runtime
-adapters. They do not prove a full
-`ClientSyncEngine + LocalMcpHost + HTTP server` end-to-end flow, a real
+The end-to-end test runs
+`ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` in a real
+child process and covers initialize, tools/list, tools/call, and audit output.
+It does not prove that a real Codex client reads the generated config, a real
 employee install, or a production OS boundary.
 
 ## Not yet production-ready
 
 - Local helper installer, Windows service/MDM packaging, code signing,
-  upgrade/rollback, target-agent configuration, and administrator visibility.
+  upgrade/rollback, real Codex client acceptance, and administrator visibility.
+- Secure token injection, rotation, and recovery outside an operator-managed
+  environment.
 - Real OIDC, approval service, Secret Broker, KMS/HSM, and enterprise IdP.
 - Windows ACL enforcement and a signed, recoverable installer.
 - A proven external OS sandbox for network, clipboard, desktop, native, and

@@ -48,12 +48,12 @@ Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项�
 核心已通过 14 项测试；M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员
 JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
 client-sync 26 项（18 核心 + 8 传输）测试通过；M3-C-2 已实现 admin-service 只读资源/
-同步报告 API 和管理页面板，admin-service 109 项、local-mcp 37 项通过；企业七套回归合计 242 项。
+同步报告 API 和管理页面板，admin-service 109 项、local-mcp 50 项通过；企业七套回归合计 255 项。
 M3-A/M3-B 只有核心服务 API；M3-C-1/M3-C-2 已有控制面 API 和只读管理页，但尚未接入
 admin-service 真实审批、资源发布/回滚 UI、发布/回滚审批联动、OIDC 组织分配和本地 helper
 安装器/员工产品流；
 M3-B 的审批 nonce/限流器仅单进程，注册表/审计/幂等不是同一事务，存在提交后审计失败窗口。
-M3-D 运行时、helper 和回环 HTTP server 核心已实现并通过 37 项测试，但管理台员工产品流、安装器/Windows 服务、外部 OS 沙箱和生产验收仍未完成；S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
+M3-D 运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心已实现并通过 50 项测试（含真实子进程 E2E），但管理台员工产品流、安装器/Windows 服务、真实 Codex 客户端、外部 OS 沙箱和生产验收仍未完成；S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
 反向代理和生产环境均未验收。
 第 10 节描述的是 C4-01/C4-02/C4-03a/C4-04 的已实现边界和待验收项；当前不能把受控适配器、
@@ -391,10 +391,10 @@ tests:
 & 'D:\Environment\node-v26.12.1\node.exe' --test enterprise\local-mcp\test\*.test.mjs
 ```
 
-当前 local-mcp 37 项测试通过，企业七套回归合计 242 项。测试只使用精确文件路径、
+当前 local-mcp 50 项测试通过（含真实子进程 E2E），企业七套回归合计 255 项。测试只使用精确文件路径、
 临时目录和隔离子进程，不读取真实 usage、管理员会话、Agent 配置或生产 Secret。
 
-生产阻断项：helper/server 核心已实现，但尚未接入本地 helper 安装器/Agent 配置和管理台员工产品流；真实 OIDC、审批服务、Secret Broker、
+生产阻断项：helper/server、stdio bridge 和 Codex 配置映射核心已实现，但尚未接入本地 helper 安装器、真实 Codex 客户端和管理台员工产品流；真实 OIDC、审批服务、Secret Broker、
 KMS/HSM、Windows ACL/MDM、代码签名、安装升级/回滚和已证明的外部 OS 沙箱未验收；
 Docker/VM、共享卷并发、浏览器 E2E、HA 和生产验收未完成。
 
@@ -470,14 +470,14 @@ C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 
 - M3-A 已通过 11 项 resource-service 核心单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
   单元/Mock 集成测试；M3-C-1 已通过 resource-service 15 项（11 核心 + 4 控制面）和
   client-sync 26 项（18 核心 + 8 传输）单元/Mock 集成测试；M3-C-2 已通过 admin-service
-  109 项测试中的 5 项新增用例（企业全量 242 项）。仍须在真实
+  109 项测试中的 5 项新增用例（企业全量 255 项）。仍须在真实
   Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
   MCP 单副本限制，并接入 admin-service 真实审批、可写管理台和 OIDC 组织分配后再做
   发布/回滚与 MCP 故障演练。M3-C-2 仍须完成资源发布/回滚 UI、审批联动、浏览器 E2E、
   Docker/Compose 实机、灰度/自动回滚和生产验收；M3-C-1 仍须完成本地 helper 安装器/员工产品流、目标 Agent
   文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机和生产验收；
-  M3-D 受控本地 MCP 运行时、helper 和回环 HTTP server 核心已实现并通过 37 项测试，但管理台员工产品流、安装器/Windows 服务、外部 OS 沙箱和生产验收未完成。
+  M3-D 受控本地 MCP 运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心已实现并通过 50 项测试（含真实子进程 E2E），但管理台员工产品流、安装器/Windows 服务、真实 Codex 客户端、外部 OS 沙箱和生产验收未完成。
 - 备份恢复、灰度、回滚、至少一次跨部门越权和设备丢失演练。
 
 上述任何一项没有证据，发布结论只能是“受控试点”，不能写“企业生产已完成”。

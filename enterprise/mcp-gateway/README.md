@@ -2,7 +2,8 @@
 
 Status: **M3-B core implemented and covered by 14 unit/Mock integration tests.
 M3-C resource-sync core now lives in `enterprise/client-sync`; the M3-D
-runtime core now lives in `enterprise/local-mcp`, while helper/admin
+runtime core now lives in `enterprise/local-mcp`, including the helper HTTP
+surface, stdio bridge, and managed Codex config core. Admin/product
 integration and production acceptance are not implemented.**
 
 This service is the enterprise control point for remote MCP servers. It gives
@@ -36,7 +37,8 @@ server assignment and tool policy off employee devices.
   OIDC-to-registry assignment. The M3-C resource-sync engine is implemented
   separately, but no device credential API, local helper flow or admin drift
   view connects it to this gateway. The M3-D runtime core lives in
-  `enterprise/local-mcp`; helper/admin integration remains unimplemented.
+  `enterprise/local-mcp`; its helper, stdio bridge, and Codex config core are
+  implemented, while admin/product integration remains incomplete.
 - Real admin-service approval query/one-time consumption. The M3-B approval
   token is an independently signed gate, not proof that an admin approval was
   queried from APR-01.

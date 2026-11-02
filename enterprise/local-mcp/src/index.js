@@ -2,6 +2,32 @@ export {
   FileAuditSink,
 } from "./audit.js";
 export {
+  applyCodexAgentConfig,
+  codexConfigPath,
+  DEFAULT_CODEX_MCP_SERVER_NAME,
+  DEFAULT_CODEX_STARTUP_TIMEOUT_SEC,
+  DEFAULT_CODEX_TOKEN_ENV,
+  inspectCodexAgentConfig,
+  MAX_CODEX_CONFIG_BYTES,
+  removeCodexAgentConfig,
+  renderCodexAgentConfig,
+} from "./agent-config.js";
+export {
+  bridgeFromEnvironment,
+  DEFAULT_HELPER_TIMEOUT_MS,
+  DEFAULT_MAX_BRIDGE_MESSAGE_BYTES,
+  DEFAULT_MAX_HELPER_RESPONSE_BYTES,
+  HELPER_TOKEN_ENV,
+  HELPER_URL_ENV,
+  LocalMcpBridge,
+  LOCAL_MCP_BRIDGE_SCHEMA_VERSION,
+  LoopbackHelperClient,
+  MCP_PROTOCOL_VERSION,
+  normalizeLoopbackHelperUrl,
+  RESOURCE_ID_ENV,
+  runBridgeStdio,
+} from "./bridge.js";
+export {
   LocalMcpError,
   asLocalMcpError,
   localMcpError,

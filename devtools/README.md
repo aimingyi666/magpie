@@ -49,13 +49,13 @@ Mock/集成测试通过；生产验收尚未完成。M3-A 的资源目录、不�
 测试；M3-C-1 的设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP
 传输适配器已实现，resource-service 15 项（11 核心 + 4 控制面）、client-sync 26 项
 （18 核心 + 8 传输）测试通过；M3-C-2 的只读资源/同步管理 API 和管理页面板已实现并通过
-5 项新增管理测试；M3-D 受控本地 MCP 运行时、helper 和回环 HTTP server 核心已实现并通过 37 项隔离测试，但管理台员工产品流、安装器/Windows 服务和生产验收尚未完成，M4-M6 仍未实现。M3-A/M3-B 尚未接入 admin-service 真实审批、
+5 项新增管理测试；M3-D 受控本地 MCP 运行时、helper、回环 HTTP server、stdio bridge 和 Codex `config.toml` 映射核心已实现并通过 50 项隔离测试（含真实子进程 E2E），但真实 Codex 客户端、管理台员工产品流、安装器/Windows 服务和生产验收尚未完成，M4-M6 仍未实现。M3-A/M3-B 尚未接入 admin-service 真实审批、
 可写管理台和 OIDC 组织分配；M3-C-1/M3-C-2 已接入员工端同步 API 和管理页只读资源/漂移
 视图，但资源发布/回滚 UI、审批联动、本地 helper 安装器/产品流、目标 Agent 文件映射、Windows ACL、MDM、
 真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收未完成。M3-B 的审批
 nonce 仅单进程内存、注册表与审计不是同一事务，且 Compose 尚未实机验收。当前本地/Mock
 回归为 admin 109 项、auth 26 项、gateway-control 15 项、resource 15 项、mcp-gateway 14 项、
-client-sync 26 项、local-mcp 37 项，合计 242 项通过。
+client-sync 26 项、local-mcp 50 项，合计 255 项通过。
 C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
 宣称管理员已经可以在生产自助调额或授予模型。
 `APR-01a/b` 的服务端审批、职责分离、一次性消费和 HMAC/Mock 外部审批回调，
@@ -95,7 +95,7 @@ Mock/集成测试，`APR-01e` 的 break-glass、真实 OA/IdP 连接器、真实
   -> M3-B [core done]：远程 MCP 注册、企业端点、工具级授权、健康检查和凭据隔离
   -> M3-C-1 [control plane + core done]：同步凭证、desired-state、报告 API、HTTP 传输与同步核心
   -> M3-C-2 [read-only admin visibility done]：组织范围过滤的资源/同步报告 API 和管理页面板
-  -> M3-D [runtime + helper/server core done]：签名包、最小权限、Secret Broker、JSON-RPC、健康上报和回环 helper
+  -> M3-D [runtime + helper/server/stdio bridge + Codex config core done]：签名包、最小权限、Secret Broker、JSON-RPC、健康上报、回环 helper 和受管 Agent 配置
   -> M4-M6
 ```
 

@@ -5,6 +5,9 @@
   "type": "module",
   "description": "Signed, policy-controlled local MCP runtime for Magpie Enterprise clients",
   "main": "src/index.js",
+  "bin": {
+    "magpie-local-mcp-bridge": "bin/local-mcp-bridge.mjs"
+  },
   "exports": {
     ".": "./src/index.js"
   },

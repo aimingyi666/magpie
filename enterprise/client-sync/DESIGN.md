@@ -3,8 +3,9 @@
 状态：**M3-C-1 客户端同步控制面，26 项单元/Mock 测试通过。同步引擎、短期同步凭证、
 desired-state、设备上报、管理员 JSON 查询 API、客户端 HTTP 传输适配器和已验证 active
 资源读取接口已实现；本地 MCP helper/HTTP server 集成核心已在
-`enterprise/local-mcp` 实现。管理台资源/漂移页、本地 helper 安装器/Windows 服务、
-Windows ACL、MDM、目标 Agent 文件映射和生产环境验收仍未完成；M4-M6 仍未实现。**
+`enterprise/local-mcp` 实现，并覆盖 stdio bridge、受管 Codex `config.toml`
+映射和真实子进程 E2E。管理台资源/漂移页、本地 helper 安装器/Windows 服务、
+Windows ACL、MDM、真实 Codex 客户端配置验收和生产环境验收仍未完成；M4-M6 仍未实现。**
 
 ## 1. 目标与信任边界
 
@@ -271,6 +272,8 @@ state 记录的一致性。读取失败使用稳定错误码，不返回任意 r
 
 当前结果：**26 passed, 0 failed**（同步引擎核心 18 项 + HTTP 传输适配器 8 项）。
 这证明签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、
-路径/符号链接防护、并发锁、状态秘密隔离和 active 资源重新验签，不等于
-`ClientSyncEngine + LocalMcpHost + HTTP server` 完整 E2E、helper 安装器、管理台、
-浏览器 E2E、Windows 文件 ACL、MDM、目标 Agent 文件映射、真实企业 IdP 或生产部署已经验收。
+路径/符号链接防护、并发锁、状态秘密隔离和 active 资源重新验签。配套
+`enterprise/local-mcp` 已通过真实子进程 E2E：
+`ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 覆盖
+initialize/list/call 和审计；该结果仍不等于 helper 安装器、管理台、浏览器 E2E、
+Windows 文件 ACL、MDM、真实 Codex 客户端配置、真实企业 IdP 或生产部署已经验收。

@@ -41,8 +41,8 @@ auth-service 已通过 26 项测试；admin-service 已通过 109 项测试（82
 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
 已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 14 项
 单元/Mock 集成测试；client-sync 已通过 26 项单元/Mock 集成测试（18 核心 + 8 传输）；
-local-mcp 已通过 37 项隔离单元/Mock 测试（21 运行时 + 7 helper + 9 HTTP server）；
-当前合计 242 项通过、0 失败。
+local-mcp 已通过 50 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
++ 7 Codex 配置映射 + 1 真实子进程 E2E）；当前合计 255 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -433,14 +433,20 @@ manifest 解析包身份，不接受调用方提交的 `packageId`/路径；在�
 `validateInstalled` 回调安装签名 MCP 包。HTTP server 只允许 `127.0.0.1`/`::1`，`/healthz`
 公开，其余路由要求至少 16 字节 Bearer token；提供 status、tools 和 call 三个固定接口，
 默认 256 KiB body 上限、固定 JSON 字段、稳定错误码、文件锁、无 CORS 和 `no-store`。
-snapshot 不返回正文、Secret、私钥或绝对路径。本包当前通过 37 项隔离单元/Mock 测试
-（21 运行时 + 7 helper + 9 HTTP server）。
+snapshot 不返回正文、Secret、私钥或绝对路径。M3-D-2 还新增了
+`magpie-local-mcp-bridge`：它只连接 HTTP 回环 helper，通过 stdio 暴露固定的
+`initialize`/`tools/list`/`tools/call`，限制请求、响应和超时；Codex
+`config.toml` 映射只维护 Magpie 标记块，支持 `CODEX_HOME`、保留用户其他配置、
+BOM/CRLF、幂等原子写入和漂移拒绝，并只引用 token 环境变量名。本包当前通过 50 项隔离
+测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge + 7 Codex 配置映射 +
+1 真实子进程 E2E）。
 
-严格边界：helper/server 目前是接口级集成核心，测试分别使用 Mock client-sync、Mock helper
-和 Mock runtime，没有 `ClientSyncEngine + LocalMcpHost + HTTP server` 的完整 E2E；安装器/
-Windows 服务/MDM、代码签名、升级回滚、目标 Agent 配置和管理台员工产品流仍未实现；真实
-OIDC、审批服务、Secret Broker、KMS/HSM、Windows ACL 和已证明的外部 OS 沙箱仍需验收。
-Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把 M3-D
+严格边界：真实子进程 E2E 已覆盖
+`ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 的
+initialize/list/call 和审计，但这不等于真实 Codex 客户端已读取生成的配置。安装器/
+Windows 服务/MDM、代码签名、升级回滚、密钥安全注入/轮换和管理台员工产品流仍未实现；
+真实 OIDC、审批服务、Secret Broker、KMS/HSM、Windows ACL 和已证明的外部 OS 沙箱仍需
+验收。Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把 M3-D
 运行时核心写成产品化或生产可用。
 
 ## 5. 当前员工与管理员流程（只列已实现）
@@ -492,9 +498,9 @@ Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完
    远程 MCP 注册、统一企业 MCP 端点、工具级策略、健康检查、上游凭据隔离和元数据审计核心；
    M3-C-1 已提供设备同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端同步核心，
    包括强制/推荐、原子安装和漂移检测；M3-C-2 已接入只读资源/漂移页。但资源发布/回滚 UI、
-   审批联动、本地 helper 安装器/产品流和目标 Agent 文件映射仍未实现；受控本地 MCP 属于
-   M3-D，运行时、helper 和回环 HTTP server 核心已实现，但尚未接入安装器、Windows 服务和
-   管理台员工产品流。
+   审批联动和本地 helper 安装器/产品流仍未实现；受控本地 MCP 属于 M3-D，运行时、
+   helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心已实现，但尚未接入安装器、
+   Windows 服务、真实 Codex 客户端和管理台员工产品流。
 8. 管理员不能直接读取或改写员工本机 Agent 配置。后续中央策略也必须通过本地 Magpie/helper
    的受控同步接口落地，浏览器不能获得任意本机文件写权限。
 

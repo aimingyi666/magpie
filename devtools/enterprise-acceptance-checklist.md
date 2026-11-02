@@ -1,6 +1,6 @@
 # Magpie 企业版验收清单
 
-状态：生产验收基线 v2.2（与完整方案 v3.20 对应）
+状态：生产验收基线 v2.3（与完整方案 v3.27 对应）
 
 日期：2026-11-02
 
@@ -38,7 +38,7 @@
 | E-01 | 安装与身份 | MDM 安装签名客户端；员工用企业 OIDC + MFA 登录 | 本地 Mock/真实 issuer 已通；真实 IdP/MDM 未验收 |
 | E-02 | 设备注册 | 生成设备密钥、注册设备、绑定用户、保存凭据 ACL | 本地已通过 |
 | E-03 | 短期凭证 | 签发 1-8 小时 Gateway Key；员工机无厂商 Key | 本地真实 issuer E2E 已通过 |
-| E-04 | Agent 一键配置 | 本地 Magpie 写入企业 Provider 并配置至少 Claude Code/Codex/OpenCode 中一种 | 脚本已实现，真实客户端待验收 |
+| E-04 | Agent 一键配置 | 本地 Magpie 写入企业 Provider 并配置至少 Claude Code/Codex/OpenCode 中一种 | Codex `config.toml` 受管块和 stdio bridge 核心已实现并通过隔离测试；真实 Codex 客户端读取配置、安装器和员工产品流待验收 |
 | E-05 | 首次可用时间 | 新员工从登录到成功调用 ≤5 分钟 | 需真实计时记录 |
 | E-06 | 自动刷新 | Windows 当前用户计划任务自动刷新；锁冲突、断网、重启可恢复 | 未实机验收 |
 | E-07 | 员工边界 | 网页只做登录/展示/加入码；不能直接写本机 Agent 文件 | 设计和脚本边界正确 |
@@ -255,13 +255,13 @@ outbox 状态、attempt、渠道、HTTP/协议结果、死信和人工重放
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| M-01 | MCP 目录 | 管理员登记远程/本地 MCP、工具、风险和适用范围 | M3-A 可登记 `mcp` 资源类型、签名版本和适用范围；M3-B 提供远程 MCP 注册/健康检查 API 和元数据注册表；M3-D 已实现受控本地 MCP 运行时、client-sync helper 和仅回环 HTTP 调用核心，并通过 37 项测试（21 运行时 + 7 helper + 9 server）；管理台、admin-service 编排、员工安装器、真实端到端和生产验收未完成 |
+| M-01 | MCP 目录 | 管理员登记远程/本地 MCP、工具、风险和适用范围 | M3-A 可登记 `mcp` 资源类型、签名版本和适用范围；M3-B 提供远程 MCP 注册/健康检查 API 和元数据注册表；M3-D 已实现受控本地 MCP 运行时、client-sync helper、仅回环 HTTP 调用核心、stdio bridge 和 Codex 配置映射，并通过 50 项测试（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex config + 1 真实子进程 E2E）；管理台、admin-service 编排、员工安装器、真实 Codex 客户端和生产验收未完成 |
 | M-02 | 工具权限 | 未授权 MCP/工具不可见、不可调用；工具级 allow/deny 生效 | M3-B 核心通过 14 项单元/Mock 测试，覆盖 user/org/device/server scope、工具级 allow/deny、可见性和服务端拒绝；真实 MCP、管理台和客户端同步未验收 |
 | M-03 | 上游凭据隔离 | MCP 凭据只在网关/Secret Manager，不进入员工机 | M3-B 核心只存环境 Secret Reference，客户端/管理投影和审计不含凭据；真实 Secret Manager、mTLS、Docker/Compose 和生产验收未完成；M3-A 已拒绝资源内容/元数据中的明文秘密和私钥 |
 | M-04 | 资源发布 | 不可变版本、哈希、签名、审批和灰度 | 核心/Mock 测试完成：不可变版本、SHA-256、Ed25519 签名和发布/回滚已通过 11 项测试；M3-C-2 已提供只读资源目录，但资源发布/回滚 UI、`approvalId` 真实审批联动、灰度、实机部署和生产验收未完成 |
-| M-05 | 客户端同步 | 5 分钟内可见；校验签名；上报期望/实际版本 | M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输；M3-C-2 已提供管理页只读资源/同步可见性；M3-D 已把同步 helper 接到 active 资源复验和本地 MCP 消费核心；resource 15 项（11 核心 + 4 控制面）、client-sync 26 项（18 核心 + 8 传输）、admin 新增 5 项测试通过，覆盖固定 Ed25519 公钥与指纹、manifest/内容/长度/SHA-256 校验、原子安装和离线使用；员工安装器、真实网络同步、浏览器 E2E 和 5 分钟端到端验收未完成 |
+| M-05 | 客户端同步 | 5 分钟内可见；校验签名；上报期望/实际版本 | M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输；M3-C-2 已提供管理页只读资源/同步可见性；M3-D 已把同步 helper 接到 active 资源复验和本地 MCP 消费核心，并通过 stdio bridge 与真实子进程 E2E 验证 initialize/list/call 和审计；resource 15 项（11 核心 + 4 控制面）、client-sync 26 项（18 核心 + 8 传输）、local-mcp 50 项测试通过，覆盖固定 Ed25519 公钥与指纹、manifest/内容/长度/SHA-256 校验、原子安装和离线使用；员工安装器、真实 Codex 客户端、真实网络同步、浏览器 E2E 和 5 分钟端到端验收未完成 |
 | M-06 | 强制与回滚 | 强制资源不可关闭；失败自动回退上一版本 | 核心已实现并通过测试：forced/recommended 策略，新版本验签或安装失败时保留上一验签版本，首次安装失败不破坏现有资源；管理台策略、真实 Agent 文件映射和产品级操作回滚未接入 |
-| M-07 | 漂移与健康 | 管理员看到设备安装版本、同步错误和漂移 | 核心 `inspect()` 已能重新验签、检测 active/cache 漂移并生成脱敏报告；设备端元数据上报、管理员 JSON 查询 API 和管理页只读资源/漂移可见性已实现；M3-D helper/server 已提供 active 资源复验、脱敏状态快照和本地 MCP 健康核心；员工安装器、浏览器 E2E 和真实端到端健康验收未实现 |
+| M-07 | 漂移与健康 | 管理员看到设备安装版本、同步错误和漂移 | 核心 `inspect()` 已能重新验签、检测 active/cache 漂移并生成脱敏报告；设备端元数据上报、管理员 JSON 查询 API 和管理页只读资源/漂移可见性已实现；M3-D helper/server 已提供 active 资源复验、脱敏状态快照和本地 MCP 健康核心，stdio bridge 和真实子进程 E2E 已通过；员工安装器、真实 Codex 客户端、浏览器 E2E 和真实端到端健康验收未实现 |
 
 ## 9. 内容审计
 
