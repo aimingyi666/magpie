@@ -1,9 +1,10 @@
 # M3-B remote MCP gateway: frozen boundary
 
 Status: M3-B core implemented and covered by 14 unit/Mock integration tests.
-M3-C/M3-D and production acceptance remain unimplemented. This document
-defines the frozen M3-B contract; the README records operating instructions and
-the concrete failure boundaries.
+The M3-C resource-sync core is implemented separately in
+`enterprise/client-sync`; M3-D and production acceptance remain unimplemented.
+This document defines the frozen M3-B contract; the README records operating
+instructions and the concrete failure boundaries.
 
 ## 1. Scope
 
@@ -28,8 +29,10 @@ The service owns:
 - metadata-only audit records.
 
 It does not own local MCP packages, client-side installation, resource
-distribution, conversation content, approval workflow storage or the admin UI.
-Those remain M3-C/M3-D, M2-E and M4 work.
+distribution policy, conversation content, approval workflow storage or the
+admin UI. `enterprise/client-sync` now owns the signed resource-sync core; local
+MCP packages, productized installation/reporting, M2-E approval integration and
+M4 content audit remain separate work.
 
 ## 2. Data boundary
 

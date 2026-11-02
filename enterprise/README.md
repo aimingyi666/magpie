@@ -31,12 +31,14 @@ OIDC step-up、APR-01d 的审批箱/串并行步骤/quorum/转交/撤回、APR-0
 schema v1 的网关策略机器回读/原子写入、受控 `gateway-control` 适配器、正式只读模型目录，
 以及 auth-service 的用户级策略状态机；M3-A 已提供资源目录、不可变版本、内容寻址对象
 存储、Ed25519 签名 manifest、发布/回滚和资源审计；M3-B 已提供远程 MCP 注册、企业统一
-MCP 端点、工具级 allow/deny、健康检查、上游凭据隔离和元数据审计核心。`gateway-control`
+MCP 端点、工具级 allow/deny、健康检查、上游凭据隔离和元数据审计核心；M3-C 已在独立
+`enterprise/client-sync` 包提供签名 desired-state、原子安装、失败保留旧版本、离线缓存、
+强制/推荐策略和漂移检测核心。`gateway-control`
 已通过 15 项 Mock/故障测试；
 auth-service 已通过 25 项测试；admin-service 已通过 104 项测试（77 项管理服务集成测试 +
 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
-已通过 11 项单元/Mock 集成测试；mcp-gateway 已通过 14 项单元/Mock 集成测试；当前合计
-169 项通过、0 失败。
+已通过 11 项单元/Mock 集成测试；mcp-gateway 已通过 14 项单元/Mock 集成测试；
+client-sync 已通过 16 项单元/Mock 集成测试；当前合计 185 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -56,9 +58,9 @@ APR-01c、NOTIFY-01a、NOTIFY-01b 和 NOTIFY-01c 后端已实现，但真实渠�
 是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/Slack/ServiceNow/Jira SDK，真实
 证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收。
 NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页已实现并通过 Mock/集成测试；
-M3-A 与 M3-B 核心后端已实现，M3-C/D 与 M4-M6 仍未实现；M2-D 核心已实现，生产验收未完成。
-M3-A/M3-B 尚未接入 admin-service 审批、管理台和客户端同步，MCP 审批 nonce 仍是单进程
-内存状态，审计与注册表也不是同一事务；Compose 也未实机验收。当前不是生产就绪版本。
+M3-A、M3-B 与 M3-C 核心已实现，M3-D 与 M4-M6 仍未实现；M2-D 核心已实现，生产验收未完成。
+M3-A/M3-B/M3-C 尚未接入 admin-service 审批、管理台和员工产品流，MCP 审批 nonce 仍是
+单进程内存状态，审计与注册表也不是同一事务；Compose 也未实机验收。当前不是生产就绪版本。
 
 ## M2-C4 目标边界（C4-01/C4-02/C4-03a/C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 完整策略流 E2E 已通过）
 
@@ -331,7 +333,8 @@ docker compose --profile resource up -d resource
 安全边界见 [`resource-service/README.md`](resource-service/README.md)。
 
 当前边界：`approvalId` 只是必填证据，尚未查询或消费 admin-service 审批；没有管理台资源
-页面、员工端同步、强制策略、漂移、灰度、自动回滚、S3/MinIO、KMS/HSM 或多副本。
+页面、员工端同步接入、灰度发布、S3/MinIO、KMS/HSM 或多副本。M3-C 的独立客户端核心已
+支持强制/推荐、漂移检测和失败保留旧版本，但尚未接入本服务的发布审批与员工产品流。
 Docker/Compose 尚未实机启动和验收。
 
 ### 4.2 远程 MCP 网关（M3-B：核心后端）
@@ -353,12 +356,31 @@ allow/deny、可见性和风险策略；high/critical 工具还要求短期 HMAC
 客户端 token 只存 SHA-256，上游凭据只保存环境变量名，审计不记录参数或正文。
 
 当前严格边界：M3-B 只是核心后端，尚未接入 admin-service 真实审批查询/一次性消费、管理台、
-OIDC 组织分配或员工客户端同步；M3-C/D 未实现。审批 nonce 和限流器只在单进程内存中，
+OIDC 组织分配或员工客户端同步；M3-C 已有独立同步核心，M3-D 未实现。审批 nonce 和限流器只在单进程内存中，
 不能多副本。注册表和审计是分开的持久化写入，审计落盘失败可能发生在状态提交之后；client
 签发场景会留下无法取回明文 token 的孤立 client，必须吊销后重新签发。生产部署需要共享事务
 存储或审计 intent/补偿状态机、不可篡改审计、KMS/HSM、mTLS、真实 MCP/IdP 和浏览器 E2E。
 当前机器没有 Docker CLI，Compose 只做静态审查，未实机构建或健康检查。详细契约见
 [`mcp-gateway/README.md`](mcp-gateway/README.md)。
+
+### 4.3 客户端资源同步（M3-C：核心包）
+
+`client-sync` 是本地 Magpie/helper 未来使用的签名资源同步核心，当前不是可直接供员工网页
+调用的服务。它固定 Ed25519 公钥、`signingKeyId` 和 SPKI SHA-256 指纹，校验 desired-state
+manifest、资源内容、长度和 SHA-256，在 staging 中 fsync 并复验后以 rename 原子激活；新版本
+验签或安装失败时保留上一验签版本，离线时继续使用最后验签版本。
+
+核心同时实现 forced/recommended 策略、最低客户端版本、`inspect()` 漂移检测、进程锁、
+状态文件 `0600` 原子写入和脱敏报告，并拒绝路径穿越、符号链接、坏缓存、重复资源/版本/
+hash、未知签名 key 和超大 manifest。测试：
+
+```bash
+node --test enterprise/client-sync/test/*.test.mjs
+```
+
+当前严格边界：还没有员工设备短期同步凭证 API、管理台资源/漂移页、本地 helper 产品入口、
+浏览器 E2E、Windows ACL、MDM、目标 Agent 文件映射、灰度发布或设备端上报；因此员工网页
+仍不能直接修改本机 Agent 文件，M3-C 不能据此宣称产品级同步完成。
 
 ## 5. 当前员工与管理员流程（只列已实现）
 
@@ -406,8 +428,9 @@ OIDC 组织分配或员工客户端同步；M3-C/D 未实现。审批 nonce 和�
 7. 管理员当前**还不能通过管理台下发 MCP 服务器、企业 Skills/Instructions 或中央资源库**。
    M3-A 已提供内部资源目录、不可变版本、签名 manifest、发布/回滚和审计核心，M3-B 已提供
    远程 MCP 注册、统一企业 MCP 端点、工具级策略、健康检查、上游凭据隔离和元数据审计核心；
-   两者尚未接入 admin-service 审批、管理台或员工客户端。客户端同步、强制策略、漂移和自动
-   回滚属于 M3-C，受控本地 MCP 属于 M3-D，仍未实现。
+   M3-C 已提供独立客户端同步核心，包括强制/推荐、原子安装和漂移检测。但这些核心尚未接入
+   admin-service 审批、管理台、员工端同步凭证 API 或本地 helper 产品流；受控本地 MCP 属于
+   M3-D，仍未实现。
 8. 管理员不能直接读取或改写员工本机 Agent 配置。后续中央策略也必须通过本地 Magpie/helper
    的受控同步接口落地，浏览器不能获得任意本机文件写权限。
 
@@ -419,7 +442,7 @@ OIDC 组织分配或员工客户端同步；M3-C/D 未实现。审批 nonce 和�
 完整证据链状态、C5 查询/对账、M2-D CSV 导出、APR-01a 基础审批、APR-01b HMAC 回调
 适配器和 APR-01c step-up 门禁；C4-04 的真实管理链路 E2E 已通过，但仍缺少完整审批/运营
 体验、失败恢复入口、真实 OA 连接器、生产 break-glass 告警/复核、通知、Docker/共享卷、
-真实企业 IdP、浏览器和生产验收；M3-B 也只是核心服务，管理台、审批联动和客户端同步未接入。
+真实企业 IdP、浏览器和生产验收；M3-B/M3-C 也只是核心包，管理台、审批联动和员工产品流未接入。
 在 M2-D 生产验收、M2-E 剩余项、M3/M4 和生产验收完成前，整体只能描述为“可演示、可受控
 技术试点”。
 

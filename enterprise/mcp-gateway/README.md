@@ -1,7 +1,8 @@
 # Magpie Enterprise remote MCP gateway
 
 Status: **M3-B core implemented and covered by 14 unit/Mock integration tests.
-M3-C/M3-D and production acceptance are not implemented.**
+M3-C resource-sync core now lives in `enterprise/client-sync`; M3-D and
+production acceptance are not implemented.**
 
 This service is the enterprise control point for remote MCP servers. It gives
 Magpie clients one stable MCP endpoint while keeping upstream credentials,
@@ -30,8 +31,10 @@ server assignment and tool policy off employee devices.
 
 ## Not implemented
 
-- Admin console, employee portal, client synchronization and real OIDC-to-
-  registry assignment. M3-C and M3-D remain unimplemented.
+- Admin console, employee portal, productized client synchronization and real
+  OIDC-to-registry assignment. The M3-C resource-sync engine is implemented
+  separately, but no device credential API, local helper flow or admin drift
+  view connects it to this gateway. M3-D remains unimplemented.
 - Real admin-service approval query/one-time consumption. The M3-B approval
   token is an independently signed gate, not proof that an admin approval was
   queried from APR-01.

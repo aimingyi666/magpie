@@ -45,10 +45,11 @@ SIEM/Collector/Syslog/生产证书未验收。NOTIFY-01d 的规则/抑制、聚�
 连接器、真实 IdP/MFA/反向代理、浏览器流程、break-glass 告警/工单与 24 小时生产复核也未验证。
 M3-A 的 `enterprise/resource-service/` 已实现资源目录、不可变版本、SHA-256 内容寻址、
 Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项测试；M3-B 远程 MCP 治理
-核心已通过 14 项测试；当前本地/Mock 回归合计 169 项。M3-A/M3-B 只有核心服务 API，
-尚未接入 admin-service 真实审批、管理台、OIDC 组织分配和员工客户端同步；M3-B 的审批
-nonce/限流器仅单进程，注册表/审计/幂等不是同一事务，存在提交后审计失败窗口。客户端同步、
-M3-C/D、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
+核心已通过 14 项测试；M3-C 客户端同步核心已通过 16 项测试；当前本地/Mock 回归合计
+185 项。M3-A/M3-B 只有核心服务 API，M3-C 只有客户端同步核心包，尚未接入 admin-service
+真实审批、管理台、OIDC 组织分配、员工设备短期同步凭证 API 和本地 helper 产品入口；
+M3-B 的审批 nonce/限流器仅单进程，注册表/审计/幂等不是同一事务，存在提交后审计失败窗口。
+M3-D、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
 反向代理和生产环境均未验收。
 第 10 节描述的是 C4-01/C4-02/C4-03a/C4-04 的已实现边界和待验收项；当前不能把受控适配器、
@@ -338,7 +339,23 @@ docker compose exec resource node -e \
 
 当前机器未安装 Docker CLI，因此上述 Compose 构建、启动、健康检查、卷权限和 secret 复制
 都还没有实机证据。该 profile 成功启动也只说明目录服务可用，不代表真实审批、管理台、
-客户端同步、S3/MinIO、KMS/HSM、多副本或生产验收完成。
+员工端同步接入、S3/MinIO、KMS/HSM、多副本或生产验收完成。
+
+### 9.1.2 M3-C 客户端同步核心
+
+`enterprise/client-sync/` 是安装在员工设备上的 Node 核心包，不是新增的常驻服务，也没有
+Compose profile。它只冻结签名 desired-state 的同步、验签、原子激活、离线缓存、策略和
+漂移行为；`fetchDesiredState()` 由后续本地 helper 的传输层注入。生产接入前仍需要员工
+OIDC/设备短期同步凭证 API、资源下载适配器和目标 Agent 文件映射。浏览器不能直接写
+`~/.codex`、`~/.claude` 或 `~/.config/magpie`，也不能使用 `RESOURCE_SERVICE_TOKEN`。
+
+```powershell
+Set-Location enterprise/client-sync
+& 'D:\Environment\node-v26.12.1\node.exe' --test test/*.test.mjs
+```
+
+当前 16 项测试通过。Windows ACL、MDM、设备端上报、管理台资源/漂移页、浏览器 E2E 和
+真实企业 IdP 均未验收。
 
 Compose 必须把网关数据卷只读挂载到管理容器：
 
@@ -421,10 +438,12 @@ C4-03b/C4-03c 核心已有 25 项 auth 测试，管理端已接入额度/模型 
    的基础写操作、审批、operation/audit 查询、人工对账和 CSV 导出页面已接入，但浏览器 E2E、
    失败恢复入口、完整运营体验和生产环境证据尚未验收。本地 Mock/故障测试不能替代这些部署验收。
 - M3-A 已通过 11 项 resource-service 单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
-  单元/Mock 集成测试。仍须在真实 Compose 中验证镜像构建、secret 文件权限、
+  单元/Mock 集成测试；M3-C 已通过 16 项 client-sync 单元/Mock 集成测试。仍须在真实
+  Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
   MCP 单副本限制，并接入 admin-service 真实审批、管理台和 OIDC 组织分配后再做发布/回滚
-  与 MCP 故障演练。M3-C/D 客户端同步、受控本地 MCP 和漂移检测当前未实现。
+  与 MCP 故障演练。M3-C 仍须完成员工端同步凭证 API、本地 helper、目标 Agent 文件映射、
+  Windows ACL、MDM、管理台漂移页和生产验收；M3-D 受控本地 MCP 当前未实现。
 - 备份恢复、灰度、回滚、至少一次跨部门越权和设备丢失演练。
 
 上述任何一项没有证据，发布结论只能是“受控试点”，不能写“企业生产已完成”。
