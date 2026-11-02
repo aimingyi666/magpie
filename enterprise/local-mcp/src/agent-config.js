@@ -317,6 +317,110 @@ function removeLocatedBlock(text, located) {
   return before + after;
 }
 
+function parseBasicString(text, start) {
+  if (text[start] !== "\"") {
+    fail("agent_config_malformed", "managed MCP value is not a basic string");
+  }
+  let output = "";
+  for (let index = start + 1; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === "\"") return { value: output, end: index + 1 };
+    if (character !== "\\") {
+      output += character;
+      continue;
+    }
+    index += 1;
+    if (index >= text.length) break;
+    const escaped = text[index];
+    switch (escaped) {
+      case "\\": output += "\\"; break;
+      case "\"": output += "\""; break;
+      case "b": output += "\b"; break;
+      case "t": output += "\t"; break;
+      case "n": output += "\n"; break;
+      case "f": output += "\f"; break;
+      case "r": output += "\r"; break;
+      case "u": {
+        const hex = text.slice(index + 1, index + 5);
+        if (!/^[0-9a-fA-F]{4}$/.test(hex)) {
+          fail("agent_config_malformed", "managed MCP unicode escape is invalid");
+        }
+        output += String.fromCodePoint(Number.parseInt(hex, 16));
+        index += 4;
+        break;
+      }
+      default:
+        fail("agent_config_malformed", "managed MCP string escape is invalid");
+    }
+  }
+  fail("agent_config_malformed", "managed MCP basic string is incomplete");
+}
+
+function parseManagedDetails(value, serverName) {
+  const markers = markerLines(serverName);
+  const lines = normalizeNewlines(value).split("\n");
+  if (lines.length !== 8
+      || lines[0] !== markers.begin
+      || lines[1] !== `[mcp_servers.${serverName}]`
+      || lines[7] !== markers.end) {
+    fail("agent_config_malformed", "managed MCP block has an unexpected shape");
+  }
+
+  const parseLine = (line, prefix) => {
+    if (!line.startsWith(prefix)) {
+      fail("agent_config_malformed", "managed MCP field is missing");
+    }
+    return parseBasicString(line, prefix.length);
+  };
+
+  const command = parseLine(lines[2], "command = ");
+  if (command.end !== lines[2].length) {
+    fail("agent_config_malformed", "managed MCP command has trailing content");
+  }
+  if (!lines[3].startsWith("args = [")) {
+    fail("agent_config_malformed", "managed MCP args are missing");
+  }
+  const args = parseBasicString(lines[3], "args = [".length);
+  if (args.end >= lines[3].length || lines[3].slice(args.end) !== "]") {
+    fail("agent_config_malformed", "managed MCP args have an unexpected shape");
+  }
+
+  const envPrefix = `env = { ${HELPER_URL_ENV} = `;
+  if (!lines[4].startsWith(envPrefix)) {
+    fail("agent_config_malformed", "managed MCP helper URL is missing");
+  }
+  const helperUrl = parseBasicString(lines[4], envPrefix.length);
+  const resourcePrefix = `, ${RESOURCE_ID_ENV} = `;
+  if (!lines[4].startsWith(resourcePrefix, helperUrl.end)) {
+    fail("agent_config_malformed", "managed MCP resource id is missing");
+  }
+  const resourceId = parseBasicString(
+    lines[4],
+    helperUrl.end + resourcePrefix.length,
+  );
+  if (lines[4].slice(resourceId.end) !== " }") {
+    fail("agent_config_malformed", "managed MCP env has an unexpected shape");
+  }
+
+  const envVars = parseLine(lines[5], "env_vars = [");
+  if (envVars.end >= lines[5].length || lines[5].slice(envVars.end) !== "]") {
+    fail("agent_config_malformed", "managed MCP env_vars have an unexpected shape");
+  }
+
+  const timeout = /^startup_timeout_sec = ([1-9][0-9]*)$/.exec(lines[6]);
+  if (!timeout) {
+    fail("agent_config_malformed", "managed MCP startup timeout is invalid");
+  }
+  return {
+    nodePath: command.value,
+    bridgePath: args.value,
+    helperUrl: helperUrl.value,
+    resourceId: resourceId.value,
+    tokenEnvName: envVars.value,
+    startupTimeoutSec: Number(timeout[1]),
+  };
+}
+
 export async function applyCodexAgentConfig(options = {}) {
   const normalized = normalizeOptions(options);
   const block = renderBlock(normalized);
@@ -369,6 +473,7 @@ export async function inspectCodexAgentConfig({
   return {
     status: located ? "managed" : tablePresent ? "unmanaged" : "absent",
     serverName,
+    managed: located ? parseManagedDetails(located.value, serverName) : null,
   };
 }
 

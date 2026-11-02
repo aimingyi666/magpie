@@ -63,6 +63,18 @@ test("Codex config mapping preserves user entries and never stores the token val
   const unchanged = await applyCodexAgentConfig(options(configPath));
   assert.equal(unchanged.status, "unchanged");
   assert.equal(fs.readFileSync(configPath, "utf8"), text);
+
+  const inspected = await inspectCodexAgentConfig({ configPath });
+  assert.equal(inspected.status, "managed");
+  assert.equal(inspected.managed.nodePath, path.resolve(process.execPath));
+  assert.equal(
+    inspected.managed.bridgePath,
+    path.resolve(fileURLToPath(new URL("../bin/local-mcp-bridge.mjs", import.meta.url))),
+  );
+  assert.equal(inspected.managed.helperUrl, "http://127.0.0.1:43123");
+  assert.equal(inspected.managed.resourceId, "res_local_echo");
+  assert.equal(inspected.managed.tokenEnvName, "MAGPIE_LOCAL_MCP_HELPER_TOKEN");
+  assert.equal(inspected.managed.startupTimeoutSec, 20);
 });
 
 test("Codex config mapping preserves BOM and CRLF outside its managed block", async (t) => {

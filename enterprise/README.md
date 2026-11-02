@@ -41,8 +41,8 @@ auth-service 已通过 26 项测试；admin-service 已通过 109 项测试（82
 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
 已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 14 项
 单元/Mock 集成测试；client-sync 已通过 26 项单元/Mock 集成测试（18 核心 + 8 传输）；
-local-mcp 已通过 50 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
-+ 7 Codex 配置映射 + 1 真实子进程 E2E）；当前合计 255 项通过、0 失败。
+local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
++ 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；当前合计 265 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -63,8 +63,9 @@ APR-01c、NOTIFY-01a、NOTIFY-01b 和 NOTIFY-01c 后端已实现，但真实渠�
 证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收。
 NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页已实现并通过 Mock/集成测试；
 M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现；M3-D 受控本地 MCP
-运行时、`LocalMcpHelper` 和回环 HTTP server 核心已实现，但安装器/Windows 服务、管理台
-员工产品流、真实外部沙箱和生产验收尚未完成，M4-M6 仍未实现；
+运行时、`LocalMcpHelper`、回环 HTTP server、stdio bridge、Codex 配置映射和
+`setupLocalMcpClient()` 一键配置编排核心已实现，但安装器/Windows 服务、生产 launcher/
+token 轮换、管理台员工产品流、真实外部沙箱和生产验收尚未完成，M4-M6 仍未实现；
 M2-D 核心已实现，生产验收未完成。M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
@@ -437,14 +438,22 @@ snapshot 不返回正文、Secret、私钥或绝对路径。M3-D-2 还新增了
 `magpie-local-mcp-bridge`：它只连接 HTTP 回环 helper，通过 stdio 暴露固定的
 `initialize`/`tools/list`/`tools/call`，限制请求、响应和超时；Codex
 `config.toml` 映射只维护 Magpie 标记块，支持 `CODEX_HOME`、保留用户其他配置、
-BOM/CRLF、幂等原子写入和漂移拒绝，并只引用 token 环境变量名。本包当前通过 50 项隔离
-测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge + 7 Codex 配置映射 +
-1 真实子进程 E2E）。
+BOM/CRLF、幂等原子写入和漂移拒绝，并只引用 token 环境变量名。
 
-严格边界：真实子进程 E2E 已覆盖
+M3-D-3 新增 `setupLocalMcpClient()` 一键配置编排：按顺序完成同步、reconcile、快照选包、
+工具发现、回环 helper 启动与探测、Codex 受管配置写入/严格回读和受控启动器环境注入。
+调用方必须提供 `injectLaunchEnvironment`；缺失时返回 `token_injection_required` 并失败
+关闭。未提供 token 时只在进程内生成 32 字节随机 token，token 仅进入冻结的启动环境补丁，
+不写入 `config.toml`，成功结果也不返回 token。多资源要求显式 `resourceId`；任一阶段失败
+会移除本次受管块、关闭 server 并释放 helper lock。网页不能直接修改员工电脑，必须由设备
+上的本地 helper/受控 launcher 执行。本包当前通过 60 项隔离测试（21 运行时 + 7 helper +
+9 HTTP server + 5 stdio bridge + 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）。
+
+严格边界：真实子进程 E2E 已覆盖经过 `setupLocalMcpClient()` 的
 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 的
-initialize/list/call 和审计，但这不等于真实 Codex 客户端已读取生成的配置。安装器/
-Windows 服务/MDM、代码签名、升级回滚、密钥安全注入/轮换和管理台员工产品流仍未实现；
+initialize/list/call、受控环境注入和审计，但这不等于真实 Codex 客户端已读取生成的配置。
+安装器/Windows 服务/MDM、代码签名、升级回滚、生产 launcher、Windows ACL/DPAPI、
+token 轮换/恢复和管理台员工产品流仍未实现；
 真实 OIDC、审批服务、Secret Broker、KMS/HSM、Windows ACL 和已证明的外部 OS 沙箱仍需
 验收。Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把 M3-D
 运行时核心写成产品化或生产可用。

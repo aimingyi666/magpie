@@ -17,11 +17,15 @@ The package now includes the client-facing integration core:
 - `applyCodexAgentConfig()` manages only Magpie's marked block in Codex's
   `config.toml`, preserves other user configuration, and references the helper
   token by environment-variable name rather than writing its value.
+- `setupLocalMcpClient()` orchestrates sync, reconcile, resource/tool
+  selection, the loopback helper, Codex config readback, and controlled launch
+  environment injection as one fail-closed setup operation.
 
 This is still a runtime and helper core, not a complete employee product. The
 installer, Windows service/MDM packaging, code signing, upgrade/rollback flow,
 admin-console integration, real Codex client acceptance, browser E2E,
-production secret broker, and real external OS sandbox remain unfinished.
+production secret broker, production token rotation/recovery, and real external
+OS sandbox remain unfinished.
 
 ## Security boundary
 
@@ -174,30 +178,100 @@ atomic replacement. If a user changes the managed block outside Magpie, the
 default result is `agent_config_drift`; pass `force: true` to replace it
 explicitly. It refuses to overwrite an unmanaged server with the same name.
 
+## One-click client setup orchestration
+
+`setupLocalMcpClient()` is the client-side technical flow behind a future
+"one-click configure agent" action. It performs the following sequence and
+fails closed at every step:
+
+```text
+helper.synchronize()
+  -> helper.reconcile()
+  -> helper.snapshot() and resource selection
+  -> helper.listTools()
+  -> start the loopback helper server
+  -> authenticated helper probe
+  -> write the managed Codex MCP block
+  -> inspect the managed block
+  -> pass the launch environment to a controlled launcher
+```
+
+```js
+import { setupLocalMcpClient } from "@magpie-enterprise/local-mcp";
+
+const setup = await setupLocalMcpClient({
+  helper,
+  configPath: codexConfigPath(),
+  nodePath: process.execPath,
+  bridgePath: "C:\\Program Files\\Magpie\\local-mcp-bridge.mjs",
+  rootDir: "C:\\ProgramData\\Magpie\\local-mcp",
+  resourceId: "res_local_echo",
+  injectLaunchEnvironment: async ({ environment }) => {
+    // A controlled launcher must receive this environment and confirm readiness.
+    return startCodexWithEnvironment(environment);
+  },
+});
+```
+
+`injectLaunchEnvironment` is mandatory. Without it, setup stops with
+`token_injection_required` instead of creating a configuration that cannot
+start. When no token is supplied, setup generates 32 random bytes as a
+base64url token in memory. The token is never written to `config.toml` or the
+public setup result; it is only passed in the frozen environment patch:
+
+```text
+MAGPIE_LOCAL_MCP_HELPER_TOKEN
+MAGPIE_LOCAL_MCP_HELPER_URL
+MAGPIE_LOCAL_MCP_RESOURCE_ID
+```
+
+The config still uses `env_vars` to reference the token variable. The launcher
+must inject it into the Codex child process. The successful result exposes
+bounded identities and control handles only:
+
+```text
+serverName, resourceId, helperUrl, tokenEnvName, toolCount,
+sync, launch, close(), uninstall()
+```
+
+If more than one MCP resource is active, `resourceId` is required. Failures
+close the helper server, release its lock, and remove the managed config block
+written by this setup attempt. Stable failure codes include
+`client_setup_sync_failed`, `client_setup_reconcile_failed`,
+`client_setup_resource_required`, `client_setup_resource_not_found`,
+`client_setup_resource_blocked`, `client_setup_tools_invalid`,
+`client_setup_no_tools`, `client_setup_server_failed`,
+`client_setup_readback_failed`, `client_setup_injection_failed`, and
+`token_injection_required`.
+
 ## Tests
 
 ```powershell
 & 'D:\Environment\node-v26.12.1\node.exe' --test .\enterprise\local-mcp\test\*.test.mjs
 ```
 
-Current result: **50 passed, 0 failed** (21 runtime, 7 helper integration,
-9 HTTP server, 5 bridge, 7 Codex config, and 1 real-subprocess end-to-end
-test). They use isolated temporary roots, in-memory test helpers, and local
-child processes only. They do not read production audit, health, usage,
-session, agent, or secret files.
+Current result: **60 passed, 0 failed** (21 runtime, 7 helper integration,
+9 HTTP server, 5 bridge, 7 Codex config, 10 client setup, and 1
+real-subprocess end-to-end test). They use isolated temporary roots, in-memory
+test helpers, random loopback ports, and local child processes only. They do
+not read production audit, health, usage, session, agent, secret, or real
+`~/.codex/config.toml` files.
 
 The end-to-end test runs
-`ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` in a real
-child process and covers initialize, tools/list, tools/call, and audit output.
-It does not prove that a real Codex client reads the generated config, a real
-employee install, or a production OS boundary.
+`setupLocalMcpClient + ClientSyncEngine + LocalMcpHost + helper HTTP server +
+stdio bridge` in a real child process and covers managed config readback,
+process-only environment injection, initialize, tools/list, tools/call, and
+audit output. It does not prove that a real Codex client reads the generated
+config, a real employee install, Windows service/MDM deployment, or a
+production OS boundary.
 
 ## Not yet production-ready
 
 - Local helper installer, Windows service/MDM packaging, code signing,
   upgrade/rollback, real Codex client acceptance, and administrator visibility.
-- Secure token injection, rotation, and recovery outside an operator-managed
-  environment.
+- A production launcher contract, Windows ACL/DPAPI integration, token
+  rotation/recovery, and crash-safe token persistence outside an
+  operator-managed environment.
 - Real OIDC, approval service, Secret Broker, KMS/HSM, and enterprise IdP.
 - Windows ACL enforcement and a signed, recoverable installer.
 - A proven external OS sandbox for network, clipboard, desktop, native, and

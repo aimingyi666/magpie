@@ -14,8 +14,9 @@ import {
 } from "../../resource-service/src/manifest.js";
 import { ClientSyncEngine } from "../../client-sync/src/index.js";
 import {
+  inspectCodexAgentConfig,
   LocalMcpHelper,
-  createLocalMcpServer,
+  setupLocalMcpClient,
 } from "../src/index.js";
 import {
   CLIENT_VERSION,
@@ -182,30 +183,35 @@ test("signed resource, local host, helper HTTP and agent bridge work end to end"
     now: () => Date.parse("2026-11-02T00:02:00.000Z"),
   });
 
-  const synchronized = await helper.synchronize();
-  assert.equal(synchronized.status, "ready", JSON.stringify(synchronized));
-  assert.deepEqual(synchronized.localMcp.unchanged, [RESOURCE_ID]);
-
-  const localServer = await createLocalMcpServer({
+  const configPath = path.join(root, "codex-home", "config.toml");
+  let child;
+  const setup = await setupLocalMcpClient({
     helper,
-    token: HELPER_TOKEN,
+    configPath,
+    nodePath: process.execPath,
+    bridgePath: BRIDGE_PATH,
     rootDir: mcpRoot,
+    token: HELPER_TOKEN,
     port: 0,
-  });
-  t.after(() => localServer.close());
-  const address = await localServer.listen();
-  assert.equal(address.address, "127.0.0.1");
-
-  const child = spawn(process.execPath, [BRIDGE_PATH], {
-    env: {
-      ...process.env,
-      MAGPIE_LOCAL_MCP_HELPER_URL: `http://127.0.0.1:${address.port}`,
-      MAGPIE_LOCAL_MCP_HELPER_TOKEN: HELPER_TOKEN,
-      MAGPIE_LOCAL_MCP_RESOURCE_ID: RESOURCE_ID,
+    async injectLaunchEnvironment({ environment }) {
+      child = spawn(process.execPath, [BRIDGE_PATH], {
+        env: { ...process.env, ...environment },
+        stdio: ["pipe", "pipe", "pipe"],
+        windowsHide: true,
+      });
+      return { status: "ready" };
     },
-    stdio: ["pipe", "pipe", "pipe"],
-    windowsHide: true,
   });
+  t.after(() => setup.uninstall().catch(() => {}));
+  assert.equal(setup.status, "ready");
+  assert.equal(setup.resourceId, RESOURCE_ID);
+  assert.equal(setup.helperUrl.startsWith("http://127.0.0.1:"), true);
+  assert.equal(fs.readFileSync(configPath, "utf8").includes(HELPER_TOKEN), false);
+  const inspected = await inspectCodexAgentConfig({ configPath });
+  assert.equal(inspected.status, "managed");
+  assert.equal(inspected.managed.resourceId, RESOURCE_ID);
+  assert.equal(inspected.managed.helperUrl, setup.helperUrl);
+
   t.after(() => {
     if (child.exitCode === null && child.signalCode === null) child.kill();
   });

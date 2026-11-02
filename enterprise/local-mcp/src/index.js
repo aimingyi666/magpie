@@ -28,6 +28,11 @@ export {
   runBridgeStdio,
 } from "./bridge.js";
 export {
+  DEFAULT_CLIENT_SETUP_TOKEN_BYTES,
+  LOCAL_MCP_CLIENT_SETUP_SCHEMA_VERSION,
+  setupLocalMcpClient,
+} from "./client-setup.js";
+export {
   LocalMcpError,
   asLocalMcpError,
   localMcpError,

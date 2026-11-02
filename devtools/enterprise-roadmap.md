@@ -12,7 +12,7 @@
 逐项生产验收证据和签字表见
 [`enterprise-acceptance-checklist.md`](enterprise-acceptance-checklist.md)。
 
-当前进度（2026-11-02，完整实施方案 v3.27）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
+当前进度（2026-11-02，完整实施方案 v3.28）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
 员工密钥开通、客户端加入、验收脚本和可重复的端到端测试；没有修改任何上游跟踪文件。
 M1 的 `enterprise-auth`、OIDC+PKCE、设备注册、短期 Key 刷新、同设备并发刷新串行化和
 加入脚本已经实现，并通过 Node 单元/Mock 集成测试（26/26）。真实 Magpie issuer E2E 已全部
@@ -23,7 +23,7 @@ MFA/ACR、已验证邮箱、管理会话、CSRF、IP 限制、RBAC、组织范�
 组织子树过滤。M2-C2 已提供停用/启用用户、吊销设备和轮换当前凭证四个受控写 API，
 接入管理会话、CSRF、RBAC、组织子树、必填理由和响应脱敏；M2-C3 已接入持久化
 `Idempotency-Key`、同键重放/冲突、执行中保护、`operationId` 和 intent/result 管理审计。
-管理端测试为 109/109（82 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），auth-service 为 26/26，gateway-control 为 15/15，resource-service 为 15/15，mcp-gateway 为 14/14，client-sync 为 26/26、local-mcp 为 50/50；合计 255/255。M2-C1 的 auth-service
+管理端测试为 109/109（82 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），auth-service 为 26/26，gateway-control 为 15/15，resource-service 为 15/15，mcp-gateway 为 14/14，client-sync 为 26/26、local-mcp 为 60/60；合计 265/265。M2-C1 的 auth-service
 内部写接口也已实现并通过 Mock 测试。C4-01 的 schema v1 机器协议已经实现并通过 Go 单测、
 gateway-key CLI 回归和隔离真实二进制冒烟：`gateway-key describe <id> --json` 可安全回读，
 `gateway-key policy apply <id> --json` 可在文件锁内原子替换模型和额度。C4-02
@@ -65,7 +65,7 @@ resource-service 测试；M3-B 远程 MCP 注册、企业统一端点、工具�
 设备上报和管理员 JSON 查询 API 已实现，客户端 HTTP 传输适配器已接入，并通过 8 项专项测试。
 叠加原有签名同步、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、
 路径/符号链接防护、并发锁和状态秘密隔离核心，client-sync 当前 26 项测试通过；
-resource-service 15 项测试通过（11 项核心 + 4 项控制面）。M3-D 受控本地 MCP 运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心已实现并通过 50 项测试（含真实子进程 E2E）；真实 Codex 客户端、管理台员工产品流、安装器/Windows 服务和生产验收尚未完成。M3-C-2 已把资源目录和
+resource-service 15 项测试通过（11 项核心 + 4 项控制面）。M3-D 受控本地 MCP 运行时、helper、回环 HTTP server、stdio bridge、Codex 配置映射和 `setupLocalMcpClient()` 一键配置编排核心已实现并通过 60 项测试（含经过编排入口的真实子进程 E2E）；真实 Codex 客户端、管理台员工产品流、安装器/Windows 服务、生产 launcher/token 轮换和生产验收尚未完成。M3-C-2 已把资源目录和
 设备同步报告以只读、按组织范围过滤的方式接入管理页，
 并只投影白名单字段，依赖故障统一 `503 resource_service_unavailable`。M3-A/M3-B 尚未接入
 admin-service 真实审批和可写管理台，M3-B 的 OIDC 组织分配也未实现；M3-C-1/M3-C-2
@@ -341,8 +341,8 @@ M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
 | M3-A 资源目录与签名 | 核心已实现，11/11 测试通过 | 五类资源目录、不可变版本、SHA-256 内容寻址、Ed25519 签名、发布/历史回滚、幂等和资源审计 | 内容与签名可验证；坏存储失败关闭；真实审批、管理台和客户端尚未接入 |
 | M3-B 远程 MCP 治理 | 核心后端已实现，14/14 测试通过 | 注册表、企业统一端点、工具级权限、健康检查、凭据隔离和审计 | 未授权 MCP/工具不可见/不可调用；SSRF、凭据泄露、健康和审计边界通过单元/Mock 测试；管理台、真实审批联动、OIDC 组织分配、客户端同步、共享事务存储和生产验收未完成 |
 | M3-C-1 客户端同步 | 控制面与核心已实现，client-sync 26/26、resource 15/15；产品页和本机落盘待完成 | 短期同步凭证、desired-state、设备上报、管理员 JSON 查询、HTTP 传输、签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移、路径/符号链接防护、并发锁和状态秘密隔离 | 控制面 API 和 Mock/单元证据可验证；资源发布/回滚 UI、管理台员工产品流、本地 helper 安装器、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机、5 分钟可见和生产验收未完成 |
-| M3-C-2 只读管理可见性 | 已实现，admin-service 新增 5 项测试；企业全量 242 项通过 | 只读资源/同步 API、组织范围过滤、严格字段投影、独立服务令牌、GET-only/禁止重定向/超时/响应上限、`503 resource_service_unavailable` 和只读管理页面板 | Mock/集成测试可验证；发布/回滚 UI、审批联动、M3-B MCP 管理台、浏览器 E2E、真实 IdP、Docker/Compose 实机、灰度/自动回滚和生产验收未完成 |
-| M3-D 受控本地 MCP | 运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心已实现，50/50 测试通过（含真实子进程 E2E）；产品集成与生产验收未完成 | 签名包、最小权限、策略审批、Secret Broker、JSON-RPC、审计、健康上报、Agent stdio bridge 和受管 Codex 配置 | 单元/Mock 测试覆盖未签名包拒绝、篡改/路径/版本冲突、原子安装、危险能力需外部 OS 沙箱适配及审计失败关闭；真实子进程 E2E 覆盖同步、helper HTTP、bridge 和审计；安装器/管理台员工产品流、真实 Codex 客户端、Windows/MDM、外部沙箱和生产验收未完成 |
+| M3-C-2 只读管理可见性 | 已实现，admin-service 新增 5 项测试；交付时企业全量 242 项通过，当前总计 265 项 | 只读资源/同步 API、组织范围过滤、严格字段投影、独立服务令牌、GET-only/禁止重定向/超时/响应上限、`503 resource_service_unavailable` 和只读管理页面板 | Mock/集成测试可验证；发布/回滚 UI、审批联动、M3-B MCP 管理台、浏览器 E2E、真实 IdP、Docker/Compose 实机、灰度/自动回滚和生产验收未完成 |
+| M3-D 受控本地 MCP | 运行时、helper、回环 HTTP server、stdio bridge、Codex 配置映射和 `setupLocalMcpClient()` 一键配置编排核心已实现，60/60 测试通过（含经过编排入口的真实子进程 E2E）；产品集成与生产验收未完成 | 签名包、最小权限、策略审批、Secret Broker、JSON-RPC、审计、健康上报、Agent stdio bridge、受管 Codex 配置，以及同步/选包/启动/写入/回读/受控环境注入编排 | 单元/Mock 测试覆盖未签名包拒绝、篡改/路径/版本冲突、原子安装、危险能力需外部 OS 沙箱适配及审计失败关闭；一键编排覆盖缺少注入器失败关闭、自动 token 不返回、多资源选择、端口冲突、配置冲突、注入失败、回读失败和清理；真实子进程 E2E 覆盖同步、helper HTTP、bridge 和审计；安装器/管理台员工产品流、真实 Codex 客户端、Windows/MDM、生产 launcher/token 轮换、外部沙箱和生产验收未完成 |
 | M4 会话与工具审计 | 4-6 周 | 事件管道、流式拼接、脱敏、检索、留存和导出 | L0 完整；正文按授权可见；删除和留存可验证 |
 | M5 安全运营与可观测性 | 3-4 周 | 规则、告警、阻断、吊销、OTel、SIEM 和值班闭环 | 典型违规/故障 5 分钟可见并可处置 |
 | M6 规模化与高可用 | 4-8 周或按需 | PostgreSQL/ClickHouse、多副本、Redis、KMS、mTLS 和多地域 | 压测、故障、RPO/RTO 和回滚演练通过 |

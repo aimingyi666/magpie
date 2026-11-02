@@ -1,6 +1,6 @@
 # Magpie 企业版完整功能方案
 
-状态：完整方案评审版 v3.27（完整需求基线见第 25 节，执行版工作分解见第 26 节；M0 已落地；
+状态：完整方案评审版 v3.28（完整需求基线见第 25 节，执行版工作分解见第 26 节；M0 已落地；
 M1 已完成本地真实链路验收；M2-A 管理身份底座、M2-B 只读治理、M2-C1 Auth 内部写接口、
 M2-C2 管理写 API 和 M2-C3 幂等/管理审计状态机已实现并通过 Mock 集成测试；M2-C4-01
 网关机器协议已实现，并通过 Go 单测、CLI 回归和隔离真实二进制冒烟测试；C4-02
@@ -25,8 +25,9 @@ M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查�
 查询 API、客户端 HTTP 传输适配器和 `readActiveResource()` 已实现，叠加原有签名同步、
 原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、路径/符号链接防护、
 并发锁和状态秘密隔离核心，client-sync 当前 26 项测试通过；M3-D 受控本地 MCP 运行时、
-`LocalMcpHelper`、回环 HTTP server、Agent stdio bridge 和 Codex `config.toml` 映射核心
-在 `enterprise/local-mcp` 通过 50 项测试，其中包含真实子进程
+`LocalMcpHelper`、回环 HTTP server、Agent stdio bridge、Codex `config.toml` 映射和
+`setupLocalMcpClient()` 一键配置编排核心在 `enterprise/local-mcp` 通过 60 项测试，
+其中包含经过编排入口的真实子进程
 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` E2E；但安装器/
 Windows 服务、真实 Codex 客户端、管理台员工产品流、真实外部沙箱和生产验收尚未完成；
 M4-M6 尚未实现。M3-C-2 已把资源目录和设备同步
@@ -75,6 +76,7 @@ M2-D 核心已实现并待真实环境验收。
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| v3.28 | 2026-11-02 | 记录 M3-D-3 一键配置编排核心：新增 `setupLocalMcpClient()`、`LOCAL_MCP_CLIENT_SETUP_SCHEMA_VERSION=1` 和 `DEFAULT_CLIENT_SETUP_TOKEN_BYTES=32`，串行编排 client-sync 同步、reconcile、快照选包、工具发现、回环 helper 启动/探测、Codex 受管 `config.toml` 写入/严格回读和受控启动器环境注入；`injectLaunchEnvironment` 为强制边界，缺失时返回 `token_injection_required`；未传入 token 时只在进程内生成 32 字节随机 token，成功对象和配置不含 token；多资源要求显式 `resourceId`；任一阶段失败会移除本次受管块、关闭 server 并释放 helper 锁；`inspectCodexAgentConfig()` 严格回读受管 node/bridge/URL/resource/token 变量/超时并拒绝畸形配置。local-mcp 60 项（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 10 client setup + 1 E2E），client-sync 26 项，七套企业回归合计 265 项通过。该切片证明一键配置编排技术链路，不等同于真实 Codex 客户端读取配置；安装器/Windows 服务/MDM/代码签名/升级回滚、生产启动器/Windows ACL/DPAPI/token 轮换、真实 OIDC/审批/Secret Broker/KMS、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成。 |
 | v3.27 | 2026-11-02 | 记录 M3-D-2 Agent 桥接与 Codex 配置映射核心：新增 `LocalMcpBridge`、`LoopbackHelperClient`、`runBridgeStdio()` 和 `magpie-local-mcp-bridge` CLI，只允许 `127.0.0.1`/`::1` HTTP helper，token 仅从环境变量读取，固定 initialize/tools/list/tools/call，具备请求/响应大小上限、30 秒默认 helper 超时和稳定错误码；新增 Codex `config.toml` 受管注释块映射，支持 `CODEX_HOME`、保留用户其他 MCP 配置、幂等原子替换、BOM/CRLF 保留、默认拒绝受管块漂移、显式 `force` 更新、受管标记必须独占整行，只写 token 环境变量名而不落 token 值；新增真实子进程 E2E 覆盖 signed package -> `ClientSyncEngine` -> `LocalMcpHost` -> helper HTTP server -> stdio bridge 的 initialize/list/call 和审计。local-mcp 50 项（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 1 E2E），client-sync 26 项，七套企业回归合计 255 项通过。该切片证明技术链路，不等同于真实 Codex 客户端读取配置；安装器/Windows 服务/MDM/代码签名/升级回滚、密钥安全注入/轮换、真实 OIDC/审批/Secret Broker/KMS、Windows ACL、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成。 |
 | v3.26 | 2026-11-02 | 记录 M3-D-1 本地 MCP helper/server 集成核心：client-sync 新增 `readActiveResource()`，只从 active state 定位 release，拒绝路径穿越/符号链接/超大文件，并重新校验 manifest、Ed25519 签名、内容长度、SHA-256 和 state/manifest 一致性；`LocalMcpHelper` 只消费 active `kind: "mcp"` 资源，重新验签并从 manifest 解析包身份，支持 `validateClientResource()`、`reconcile()`、`synchronize()`、`snapshot()`、`listTools()`、`callTool()`，拒绝 inactive/drift/non-MCP/tampered 资源；`createLocalMcpServer()` 仅允许 `127.0.0.1`/`::1`、复核 peer，`/healthz` 公开、其余 Bearer，固定 status/tools/call 路由，默认 256 KiB body、固定字段、稳定错误码、single-helper 锁、幂等 close、无 CORS、`no-store` 和脱敏 snapshot。client-sync 26 项（18 核心 + 8 传输）、local-mcp 37 项（21 运行时 + 7 helper + 9 server），七套企业回归合计 242 项通过。该切片是接口级 Mock/单元证据，尚无 `ClientSyncEngine + LocalMcpHost + HTTP server` 完整 E2E；安装器/Windows 服务/MDM/代码签名/升级回滚、目标 Agent 配置、管理台员工流、真实 OIDC/审批/Secret Broker/KMS、Windows ACL、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成；不得宣称完整 M3-D、产品化或生产可用。 |
 | v3.25 | 2026-11-02 | 记录 M3-D 受控本地 MCP 运行时核心交付：Ed25519 签名包与 canonical manifest、SHA-256 全文件摘要、公钥指纹、未知密钥/篡改/路径穿越/Windows 保留名/不可变版本冲突拒绝；staging/fsync/复验/原子 rename 和并发安装锁；Node permission model、`shell: false`、受限环境和发布者/工具/风险/文件/网络/秘密/解释器策略；高风险工具审批绑定包 digest 和工具名；HTTPS Secret Broker 短期租约；JSON-RPC 超时、响应上限和工具目录一致性；fail-closed 审计和有界健康计数。local-mcp 21 项、既有企业回归 203 项，总计 224 项通过。运行时核心已实现，但本地 helper/Agent 配置和管理台集成、真实 OIDC/审批服务/Secret Broker/KMS、Windows ACL/MDM/代码签名/安装升级和回滚、已证明的外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷并发、HA 和生产验收尚未完成；不得据此宣称 M3-D 产品化或生产可用。 |
@@ -149,7 +151,7 @@ Magpie 单机 Web UI：
 | 管理登录、RBAC、组织范围 | 是，见第 4、18、12.1 节 | M2-A/M2-B 已实现认证、会话、CSRF、角色、组织范围和只读治理；M2-C1 内部写接口、M2-C2 四个管理写 API 和 M2-C3 幂等/intent-result 管理审计已实现；C4-01 底层机器协议、C4-02 受控适配器、C4-03b/C4-03c 策略核心与额度/模型 API 已实现；C4-03d 已部分交付管理页额度/模型写表单和员工只读状态门户；M2-C5 的 operation/audit 查询和人工对账后端已实现并通过 Mock/故障测试；M2-D 已交付审批、operation、查询、CSV 导出和基础停用/吊销/轮换页面；失败恢复、浏览器 E2E、完整运营体验和生产验收未完成 |
 | 员工/管理员页面与操作流程 | 是，见第 5、6.2、6.3、12.1 节 | 已有 M1 员工页、M2-A 管理页、M2-B 只读摘要、C4-03d 额度/模型写表单和员工只读状态门户，以及 M2-D 的审批/operation、用量/审计查询、导出和基础停用/吊销/轮换页面；完整运营看板、浏览器 E2E、失败恢复入口和生产验收未完成 |
 | 模型网关、额度、白名单 | 是，见第 6.4、6.8、12.8.1 节 | M0 已有手工网关能力；C4-01 的 schema v1 机器回读和原子策略写入已实现并通过本地测试；C4-02 的受控适配器已实现并通过 15 项 Mock/故障测试；C4-03a 的正式只读模型目录、C4-03b 的用户级策略核心和 C4-03c 的管理/签发/同步/交付核心已实现；C4-03d 仅部分实现；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，但 Docker/真实共享卷、真实 IdP 和生产验收仍未完成 |
-| MCP 目录、远程/本地 MCP、工具权限 | 是，见第 5.4、6.5 节 | M3-B 远程 MCP 治理核心已实现并通过 14 项测试；M3-C-1 已提供短期同步凭证、desired-state、设备上报、管理员 JSON 查询 API 和 `readActiveResource()`，client-sync 26 项测试通过；M3-D 受控本地 MCP 运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心已实现并通过 50 项测试（含真实子进程 E2E），但安装器/Windows 服务、真实 Codex 客户端、管理台员工产品流、admin-service 真实审批联动、OIDC 真实 IdP 验收和生产环境验收未实现 |
+| MCP 目录、远程/本地 MCP、工具权限 | 是，见第 5.4、6.5 节 | M3-B 远程 MCP 治理核心已实现并通过 14 项测试；M3-C-1 已提供短期同步凭证、desired-state、设备上报、管理员 JSON 查询 API 和 `readActiveResource()`，client-sync 26 项测试通过；M3-D 受控本地 MCP 运行时、helper、回环 HTTP server、stdio bridge、Codex 配置映射和 `setupLocalMcpClient()` 一键配置编排核心已实现并通过 60 项测试（含经过编排入口的真实子进程 E2E），但安装器/Windows 服务、真实 Codex 客户端、管理台员工产品流、admin-service 真实审批联动、OIDC 真实 IdP 验收和生产环境验收未实现 |
 | 中央资源库、版本、签名、同步、漂移 | 是，见第 5.5、6.6 节 | M3-A 资源目录、版本、签名和审计核心已实现；M3-C-1 已实现签名 desired-state、原子安装/失败保留旧版本、离线缓存、强制/推荐、漂移检测、设备上报和管理员 JSON 查询，但资源发布/回滚 UI、审批联动、本地 helper 产品入口、目标 Agent 文件映射、Windows ACL 和产品级自动回滚未实现 |
 | 客户端策略与防绕过 | 是，见第 6.7、9 节 | 只有现有网关和 IP 白名单，完整强制未实现 |
 | 会话/工具审计、脱敏、留存 | 是，见第 5.6、6.9、19 节 | 未实现；当前只有元数据用量 |
@@ -158,7 +160,7 @@ Magpie 单机 Web UI：
 | 部署、备份、灰度、回滚 | 是，见第 10、20、21 节 | Compose 模板已有，Docker/计划任务待实机验收 |
 | 上游同步与 fork 兼容 | 是，见第 14、17 节 | 分支工具可用，但当前 `sync-upstream.yml` 仍是合并后直推 `main`；企业目标态必须改为“同步分支 -> 合并 upstream -> CI -> 自动 PR -> 受保护 main 合并”，并完成规则与回归验收 |
 | 项目职责、协作、分支保护、环境晋级、成本容量和培训 | 是，见 [`enterprise-operating-model.md`](enterprise-operating-model.md) | 完整运营规则已定义；GitHub 规则、预算和人员任命需企业实际落地 |
-| 测试与上线门槛 | 是，见第 13、22、23、25 节 | 已记录 M0/M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3 实测结果；C4-01 有本地单测、CLI 回归和隔离二进制冒烟证据；C4-02 有 15 项 Mock/故障测试证据；C4-03a 有 7 项目录专项和 82 项管理服务集成测试证据；C4-03b/C4-03c 有 26 项 auth-service 测试；M3-A 有 11 项资源目录/签名/存储/幂等/审计测试证据；M3-B 有 14 项注册表、scope、工具授权、审批、SSRF、健康/熔断、边界和审计测试证据；M3-C-1 有 4 项同步凭证/desired-state/report 控制面测试、8 项客户端传输测试和 18 项同步引擎核心测试；M2-C5、M2-D、APR-01a、APR-01b、APR-01c、APR-01d、APR-01e、NOTIFY-01a、NOTIFY-01b、NOTIFY-01c 和 NOTIFY-01d 有 operation/audit/reconcile/export/approval/callback/step-up/inbox/break-glass/outbox/channel/SIEM/rules/aggregation/escalation 的 Mock/故障测试证据；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。M3-D 有 50 项证据：21 项签名包/安装/权限/Secret Broker/JSON-RPC/审计/健康，7 项 helper 集成，9 项 HTTP server，5 项 stdio bridge，7 项 Codex 配置映射，以及 1 项 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 真实子进程 E2E。当前总计 admin 109/109、auth 26/26、gateway-control 15/15、resource 15/15、mcp-gateway 14/14、client-sync 26/26、local-mcp 50/50，共 255/255。resource 15 = 11 核心 + 4 控制面，client-sync 26 = 18 核心 + 8 传输。浏览器 E2E、真实 Codex 客户端读取配置、真实企业 IdP/OA、break-glass 的 5 分钟告警/工单 SLA 和 24 小时生产复核演练、恢复入口、Docker/共享卷、真实审批、资源发布/回滚 UI、审批联动、helper 安装器/Windows 服务和 MDM、真实厂商通知连接器、真实 SIEM/Collector/Syslog/证书、M2-C5/M2-D 生产验收、M3-B/M3-C 生产验收和 M3-D/M4-M6 尚无完整生产环境验收证据 |
+| 测试与上线门槛 | 是，见第 13、22、23、25 节 | 已记录 M0/M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3 实测结果；C4-01 有本地单测、CLI 回归和隔离二进制冒烟证据；C4-02 有 15 项 Mock/故障测试证据；C4-03a 有 7 项目录专项和 82 项管理服务集成测试证据；C4-03b/C4-03c 有 26 项 auth-service 测试；M3-A 有 11 项资源目录/签名/存储/幂等/审计测试证据；M3-B 有 14 项注册表、scope、工具授权、审批、SSRF、健康/熔断、边界和审计测试证据；M3-C-1 有 4 项同步凭证/desired-state/report 控制面测试、8 项客户端传输测试和 18 项同步引擎核心测试；M2-C5、M2-D、APR-01a、APR-01b、APR-01c、APR-01d、APR-01e、NOTIFY-01a、NOTIFY-01b、NOTIFY-01c 和 NOTIFY-01d 有 operation/audit/reconcile/export/approval/callback/step-up/inbox/break-glass/outbox/channel/SIEM/rules/aggregation/escalation 的 Mock/故障测试证据；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。M3-D 有 60 项证据：21 项签名包/安装/权限/Secret Broker/JSON-RPC/审计/健康，7 项 helper 集成，9 项 HTTP server，5 项 stdio bridge，7 项 Codex 配置映射，10 项一键配置编排，以及 1 项经过编排入口的 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 真实子进程 E2E。当前总计 admin 109/109、auth 26/26、gateway-control 15/15、resource 15/15、mcp-gateway 14/14、client-sync 26/26、local-mcp 60/60，共 265/265。resource 15 = 11 核心 + 4 控制面，client-sync 26 = 18 核心 + 8 传输。浏览器 E2E、真实 Codex 客户端读取配置、真实企业 IdP/OA、break-glass 的 5 分钟告警/工单 SLA 和 24 小时生产复核演练、恢复入口、Docker/共享卷、真实审批、资源发布/回滚 UI、审批联动、helper 安装器/Windows 服务/MDM、生产 launcher/Windows ACL/DPAPI/token 轮换、真实厂商通知连接器、真实 SIEM/Collector/Syslog/证书、M2-C5/M2-D 生产验收、M3-B/M3-C 生产验收和 M3-D/M4-M6 尚无完整生产环境验收证据 |
 
 ### 0.3 本文档不替代的事实
 
@@ -221,8 +223,11 @@ Magpie 单机 Web UI：
   核心；M3-C-1 已提供设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询、
   客户端签名同步、HTTP 传输和 `readActiveResource()`，但资源发布/回滚 UI、审批联动、
   helper 安装器/产品入口、目标 Agent 文件映射、Windows ACL 和 MDM 尚未接入；受控本地
-  MCP 属于 M3-D，运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心
-  已实现，但安装器/Windows 服务、真实 Codex 客户端、管理台员工流、外部 OS 沙箱和生产
+  MCP 属于 M3-D，运行时、helper、回环 HTTP server、stdio bridge、Codex 配置映射和
+  `setupLocalMcpClient()` 一键配置编排核心已实现。编排必须有受控启动器提供
+  `injectLaunchEnvironment`，缺失时失败关闭；token 不写入 `config.toml`，成功结果也不
+  返回 token，失败会清理本次受管块、server 和 lock。但安装器/Windows 服务、真实 Codex
+  客户端、管理台员工流、生产 launcher/Windows ACL/DPAPI/token 轮换、外部 OS 沙箱和生产
   验收尚未完成。
 
 | 能力域 | 员工流程 | 管理员入口 | 服务端权限与事实来源 | 主要 API/执行面 | 失败与补偿 | 审计与脱敏 | 部署验收 | 阶段 |
@@ -259,7 +264,7 @@ Magpie 单机 Web UI：
 | C5 操作、审计查询与对账 | C4-03c/C4-03d/C4-04 | `operations/{id}`、`audit-logs`、过滤分页、人工确认/重试/补偿子 operation | 管理员可追溯失败、部分成功和依赖结果，完成人工对账 | 已有 operation/audit/reconcile Mock/故障测试和 M2-D 基础页面：权限、组织范围、签名 cursor、脱敏、幂等/冲突、旧快照、依赖/审计失败、父子 operation 和原审计不可改写 | 真实审计存储、浏览器 E2E 和生产运维演练未验收 | 保留原 operation 和审计，新增补偿 operation；不覆盖历史结果 |
 | M2-E 审批、step-up 与通知投递 | C3/C5、真实管理 IdP、外部 OA/IM/SIEM | APR-01a-e、NOTIFY-01a-d、外部审批验签、一次性消费、break-glass、outbox 和死信 | 高风险操作有审批和 ACR，通知异步可靠且可运营 | 已有 APR-01a 审批风险/绑定/职责分离/一次性消费/启动恢复、APR-01b HMAC 回调验签/防重放/幂等、APR-01c 独立 step-up/ACR/auth_time/绑定/失败关闭、APR-01d 审批箱/串并行/quorum/转交/撤回、APR-01e 15 分钟单次授权/24 小时复核/提醒/通知、NOTIFY-01a outbox/租约/退避/死信/重启恢复、NOTIFY-01b 渠道管理/HTTPS 适配器/SSRF 防护、NOTIFY-01c SIEM transport/固定 L0 schema/dead-letters API，以及 NOTIFY-01d 规则/抑制/聚合/阈值与延迟升级/受审计重放/运营页的 Mock/故障证据；仍需真实 OA 连接器、真实 IdP/MFA、真实厂商渠道、真实 SIEM/Collector/Syslog/证书、5 分钟告警/工单 SLA 和 24 小时生产复核演练作为生产验收证据 | APR-01b 仅有 HMAC/Mock 适配器，真实 OA/飞书/ServiceNow/Jira 未接入；APR-01e 仅有 Mock/集成核心，真实告警/工单和外部工单 ID 回读未验收；NOTIFY-01d 已实现核心和运营页，真实 SIEM 接入、NOTIFY-01b 的真实厂商连接、浏览器审批流程和生产值班闭环未验收 | 关闭对应审批/通知功能；保留待消费审批、break-glass、outbox 和死信供人工处置 |
 | M2-D 管理体验与员工门户 | C2-C5、M2-E、真实数据卷 | 管理写 UI、用量/成本看板、授权导出、操作历史和员工状态页 | 管理员可日常运营，员工可自助恢复，不暴露秘密 | 已有 109 项管理测试覆盖筛选/分页、operation、人工对账、审批箱/多步骤、break-glass、通知规则/聚合/抑制/升级、用量/审计查询、CSV 导出权限/审批/step-up/一次性下载/幂等/公式注入防护；页面 E2E、真实浏览器和导出生产验收未完成 | C4-03d 已部分交付额度/模型写表单和员工只读状态页；M2-D 核心已实现，浏览器 E2E、失败恢复入口、完整运营体验和大规模异步导出未验收 | 回退前端资源；保留导出审计和 operation，不丢弃已生成证据 |
-| M3-M6 资源、审计、安全与规模化 | R2 生产候选全部通过 | 中央 MCP、资源库、客户端策略、L0-L3 审计、安全运营、PostgreSQL/HA/KMS/mTLS | 50-500+ 人可治理、可审计、可扩展和可恢复 | M3-A 已有 11 项、M3-B 已有 14 项、M3-C-1 相关 resource 已有 15 项、client-sync 已有 26 项单元/Mock 集成测试，M3-C-2 已有 5 项管理服务测试，M3-D 已有 50 项运行时/helper/server/bridge/配置/E2E 测试；M3-B 仍有单进程 nonce、注册表/审计事务和真实部署缺口；M3-C-2 只完成只读资源/漂移可见性，资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 IdP、浏览器 E2E 和 Docker/Compose 实机验收仍未完成；L0-L3 审计、安全运营、HA 和合规签字仍无证据 | M3-A/M3-B 尚未接入真实审批和可写管理台，M3-C-2 仍未接入发布/回滚和 helper 产品流；M3-D 已有桥接技术 E2E，但真实 Codex 客户端、安装器和生产验收未完成，M4-M6 未实现，不得引用本表作为上线证明 | 按阶段独立回退；资源回滚到已发布签名版本，MCP 注册表/审计/幂等迁移必须有逆向脚本和隔离恢复演练 |
+| M3-M6 资源、审计、安全与规模化 | R2 生产候选全部通过 | 中央 MCP、资源库、客户端策略、L0-L3 审计、安全运营、PostgreSQL/HA/KMS/mTLS | 50-500+ 人可治理、可审计、可扩展和可恢复 | M3-A 已有 11 项、M3-B 已有 14 项、M3-C-1 相关 resource 已有 15 项、client-sync 已有 26 项单元/Mock 集成测试，M3-C-2 已有 5 项管理服务测试，M3-D 已有 60 项运行时/helper/server/bridge/配置/一键编排/E2E 测试；M3-B 仍有单进程 nonce、注册表/审计事务和真实部署缺口；M3-C-2 只完成只读资源/漂移可见性，资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 IdP、浏览器 E2E 和 Docker/Compose 实机验收仍未完成；L0-L3 审计、安全运营、HA 和合规签字仍无证据 | M3-A/M3-B 尚未接入真实审批和可写管理台，M3-C-2 仍未接入发布/回滚和 helper 产品流；M3-D 已有一键配置编排技术 E2E，但真实 Codex 客户端、生产 launcher/安装器和生产验收未完成，M4-M6 未实现，不得引用本表作为上线证明 | 按阶段独立回退；资源回滚到已发布签名版本，MCP 注册表/审计/幂等迁移必须有逆向脚本和隔离恢复演练 |
 
 ## 1. 目标与边界
 
@@ -341,7 +346,7 @@ Magpie 单机 Web UI：
 | M2-C4-03d 页面与运营状态 | 管理页/员工页同步状态、失败恢复入口和对账入口 | C4-03d 部分实现：管理页额度/模型写表单、完整证据链状态和员工只读状态门户已通过 Node 页面/API 测试；M2-D 已接入 operation/audit 查询和人工对账基础页面 | 浏览器 E2E、失败目标恢复入口和完整运营体验 |
 | M2-C5 操作/审计查询与对账 | operation 详情、脱敏审计分页、签名 cursor 和四种人工对账动作 | 后端已实现并通过 Mock/故障测试；覆盖权限、组织范围、过滤分页、消费绑定、脱敏、幂等/冲突、旧快照、依赖/审计失败、父子 operation 和原审计不可改写；M2-D 已接入基础查询/对账页面 | 真实审计存储、生产 IdP/代理、完整运营查询/对账体验和人工运维演练未验收 |
 | M2-D 看板与运营 | 用量/审计查询与 cursor 分页、operation 列表/详情、受控人工对账、审批箱/串并行多步骤、用量/审计 CSV 授权导出、员工只读状态页和通知运营页 | 管理 `109/109`；覆盖 RBAC/组织范围、审批绑定、审批箱、serial/parallel、quorum、转交/撤回、fresh step-up、CSRF、理由、幂等、一次性 Bearer token、会话 Cookie 绑定、query-string token 拒绝、下载后消费/过期、CSV BOM/CRLF、公式注入防护、字段/记录/字节上限、L0 脱敏和通知规则/抑制/聚合/升级/死信运营契约 | 失败目标恢复入口、完整运营体验、对象存储、异步大批量导出、Excel、分布式锁、浏览器 E2E、真实 IdP/OA/SIEM、生产负载和留存/删除策略 |
-| M3 中央 MCP/资源库 | M3-A 资源目录/签名、M3-B 远程 MCP、M3-C-1 同步控制面、M3-C-2 只读管理可见性和 M3-D-2 bridge/Codex 配置映射核心已实现 | resource `15/15`（11 核心 + 4 控制面）、mcp-gateway `14/14`、client-sync `26/26`（18 核心 + 8 传输）、local-mcp `50/50`（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 1 真实子进程 E2E）、admin 新增 5 项 M3-C-2 测试；资源发布/回滚 UI、审批联动、M3-B MCP 管理台、helper 安装器/Windows 服务、真实 Codex 客户端、真实 IdP、浏览器 E2E 和 Docker/Compose 实机待完成 | 可写管理 UI、生产验收、灰度/自动回滚 |
+| M3 中央 MCP/资源库 | M3-A 资源目录/签名、M3-B 远程 MCP、M3-C-1 同步控制面、M3-C-2 只读管理可见性和 M3-D-3 bridge/Codex 配置/一键配置编排核心已实现 | resource `15/15`（11 核心 + 4 控制面）、mcp-gateway `14/14`、client-sync `26/26`（18 核心 + 8 传输）、local-mcp `60/60`（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 10 client setup + 1 真实子进程 E2E）、admin 新增 5 项 M3-C-2 测试；资源发布/回滚 UI、审批联动、M3-B MCP 管理台、helper 安装器/Windows 服务、真实 Codex 客户端、真实 IdP、浏览器 E2E 和 Docker/Compose 实机待完成 | 可写管理 UI、生产验收、灰度/自动回滚 |
 | M4 会话审计 | 方案；当前只有元数据用量 | M0 用法归属 | 正文采集、流式拼接、脱敏、检索、留存 |
 | M5 安全运营 | 方案 | 无 | 告警、阻断、SIEM、值班闭环 |
 | M6 规模化 | 方案 | 无 | PostgreSQL/HA、KMS、mTLS、容量压测 |
@@ -3113,8 +3118,8 @@ feat/m2-e-notification-outbox
 | --- | --- | --- | --- |
 | M3 | M3-A 目录与签名（核心已实现） | `resource-service`、manifest schema、内容寻址对象存储、签名校验 | 资源可创建不可变版本并校验哈希/签名；11 项测试已覆盖，真实审批、管理台、员工端同步接入和生产验收未完成 |
 | M3 | M3-B 远程 MCP（核心已实现） | MCP 注册、企业统一端点、工具级权限、健康检查 | 14 项测试已覆盖未授权 MCP/工具不可见/不可调用、scope、审批门禁、SSRF、凭据隔离、健康/熔断和审计边界；管理台、admin-service 真实审批联动、OIDC 组织分配、员工端同步接入、共享事务存储、多副本和生产验收未完成 |
-| M3 | M3-C-1/M3-C-2 同步控制面与只读管理可见性（已实现） | 短期同步凭证、desired-state、设备上报、管理员 JSON 查询、`readActiveResource()`、签名同步、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、秘密隔离，以及按组织范围过滤的只读资源/同步报告 API 和管理页面板 | client-sync 26 项测试覆盖 18 项同步引擎核心和 8 项 HTTP 传输；resource 15 项测试覆盖 11 项核心和 4 项控制面；admin-service 新增 5 项 M3-C-2 测试并通过，企业全量 255 项；资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 Codex 客户端、浏览器 E2E、Docker/Compose 实机、5 分钟端到端可见和生产验收未完成 |
-| M3 | M3-D-2 本地 MCP helper/server/bridge 与 Codex 配置映射（核心已实现） | 签名包、运行权限、Secret Reference、Secret Broker、JSON-RPC、健康检查、client-sync active 资源桥接、回环 HTTP helper API、stdio bridge、Codex `config.toml` 受管块 | 50 项测试：21 项覆盖签名/篡改/路径/安装/策略/审批/Secret Broker/JSON-RPC/审计/健康边界，7 项覆盖 ClientSyncEngine/helper 契约，9 项覆盖回环绑定/Bearer/路由/body/错误码/锁/脱敏边界，5 项覆盖 bridge，7 项覆盖 Codex 配置映射，1 项真实子进程 E2E 覆盖 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge`；真实 Codex 客户端、helper 安装器/Windows 服务/管理台、外部 OS 沙箱和生产验收未完成 |
+| M3 | M3-C-1/M3-C-2 同步控制面与只读管理可见性（已实现） | 短期同步凭证、desired-state、设备上报、管理员 JSON 查询、`readActiveResource()`、签名同步、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、秘密隔离，以及按组织范围过滤的只读资源/同步报告 API 和管理页面板 | client-sync 26 项测试覆盖 18 项同步引擎核心和 8 项 HTTP 传输；resource 15 项测试覆盖 11 项核心和 4 项控制面；admin-service 新增 5 项 M3-C-2 测试并通过，企业当前全量 265 项；资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 Codex 客户端、浏览器 E2E、Docker/Compose 实机、5 分钟端到端可见和生产验收未完成 |
+| M3 | M3-D-3 本地 MCP helper/server/bridge、Codex 配置映射与一键配置编排（核心已实现） | 签名包、运行权限、Secret Reference、Secret Broker、JSON-RPC、健康检查、client-sync active 资源桥接、回环 HTTP helper API、stdio bridge、Codex `config.toml` 受管块、`setupLocalMcpClient()` 同步/选包/启动/写入/回读/受控环境注入 | 60 项测试：21 项覆盖签名/篡改/路径/安装/策略/审批/Secret Broker/JSON-RPC/审计/健康边界，7 项覆盖 ClientSyncEngine/helper 契约，9 项覆盖回环绑定/Bearer/路由/body/错误码/锁/脱敏边界，5 项覆盖 bridge，7 项覆盖 Codex 配置映射，10 项覆盖一键配置编排的成功、失败关闭、多资源选择、端口冲突、冲突配置、注入和回读失败，1 项经过编排入口的真实子进程 E2E 覆盖 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge`；真实 Codex 客户端、helper 安装器/Windows 服务/管理台、生产 launcher/Windows ACL/DPAPI/token 轮换、外部 OS 沙箱和生产验收未完成 |
 | M4 | M4-A 事件管道 | 请求/回复事件 schema、请求 ID、幂等、异步投递 | 元数据可按会话和请求串联；写入可重试 |
 | M4 | M4-B 内容采集 | 流式拼接、脱敏、分片、对象存储、索引 | 流式回复完整；敏感字段落盘前被处理 |
 | M4 | M4-C 检索与权限 | 员工/部门/时间/模型/工具筛选、正文二次授权 | 审计员只看到授权范围，查看正文有记录 |
@@ -3696,7 +3701,7 @@ M2-A/M2-B/M2-C1/M2-C2/M2-C3 已经完成独立管理 OIDC、会话、CSRF、RBAC
 | E7.1 | P1 | MCP 目录、负责人、类型和健康状态 | M3 | 管理员可登记和查询远程/本地 MCP；未授权用户不可见 | 已设计 |
 | E7.2 | P1 | 远程 MCP 网关代理 | M3 | 客户端只拿企业地址；上游 OAuth/Key 只在网关；工具调用可审计 | 已设计 |
 | E7.3 | P1 | 工具级 allow/deny 和风险等级 | M3 | 未授权工具不可调用；读写/执行工具分级；高风险操作需审批 | 已设计 |
-| E7.4 | P1 | 本地 MCP 签名、沙箱和 Secret Reference | M3 | 未签名包不能运行；文件/网络/命令范围受限；密钥不下发 | 运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心已实现，local-mcp 50 项测试（含真实子进程 E2E）通过；真实 Codex 客户端、安装器/Windows 服务/管理台、外部 OS 沙箱和生产验收未完成 |
+| E7.4 | P1 | 本地 MCP 签名、沙箱和 Secret Reference | M3 | 未签名包不能运行；文件/网络/命令范围受限；密钥不下发 | 运行时、helper、回环 HTTP server、stdio bridge、Codex 配置映射和 `setupLocalMcpClient()` 一键配置编排核心已实现，local-mcp 60 项测试（含经过编排入口的真实子进程 E2E）通过；真实 Codex 客户端、安装器/Windows 服务/管理台、生产 launcher/Windows ACL/DPAPI/token 轮换、外部 OS 沙箱和生产验收未完成 |
 | E7.5 | P1 | 健康检查、限流、熔断和告警 | M3/M5 | MCP 故障不影响其他资源；管理员看到状态和错误 | 已设计 |
 | E7.6 | P1 | MCP 发布、灰度、回滚和漂移 | M3 | 指定员工 5 分钟内可见；失败回退上一版本；期望/实际版本可见 | 已设计 |
 

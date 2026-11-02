@@ -6,7 +6,7 @@
 [`enterprise-master-plan.md`](enterprise-master-plan.md) 和
 [`enterprise-roadmap.md`](enterprise-roadmap.md)。
 
-2026-11-02 方案基线更新到 v3.27。当前 `codex/m3-d-local-mcp-agent-bridge` 分支在既有
+2026-11-02 方案基线更新到 v3.28。当前 `codex/m3-d-local-mcp-agent-bridge` 分支在既有
 M2-C1 auth-service 内部写接口、M2-C2 四个管理写接口和 M2-C3 幂等/管理审计状态机基础上，
 新增 **M3-C-2** 只读管理可见性：admin-service 通过独立服务令牌读取 resource-service 的
 资源目录和设备同步报告，按管理员组织范围过滤，并只投影白名单元数据；依赖故障统一返回
@@ -14,12 +14,17 @@ M2-C1 auth-service 内部写接口、M2-C2 四个管理写接口和 M2-C3 幂等
 `enterprise/local-mcp/` 既有运行时核心上新增 `LocalMcpHelper` 和 `createLocalMcpServer()`：
 helper 只消费 `ClientSyncEngine.readActiveResource()` 返回的 active `kind: "mcp"` 资源，
 重新验签并从 manifest 解析包身份；回环 HTTP server 提供固定 status/tools/call 接口、
-Bearer token、文件锁、body/字段/错误码边界和脱敏 snapshot。本轮 **M3-D-2** 新增
+Bearer token、文件锁、body/字段/错误码边界和脱敏 snapshot。此前 **M3-D-2** 新增
 Agent stdio bridge 和 Codex `config.toml` 映射核心：bridge 只允许回环 helper、固定
 initialize/tools/list/tools/call 方法和有界 JSON-RPC；配置映射用受管注释块保留用户其他
 MCP 条目，幂等原子写入，默认拒绝外部漂移，且只引用 token 环境变量名、不落 token 值。
-新增真实子进程 E2E 覆盖 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge`。
-产品安装器、Windows 服务、真实 Codex 客户端验收、管理台员工流、真实外部沙箱和生产验收仍未完成。
+本轮 **M3-D-3** 新增 `setupLocalMcpClient()` 一键配置编排核心：串行执行
+`synchronize -> reconcile -> snapshot -> listTools -> 回环 helper 启动与探测 -> Codex 受管配置写入与回读 -> 受控启动器环境注入`；
+缺少受控注入器时返回 `token_injection_required`，不伪造启动成功；未提供 token 时仅在进程内
+生成 32 字节随机 token，公开结果和 `config.toml` 均不含 token 明文；任一阶段失败会移除本次
+写入的受管块、关闭 server 并释放 helper 锁。真实子进程 E2E 已改为经过该编排入口，覆盖
+配置回读、环境注入、initialize/list/call 和审计。产品安装器、Windows 服务/MDM、真实
+Codex 客户端验收、生产启动器与 token 轮换、管理台员工产品流、真实外部沙箱和生产验收仍未完成。
 此前 **M3-C-1** 已提供设备短期同步
 凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器。此前
 `feat/notify-01d-notification-ops` 分支实现了 **APR-01e break-glass** 的 15 分钟单次紧急授权、
@@ -53,9 +58,9 @@ step-up、理由和幂等。admin-service 当前通过 **109 passed, 0 failed**�
 集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），
 auth-service 通过 **26 passed, 0 failed**，gateway-control 通过 **15 passed, 0 failed**，
 resource-service 通过 **15 passed, 0 failed**，mcp-gateway 通过 **14 passed, 0 failed**。
-client-sync 通过 **26 passed, 0 failed**，M3-D local-mcp 通过 **50 passed, 0 failed**。
+client-sync 通过 **26 passed, 0 failed**，M3-D local-mcp 通过 **60 passed, 0 failed**。
 此前 **M3-C-2** 在既有 104 项管理测试上新增 5 项管理服务测试（未新增测试文件）；当前
-企业回归合计 **255 passed, 0 failed**。
+企业回归合计 **265 passed, 0 failed**。
 **C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
 冒烟；**C4-02** `gateway-control` 受控适配器已通过 15 项 Mock/故障测试；**C4-03a**
 正式只读模型目录、**C4-03b/C4-03c** 用户级策略、幂等签发、issuance journal、自动
@@ -90,8 +95,9 @@ resource-service 通过 15 项测试（11 项核心 + 4 项控制面），client
 （18 项核心 + 8 项传输）。
 M3-C 原有签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、
 路径/符号链接防护、并发锁和状态秘密隔离核心仍保持通过；M3-D 受控本地 MCP 运行时、
-helper 和回环 HTTP server 核心已实现并通过 37 项隔离单元/Mock 测试，但安装器/Windows
-服务、管理台员工流、真实外部沙箱和生产验收尚未完成，M4-M6 仍未实现。
+helper、回环 HTTP server、stdio bridge、Codex 配置映射和一键配置编排核心已实现并通过
+60 项隔离单元/Mock 测试，但安装器/Windows 服务/MDM、真实 Codex 客户端、生产启动器与
+token 轮换、管理台员工流、真实外部沙箱和生产验收尚未完成，M4-M6 仍未实现。
 M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，M3-B 的 OIDC 组织分配也未实现；
 M3-C-1/M3-C-2 已接入员工端短期同步凭证、desired-state/report API，以及管理页只读资源目录
 和同步报告/漂移可见性；但资源发布/回滚 UI、发布/回滚审批联动、本地 helper 产品入口、
@@ -180,8 +186,9 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | M3-B 生产阻断项 | 未验收 | 审批 nonce 和限流器仅单进程内存；注册表、审计和幂等不是同一事务，审计失败可能发生在状态提交之后；客户端签发审计失败会留下无法取回明文 token 的孤立记录；未做多副本、共享事务存储、KMS/HSM、mTLS、真实 MCP/IdP、浏览器 E2E、Docker/Compose 实机和生产验收 |
 | M3-C 客户端同步 | 控制面与核心已实现；resource 15 项、client-sync 26 项测试通过 | 设备短期同步凭证、OIDC `groups` 组织范围、desired-state、设备上报、管理员 JSON 查询、HTTP 传输凭证缓存/重签、条件请求、超时和响应上限；固定 Ed25519 公钥/SPKI 指纹、manifest/内容/长度/SHA-256 校验、staging/fsync/复验/rename 原子激活、失败保留上一验签版本、离线缓存、forced/recommended、漂移检测、路径穿越和符号链接拒绝、并发锁、`0600` 状态、秘密隔离和 `readActiveResource()` active 资源重新验签；M3-C-2 已提供管理页只读资源/漂移可见性；资源发布/回滚 UI、发布/回滚审批联动、本地 helper 安装器/产品入口、浏览器 E2E、Windows ACL、MDM、目标 Agent 文件映射、灰度/自动回滚和生产验收未完成 |
 | M3-C-2 只读管理可见性 | 已实现，admin-service 新增 5 项测试并通过；该阶段企业全量 203 项通过 | `GET /api/v1/admin/resources`、`/resources/{id}`（`resources.read`）、`/resource-sync/reports`、`/resource-sync/reports/{deviceId}`（`devices.read`）；`ADMIN_RESOURCE_SERVICE_URL`/`TOKEN` 成对校验、独立 Bearer、GET-only、不跟随重定向、5 秒超时、4 MiB 响应上限；资源按 `"*"`/组织范围可见，报告要求设备存在且 `userId` 与设备映射一致；严格字段白名单；依赖故障统一 `503 resource_service_unavailable`；管理页只读面板无内联脚本；资源发布/回滚 UI、审批联动、真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收未完成 |
-| M3-D-1 本地 MCP helper/server 核心 | 阶段已实现；后续 M3-D-2 已补齐 stdio bridge、Codex 配置映射和真实子进程 E2E，当前 local-mcp 50 项测试通过；完整 M3-D 产品集成和生产验收尚未完成 | 既有签名包/原子安装/权限能力/Secret Broker/JSON-RPC/审计/健康核心；新增 `LocalMcpHelper.validateClientResource()`、`reconcile()`、`synchronize()`、`snapshot()`、`listTools()`、`callTool()`；仅使用 client-sync active 资源并重新验签，拒绝 inactive/drift/non-MCP/tampered；回环绑定、peer 复核、Bearer、固定 status/tools/call 路由、256 KiB 默认 body 上限、固定字段、稳定错误码、single-helper 锁、幂等 close、无 CORS、`no-store` 和脱敏 snapshot。该阶段测试使用 Mock client-sync/runtime/helper；后续 M3-D-2 已补 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 真实子进程 E2E；安装器/Windows 服务/MDM/代码签名/升级回滚、真实 Codex 客户端、管理台员工流、真实 OIDC/审批/Secret Broker/KMS、Windows ACL、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成 |
+| M3-D-1 本地 MCP helper/server 核心 | 阶段已实现；后续 M3-D-3 已补齐 stdio bridge、Codex 配置映射、一键配置编排和真实子进程 E2E，当前 local-mcp 60 项测试通过；完整 M3-D 产品集成和生产验收尚未完成 | 既有签名包/原子安装/权限能力/Secret Broker/JSON-RPC/审计/健康核心；新增 `LocalMcpHelper.validateClientResource()`、`reconcile()`、`synchronize()`、`snapshot()`、`listTools()`、`callTool()`；仅使用 client-sync active 资源并重新验签，拒绝 inactive/drift/non-MCP/tampered；回环绑定、peer 复核、Bearer、固定 status/tools/call 路由、256 KiB 默认 body 上限、固定字段、稳定错误码、single-helper 锁、幂等 close、无 CORS、`no-store` 和脱敏 snapshot。该阶段测试使用 Mock client-sync/runtime/helper；后续 M3-D-2/M3-D-3 已补 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 真实子进程 E2E 和受控启动注入；安装器/Windows 服务/MDM/代码签名/升级回滚、真实 Codex 客户端、生产启动器与 token 轮换、管理台员工流、真实 OIDC/审批/Secret Broker/KMS、Windows ACL、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成 |
 | M3-D-2 Agent stdio bridge / Codex 配置映射核心 | 已实现，local-mcp 50 项测试通过，含真实子进程 E2E；产品集成和生产验收尚未完成 | 新增 `LocalMcpBridge`、`LoopbackHelperClient`、`runBridgeStdio()` 和 `magpie-local-mcp-bridge` CLI；只接受 `127.0.0.1`/`::1` HTTP helper，token 仅从环境变量读取，固定 initialize/tools/list/tools/call、请求/响应大小上限、超时和稳定错误码。新增 Codex `config.toml` 受管块映射：支持 `CODEX_HOME`、保留用户其他 MCP 配置、幂等原子替换、BOM/CRLF 保留、默认拒绝漂移、显式 `force` 更新，仅写 token 环境变量名。新增 E2E 覆盖 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 的 initialize/list/call 和审计。真实 Codex 客户端读取 `config.toml`、安装器/Windows 服务/MDM/代码签名/升级回滚、密钥安全注入/轮换、真实 OIDC/审批/Secret Broker/KMS、Windows ACL、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成 |
+| M3-D-3 一键配置编排核心 | 已实现，local-mcp 60 项测试通过，含经过编排入口的真实子进程 E2E；产品安装器和生产验收尚未完成 | 新增 `setupLocalMcpClient()`、`LOCAL_MCP_CLIENT_SETUP_SCHEMA_VERSION=1` 和 `DEFAULT_CLIENT_SETUP_TOKEN_BYTES=32`；串行编排同步、reconcile、快照选包、工具发现、回环 server/probe、Codex 受管配置写入/回读和受控启动器环境注入；强制 `injectLaunchEnvironment`，缺失返回 `token_injection_required`；自动生成的 token 只在冻结环境补丁中，成功对象和配置不含 token；多资源必须显式 `resourceId`；失败清理受管块、server 和 lock；`inspectCodexAgentConfig()` 严格回读受管 node/bridge/URL/resource/token 变量/超时，畸形配置返回 `agent_config_malformed`。真实 Codex 客户端读取配置、生产 launcher/Windows ACL/DPAPI、token 轮换与恢复、安装器/Windows 服务/MDM、管理台员工产品流、真实 OIDC/审批/Secret Broker/KMS、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成 |
 | M4 会话内容审计 | 未实现 | 目前只有请求元数据和用量 |
 | M5 安全运营 | 未实现 | 无 SIEM 告警、阻断和值班闭环 |
 | M6 高可用/规模化 | 未实现 | 当前单实例、JSON 存储 |
@@ -892,9 +899,10 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
    均已覆盖；下一步把同一流程接入真实存储和真实管理请求链路。
 7. C4-02 受控适配器已通过 15 项 Mock/故障测试；C4-03b/C4-03c 的 auth-service 核心链路
    已通过 26 项 auth 回归、109 项 admin 测试、15 项 gateway-control 测试、15 项
-   resource-service 测试、14 项 mcp-gateway 测试、26 项 client-sync 测试和 50 项 local-mcp
-   测试，共 255 项。M3-D-2 的真实子进程 E2E 已覆盖 client-sync、local MCP host、helper
-   HTTP 和 stdio bridge；真实 Codex 客户端、安装器和生产部署仍未验收。下一步在
+   resource-service 测试、14 项 mcp-gateway 测试、26 项 client-sync 测试和 60 项 local-mcp
+   测试，共 265 项。M3-D-3 的真实子进程 E2E 已覆盖一键配置编排、client-sync、local MCP
+   host、helper HTTP、Codex 配置回读、受控环境注入和 stdio bridge；真实 Codex 客户端、
+   安装器和生产部署仍未验收。下一步在
    Docker 可用环境验证镜像、Compose、
    健康检查和真实共享卷故障恢复；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。
 8. M2-C5 的 `audit-logs`、`operations/{id}`、人工对账和补偿后端已通过 Mock/故障测试；
@@ -956,3 +964,4 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 | M3-C-2 只读管理可见性 | `codex/m3-c2-admin-sync-visibility` / `enterprise/admin-service/` | 四条只读资源/同步 API；独立 Bearer 服务令牌、GET-only、禁止重定向、5 秒超时、4 MiB 响应上限；严格字段白名单；资源按 `"*"`/组织范围过滤并裁剪范围外 assignments；同步报告要求设备存在、可见且 `userId` 与设备一致；依赖故障统一 `503 resource_service_unavailable`；管理页只读面板 | `node --test enterprise/admin-service/test/*.test.mjs`；企业全量 Node/Mock 回归 | admin `109 passed, 0 failed`（82 集成 + 7 目录 + 7 渠道 + 7 规则 + 6 SIEM）；企业合计 `203 passed, 0 failed` | 资源发布/回滚 UI、发布/回滚审批联动、M3-B MCP 管理台、本地 helper 产品入口、目标 Agent 文件映射、Windows ACL/MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收未完成 |
 | M3-D-1 受控本地 MCP helper/server 核心（阶段证据） | `codex/m3-d-local-mcp` / `enterprise/local-mcp/`、`enterprise/client-sync/` | 既有 Ed25519 签名包、canonical manifest、原子安装、权限能力策略、Secret Broker、JSON-RPC、审计和健康核心；新增 `ClientSyncEngine.readActiveResource()`；`LocalMcpHelper` 只消费 active `kind: "mcp"` 资源，重新验签并从 manifest 解析包身份，支持同步期安装、reconcile/synchronize/snapshot/listTools/callTool；回环 HTTP server 仅允许 `127.0.0.1`/`::1`，复核 peer，`/healthz` 公开、其余 Bearer，固定 status/tools/call 路由，默认 256 KiB body 上限、字段/URL/token 上限、稳定错误码、文件锁、无 CORS 和 `no-store`，snapshot 脱敏 | `node --test enterprise/client-sync/test/*.test.mjs`；`node --test enterprise/local-mcp/test/*.test.mjs`；既有企业 Node/Mock 回归 | 该阶段 client-sync `26 passed, 0 failed`（18 核心 + 8 传输）；local-mcp `37 passed, 0 failed`（21 运行时 + 7 helper + 9 server）；七套合计 `242 passed, 0 failed`；后续 M3-D-2 将 local-mcp 提升到 50 项、企业合计 255 项 | 该阶段为接口级 Mock/单元测试；后续 M3-D-2 已补 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 真实子进程 E2E。本地 helper 安装器/Windows 服务/MDM/代码签名/升级回滚、真实 Codex 客户端、管理台员工流、真实 OIDC/审批服务/Secret Broker/KMS、Windows ACL、已证明的外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷并发、HA 和生产验收未完成；不得宣称完整 M3-D、产品化或生产可用 |
 | M3-D-2 Agent stdio bridge / Codex 配置映射核心 | `codex/m3-d-local-mcp-agent-bridge` / `enterprise/local-mcp/` | 新增回环 helper stdio bridge、JSON-RPC initialize/tools/list/tools/call、环境变量 token、请求/响应上限、超时和稳定错误码；Codex `config.toml` 受管注释块映射、`CODEX_HOME`、保留用户其他 MCP 配置、幂等原子写入、BOM/CRLF 保留、漂移默认拒绝、显式 `force` 更新，只引用 token 环境变量名；受管标记必须独占整行，异常配置失败关闭；新增真实子进程 E2E | `node --test enterprise/local-mcp/test/e2e.test.mjs`；`node --test enterprise/local-mcp/test/*.test.mjs`；`node --test enterprise/client-sync/test/*.test.mjs`；七套企业回归 | local-mcp `50 passed, 0 failed`（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 1 真实子进程 E2E）；client-sync `26 passed, 0 failed`；七套合计 `255 passed, 0 failed` | 技术 E2E 已覆盖 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge`，但不等于真实 Codex 客户端读取配置；Windows 安装器/服务/MDM/代码签名、密钥安全注入/轮换、真实 OIDC/审批/Secret Broker/KMS、Windows ACL、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成 |
+| M3-D-3 一键配置编排核心 | `codex/m3-d-local-mcp-agent-bridge` / `enterprise/local-mcp/` | 新增 `setupLocalMcpClient()`：synchronize、reconcile、snapshot 选包、listTools、回环 server/probe、Codex 受管配置写入/严格回读和受控启动器环境注入；强制注入器，缺省 token 只在进程内生成并以 base64url 传入冻结环境补丁；成功对象不含 token；多资源要求 `resourceId`；失败阶段化稳定错误码和自动清理；E2E 改为经过编排入口 | `node --test enterprise/local-mcp/test/*.test.mjs`；`node --test enterprise/client-sync/test/*.test.mjs`；七套企业回归 | local-mcp `60 passed, 0 failed`（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 10 client setup + 1 真实子进程 E2E）；client-sync `26 passed, 0 failed`；七套合计 `265 passed, 0 failed` | 技术链路不等于真实 Codex 客户端读取配置；生产 launcher、Windows ACL/DPAPI、token 轮换/恢复、安装器/Windows 服务/MDM、真实 OIDC/审批/Secret Broker/KMS、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成 |
