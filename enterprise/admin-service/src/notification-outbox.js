@@ -105,6 +105,10 @@ function requireSafeEventInput(input) {
   };
 }
 
+export function normalizeNotificationEvent(input) {
+  return requireSafeEventInput(input);
+}
+
 function stableErrorCode(error) {
   const candidate = safeText(error?.code, 80);
   if (STABLE_ERROR_CODES.has(candidate)) return candidate;
@@ -215,6 +219,18 @@ function enqueueWithChannels(data, input, options = {}) {
   return enqueueNotification(data, input, options);
 }
 
+function dispatchEvent(data, input, options = {}) {
+  const normalized = normalizeNotificationEvent(input);
+  if (typeof options.router?.route === "function") {
+    const routed = options.router.route(data, normalized, {
+      channels: options.channels,
+      maxAttempts: options.maxAttempts,
+    });
+    if (routed !== undefined) return routed;
+  }
+  return enqueueWithChannels(data, normalized, options);
+}
+
 export function enqueueApprovalNotification(data, action, approval, options = {}) {
   if (!approval || ![
     "approval.requested",
@@ -246,7 +262,7 @@ export function enqueueApprovalNotification(data, action, approval, options = {}
   const eventKey = String(options.eventKey || "")
     .replace(/[^A-Za-z0-9_-]/g, "")
     .slice(0, 72);
-  return enqueueWithChannels(data, {
+  return dispatchEvent(data, {
     eventId: `evt_${action.replaceAll(".", "_")}_${approval.id}${eventKey ? `_${eventKey}` : ""}`,
     eventType: action,
     severity,
@@ -267,6 +283,7 @@ export function enqueueApprovalNotification(data, action, approval, options = {}
   }, {
     maxAttempts: options.maxAttempts,
     channels: options.channels,
+    router: options.router,
   });
 }
 
@@ -293,7 +310,7 @@ export function enqueueBreakGlassNotification(data, action, grant, options = {})
   const eventId = `evt_${eventType.replaceAll(".", "_")}_${grant.id}`
     + `${eventKey ? `_${eventKey}` : ""}`;
   const severity = ["used", "review_overdue"].includes(action) ? "critical" : "warning";
-  const result = enqueueWithChannels(data, {
+  const result = dispatchEvent(data, {
     eventId,
     eventType,
     severity,
@@ -311,6 +328,7 @@ export function enqueueBreakGlassNotification(data, action, grant, options = {})
   }, {
     maxAttempts: options.maxAttempts,
     channels: options.channels,
+    router: options.router,
   });
   grant.notificationEventIds ||= {};
   const field = BREAK_GLASS_EVENT_KEYS[action];
@@ -330,7 +348,7 @@ export function enqueueOperationNotification(data, operation, options = {}) {
   }
   if (!eventType) return null;
   const eventId = `evt_${eventType.replaceAll(".", "_")}_${operation.id}`;
-  return enqueueWithChannels(data, {
+  return dispatchEvent(data, {
     eventId,
     eventType,
     severity: eventType === "operation.failed" ? "critical" : "warning",
@@ -349,6 +367,7 @@ export function enqueueOperationNotification(data, operation, options = {}) {
   }, {
     maxAttempts: options.maxAttempts,
     channels: options.channels,
+    router: options.router,
   });
 }
 
@@ -577,12 +596,14 @@ export class NotificationOutbox {
     this.maxAttempts = options.maxAttempts || 6;
     this.now = options.now || (() => new Date());
     this.channelProvider = options.channelProvider || null;
+    this.router = options.router || null;
   }
 
   enqueue(data, input) {
-    return enqueueNotification(data, input, {
+    return dispatchEvent(data, input, {
       maxAttempts: this.maxAttempts,
       channels: this.channelProvider ? this.channelProvider(data) : undefined,
+      router: this.router,
     });
   }
 
@@ -591,6 +612,7 @@ export class NotificationOutbox {
       ...options,
       maxAttempts: this.maxAttempts,
       channels: this.channelProvider ? this.channelProvider(data) : undefined,
+      router: this.router,
     });
   }
 
@@ -599,6 +621,7 @@ export class NotificationOutbox {
       ...options,
       maxAttempts: this.maxAttempts,
       channels: this.channelProvider ? this.channelProvider(data) : undefined,
+      router: this.router,
     });
   }
 
@@ -607,6 +630,7 @@ export class NotificationOutbox {
       ...options,
       maxAttempts: this.maxAttempts,
       channels: this.channelProvider ? this.channelProvider(data) : undefined,
+      router: this.router,
     });
   }
 
@@ -614,6 +638,16 @@ export class NotificationOutbox {
     return this.store.mutate((data) => (
       recoverExpiredNotificationLeases(data, { now: this.now() })
     ));
+  }
+
+  async processDueEscalations() {
+    if (!this.router || typeof this.router.processDue !== "function") {
+      return { sent: 0, failed: 0 };
+    }
+    return this.store.mutate((data) => this.router.processDue(data, {
+      channels: this.channelProvider ? this.channelProvider(data) : [],
+      maxAttempts: this.maxAttempts,
+    }));
   }
 }
 

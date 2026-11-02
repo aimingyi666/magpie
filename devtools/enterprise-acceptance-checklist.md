@@ -65,7 +65,7 @@
 | W-01 | 停用/启用员工 | 权限、范围、幂等、理由、CSRF、审计和依赖失败正确 | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
 | W-02 | 吊销设备 | 当前 Key 失效、刷新拒绝、设备和凭证状态正确 | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
 | W-03 | 轮换凭证 | 旧 Key 失效、新 Key 可用、失败无孤儿 Key | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
-| W-04a | 正式模型目录（C4-03a） | 只读 `ADMIN_MODEL_CATALOG_PATH`；`schemaVersion=1`、稳定模型 ID、显式 Provider 通配符、group 只引用已知模型、2 MiB 上限、目录摘要和稳定错误码 | 已实现；7 项专项和 75 项管理集成测试通过；真实 Docker/只读挂载/digest 重启未验收；auth-service 不加载目录，只接收稳定模型 ID |
+| W-04a | 正式模型目录（C4-03a） | 只读 `ADMIN_MODEL_CATALOG_PATH`；`schemaVersion=1`、稳定模型 ID、显式 Provider 通配符、group 只引用已知模型、2 MiB 上限、目录摘要和稳定错误码 | 已实现；7 项专项和 77 项管理集成测试通过；真实 Docker/只读挂载/digest 重启未验收；auth-service 不加载目录，只接收稳定模型 ID |
 | W-04b | 首次策略初始化与 `unknown` 迁移（C4-03b） | 旧 M1 只迁移为 `quotaStatus/modelStatus=unknown`；quota/models 可任意顺序首次提交但不得伪造缺项；缺项返回 `policy_setup_required`；两项完整并逐凭证回读后才 `known` | auth-service 核心已实现，`25/25` 测试通过；管理端已编排额度/模型写入；C4-04 已验证首次设置、真实请求限额/模型拒绝和 refresh/rotate 继承；真实 Compose/共享卷和真实 IdP 尚未验收 |
 | W-04c | 管理 API 与同步后交付（C4-03c） | `PUT quota`/`PATCH models` 具备会话、CSRF、RBAC、范围、理由、版本、payload 指纹和 intent/result 审计；issuance journal -> 签发 -> apply -> 独立回读 -> 原子持久化 -> 才交付；同步前客户端拿不到 Key；任一步失败撤销且启动恢复处理可确认的孤儿 Key | 核心已实现并通过 Mock/故障测试；C4-04 已用隔离真实 Magpie 覆盖 apply/readback、多凭证部分失败和恢复；真实共享卷、真实 IdP 和生产验收未完成 |
 | W-04d | 页面与运营状态（C4-03d） | `unknown/pending/partial_success/dependency_invoked` 显示真实状态、计数、失败凭证和恢复入口；只有 `succeeded + known + synced + 回读一致` 显示“已生效”；禁止自动重试不确定操作 | 部分实现；管理页已有额度/模型写表单、完整证据链和失败证据，员工页已有本人额度/模型/凭证/设备只读门户；基础停用/吊销/轮换、operation/audit 查询和人工对账页面已接入；浏览器 E2E、失败恢复入口、完整运营体验和生产验收未完成 |
@@ -105,8 +105,8 @@ Docker/Compose 构建、启动、健康检查和真实共享卷验证状态
 ```
 
 C4-01 已完成本地单元、CLI 回归和隔离真实二进制冒烟；C4-02 已完成 Node 语法检查和
-15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项；当前管理服务 95/95 通过（75 项管理服务
-集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；真实 Compose、只读挂载和 digest
+15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项；当前管理服务 104/104 通过（77 项管理服务
+集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项）；真实 Compose、只读挂载和 digest
 重启仍未验收。
 C4-03b/C4-03c/C5 核心已通过
 25 项 auth-service 测试；C4-03d 已部分实现管理页额度/模型写表单和员工只读状态门户；
@@ -122,8 +122,8 @@ allowlist、DNS 固定解析以及私网/云元数据/重定向防护。频道�
 delivery；邮件、IM 和工单是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/
 ServiceNow/Jira SDK。NOTIFY-01c 的 SIEM transport、固定 L0 schema 和 dead-letters API
 已实现并通过 6 项专项测试；APR-01e break-glass 的 15 分钟单次授权、24 小时复核、提醒、
-通知、审计、API 和管理页已实现 Mock/集成核心；NOTIFY-01d 的规则/抑制、聚合、升级和
-运营页未实现。真实 SIEM/Collector/Syslog/生产证书、真实厂商网关、证书、租户配置和投递
+通知、审计、API 和管理页已实现 Mock/集成核心；NOTIFY-01d 的规则/抑制、聚合、升级、
+受审计重放和运营页已实现并通过 Mock/集成测试。真实 SIEM/Collector/Syslog/生产证书、真实厂商网关、证书、租户配置和投递
 未验收。页面 E2E、恢复入口、真实共享卷、真实企业 IdP/MFA、反向代理、C5 和 M2-D 生产
 验收、真实 OA 连接器、break-glass 生产告警/工单与 24 小时复核演练，以及失败恢复与完整
 运营体验仍未完成/验收。
@@ -178,7 +178,7 @@ v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPo
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 95/95 已覆盖 |
+| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 104/104 已覆盖 |
 | R-02 | 用量归属 | `callerKeyId -> credential -> user -> 组织` 正确 | Mock 已覆盖；真实 usage 卷未验收 |
 | R-03 | 时间序列 | `groupBy=user/department/model/agent`，`bucket=hour/day` | Mock 已覆盖 |
 | R-04 | 数据损坏 | 缺失、尾半行、坏 JSON、超行/超字段/超记录返回稳定存储错误 | Mock 已覆盖 |
@@ -195,7 +195,7 @@ v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPo
 支持邮件/IM/Webhook/工单网关契约、HMAC Webhook 和防 SSRF；NOTIFY-01c 的 SIEM transport、
 固定 L0 schema 和 dead-letters API 已实现并通过 6 项专项测试。APR-01e break-glass 的
 15 分钟单次授权、24 小时复核、提醒、通知、审计、API 和管理页已实现 Mock/集成核心；
-NOTIFY-01d 的规则/抑制、聚合、升级和运营页尚未实现。真实 OA/IdP/MFA/反向代理、
+NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和运营页已实现并通过 Mock/集成测试。真实 OA/IdP/MFA/反向代理、
 break-glass 生产告警/工单与 24 小时复核演练、真实 SIEM/Collector/Syslog/生产证书、
 真实厂商网关和真实通知投递尚未验收。Mock、页面截图或存在
 `approvalId` 字段本身都不算生产验收通过；审批生产验收
@@ -229,14 +229,14 @@ break-glass 生产告警/工单与 24 小时复核演练、真实 SIEM/Collector
 | NT-02 | 请求解耦 | 业务响应不等待 SMTP、IM、Webhook、SIEM 或工单；渠道超时不改变已提交业务结果 | 01a/01b/01c transport 和 Mock/故障测试满足；生产渠道未验收 |
 | NT-03 | 重启恢复 | 在 pending/leased/delivering/retry_wait 各状态强制重启 dispatcher，事件恢复且不丢失；租约超时可回收 | 01a 核心已实现并有重启式存储测试；生产部署未验收 |
 | NT-04 | 重试与幂等 | 超时、5xx、限流和网络错误按指数退避重试；同一 `eventId` 重复投递可被接收端去重，不产生重复工单或重复告警 | 01a/01b 按 `eventId + channelId` 去重及重试核心已实现；真实接收端未验收 |
-| NT-05 | 死信与人工重放 | 永久失败进入 dead_letter 并可查询；有权限管理员在理由和审计下重放，重放生成新 attempt，不修改原始证据 | 01a 已实现重放，01c 已提供按组织范围过滤且 critical 优先的 dead-letters API；无运营 UI 和真实渠道验收 |
+| NT-05 | 死信与人工重放 | 永久失败进入 dead_letter 并可查询；有权限管理员在理由和审计下重放，重放生成新 attempt，不修改原始证据 | 01a 已实现重放，01c 已提供按组织范围过滤且 critical 优先的 dead-letters API，01d 已提供受审计幂等重放运营页；真实渠道和生产值班未验收 |
 | NT-06 | 邮件与企业 IM | SMTP/Graph/邮件网关和飞书/Teams/Slack 机器人可配置、可测试；收件人域、附件、超时和消息大小限制生效，Secret 不落页面或日志 | 01b 提供邮件/IM 的 HTTPS 网关契约、渠道测试、收件人域限制和 `secretRef`；不是原生 SMTP/Graph/飞书/Teams SDK，真实网关和投递未验收 |
 | NT-07 | 通用 Webhook | 仅 HTTPS + 允许列表；HMAC 时间戳/nonce 签名可由接收端验证；超时、响应体上限和重试符合契约 | 01b 已实现并通过 Mock/故障测试；真实接收端未验收 |
 | NT-08 | Webhook 防 SSRF | 拒绝私网、回环、链路本地、云元数据和不允许的端口；重定向逐跳重新校验；DNS rebinding 和 TOCTOU 测试不能访问内网 | 01b 已实现 HTTPS:443、host allowlist、DNS 固定解析、私网/回环/链路本地/云元数据拒绝和 307/308 逐跳校验；真实网络环境未验收 |
 | NT-09 | SIEM 投递 | OTel/Syslog/HTTP Collector 使用固定 schema；严重安全事件 5 分钟内进入测试索引，字段、严重级别和 `eventId` 可核对 | 01c transport 已实现并通过 Mock/故障测试：HTTPS:443/TLS:6514、固定 DNS/SSRF 防护、固定 L0 schema、32 KiB 默认上限、critical 优先和 5 分钟轮询上限；真实 SIEM/Collector/Syslog/生产证书未验收 |
 | NT-10 | 工单联动 | ServiceNow/Jira/飞书工单可创建并保存外部工单 ID；创建失败重试、死信和人工补单，不伪造“已建单” | 01b 提供通用 HTTPS 工单网关契约并以 `deliveryId` 作外部引用，失败进入 outbox 重试/死信；非原生 ServiceNow/Jira/飞书 SDK，真实工单项目和外工单 ID 回读未验收 |
-| NT-11 | 抑制、聚合与证据 | 规则可聚合并抑制重复外部打扰，但原始安全事件不丢弃；抑制范围、原因、到期和恢复均可见审计 | 未实现 |
-| NT-12 | 脱敏与运营查询 | 响应、存储、日志、审计、outbox、Webhook 和 SIEM 全链路扫描不含 Gateway Key、token hash、Cookie、OIDC/服务 token、Prompt/回复正文和完整工具参数；失败、重试、抑制和死信可授权查询 | 01a/01b 的 deliveries、渠道投影、存储脱敏和死信重放已覆盖；01c 的 SIEM 固定 L0 schema 和 dead-letters API 已覆盖元数据查询，但不发送正文/秘密；抑制规则和完整运营页未实现 |
+| NT-11 | 抑制、聚合与证据 | 规则可聚合并抑制重复外部打扰，但原始安全事件不丢弃；抑制范围、原因、到期和恢复均可见审计 | 01d 已实现规则匹配、抑制窗口、聚合维度/窗口、阈值/延迟升级、aggregates/suppressions/escalations 查询和审计；原始事件保留在 outbox/delivery 证据中；真实值班策略未验收 |
+| NT-12 | 脱敏与运营查询 | 响应、存储、日志、审计、outbox、Webhook 和 SIEM 全链路扫描不含 Gateway Key、token hash、Cookie、OIDC/服务 token、Prompt/回复正文和完整工具参数；失败、重试、抑制和死信可授权查询 | 01a/01b 的 deliveries、渠道投影、存储脱敏和死信重放已覆盖；01c 的 SIEM 固定 L0 schema 和 dead-letters API 已覆盖元数据查询；01d 已提供规则/抑制/聚合/升级查询和完整运营页。真实厂商、SIEM、浏览器 E2E 和生产值班未验收 |
 
 每条审批/通知验收还必须保留以下串联证据：
 

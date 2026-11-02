@@ -6,6 +6,9 @@ let selectedBreakGlassId = "";
 let selectedOperationId = "";
 let operationCursor = "";
 let auditCursor = "";
+let selectedNotificationChannel = null;
+let selectedNotificationRule = null;
+let selectedNotificationDeliveryId = "";
 
 class ApiError extends Error {
   constructor(payload, status) {
@@ -1084,6 +1087,660 @@ async function loadAuditLogs(cursor = "") {
   }
 }
 
+function splitList(value) {
+  return String(value || "")
+    .split(/[\n,]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function notificationTestLabel(test) {
+  if (!test) return "Not tested";
+  return `${test.status || "unknown"} · ${test.resultCode || "no_result_code"}`;
+}
+
+function updateNotificationChannelOptions(channels) {
+  const selects = [
+    field(document.querySelector("#notification-rule-form"), "channelId"),
+    field(document.querySelector("#notification-rule-form"), "escalationChannelId"),
+  ].filter(Boolean);
+  for (const select of selects) {
+    const previous = select.value;
+    clear(select);
+    const blank = node("option", select.name === "channelId" ? "Select a channel" : "None");
+    blank.value = "";
+    select.append(blank);
+    for (const channel of channels) {
+      const option = node(
+        "option",
+        `${channel.name} (${channel.type}/${channel.provider})${channel.enabled ? "" : " · disabled"}`,
+      );
+      option.value = channel.channelId;
+      select.append(option);
+    }
+    if (previous && !channels.some((channel) => channel.channelId === previous)) {
+      const stale = node("option", `${previous} (unavailable)`);
+      stale.value = previous;
+      select.append(stale);
+    }
+    if (previous) select.value = previous;
+  }
+  if (selectedNotificationRule) {
+    const form = document.querySelector("#notification-rule-form");
+    const primary = field(form, "channelId");
+    const escalation = field(form, "escalationChannelId");
+    if (primary) primary.value = selectedNotificationRule.channelId || "";
+    if (escalation) escalation.value = selectedNotificationRule.escalation?.channelId || "";
+  }
+}
+
+function selectNotificationChannel(channel) {
+  const form = document.querySelector("#notification-channel-form");
+  if (!form || !channel) return;
+  selectedNotificationChannel = channel;
+  const values = {
+    channelId: channel.channelId,
+    name: channel.name,
+    type: channel.type,
+    provider: channel.provider,
+    enabled: channel.enabled ? "true" : "false",
+    eventTypes: (channel.eventTypes || []).join("\n"),
+    secretRef: channel.secretRef || "",
+    config: JSON.stringify(channel.config || {}, null, 2),
+    reason: "",
+  };
+  for (const [name, value] of Object.entries(values)) {
+    const input = field(form, name);
+    if (input) input.value = value;
+  }
+  const selection = document.querySelector("#notification-channel-selection");
+  if (selection) {
+    selection.textContent = `${channel.channelId} · ${channel.name} · `
+      + `${channel.enabled ? "enabled" : "disabled"} · secret reference configured: `
+      + `${channel.secretConfigured ? "yes" : "no"}`;
+  }
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function resetNotificationChannel() {
+  selectedNotificationChannel = null;
+  const form = document.querySelector("#notification-channel-form");
+  if (!form) return;
+  form.reset();
+  const channelId = field(form, "channelId");
+  if (channelId) channelId.value = "";
+  const config = field(form, "config");
+  if (config) config.value = "{}";
+  const selection = document.querySelector("#notification-channel-selection");
+  if (selection) selection.textContent = "New channel.";
+}
+
+function renderNotificationChannels(channels) {
+  updateNotificationChannelOptions(channels);
+  const target = document.querySelector("#notification-channel-list");
+  if (!target) return;
+  clear(target);
+  if (channels.length === 0) {
+    target.append(node("p", "No notification channels are registered."));
+    return;
+  }
+  const canWrite = Boolean(document.querySelector("#notification-channel-form"));
+  target.append(dataTable(
+    ["Name", "Type", "Provider", "Enabled", "Events", "Secret reference", "Last test", "Updated"],
+    channels.map((channel) => [
+      channel.name,
+      channel.type,
+      channel.provider,
+      channel.enabled ? "enabled" : "disabled",
+      (channel.eventTypes || []).join(", ") || "all allowed events",
+      channel.secretRef
+        ? `${channel.secretRef} (${channel.secretConfigured ? "configured" : "missing"})`
+        : "not used",
+      notificationTestLabel(channel.lastTest),
+      channel.updatedAt,
+    ]),
+    canWrite
+      ? channels.map((channel) => ({
+        label: "Edit",
+        run: () => selectNotificationChannel(channel),
+      }))
+      : [],
+  ));
+  if (selectedNotificationChannel) {
+    const refreshed = channels.find(
+      (channel) => channel.channelId === selectedNotificationChannel.channelId,
+    );
+    if (refreshed) selectNotificationChannel(refreshed);
+  }
+}
+
+async function loadNotificationChannels() {
+  const form = document.querySelector("#notification-channel-filter");
+  if (!form) return;
+  setResult(form, "Loading notification channels.", "pending");
+  try {
+    const payload = await api("/api/v1/admin/notifications/channels");
+    const channels = payload.channels || [];
+    renderNotificationChannels(channels);
+    setResult(form, `${channels.length} notification channel(s) loaded.`, "result");
+  } catch (error) {
+    const target = document.querySelector("#notification-channel-list");
+    if (target) {
+      clear(target);
+      target.append(node(
+        "p",
+        error.code === "notification_channels_unavailable"
+          ? "Notification channel delivery is unavailable because ADMIN_NOTIFICATION_CHANNELS_ENABLED is off or transport configuration is incomplete."
+          : `Notification channels could not be loaded: ${error.message}`,
+        "notice",
+      ));
+    }
+    showError(form, error);
+  }
+}
+
+function notificationChannelBody(form) {
+  const type = fieldValue(form, "type");
+  const provider = fieldValue(form, "provider");
+  const eventTypes = splitList(fieldValue(form, "eventTypes"));
+  const secretRef = fieldValue(form, "secretRef");
+  const config = jsonObject(fieldValue(form, "config") || "{}", "Channel configuration");
+  const body = {
+    name: fieldValue(form, "name"),
+    type,
+    provider,
+    enabled: fieldValue(form, "enabled") === "true",
+    eventTypes,
+    config,
+  };
+  if (secretRef) body.secretRef = secretRef;
+  return body;
+}
+
+async function saveNotificationChannel(form) {
+  let body;
+  try {
+    body = notificationChannelBody(form);
+  } catch (error) {
+    setResult(form, error.message, "error");
+    return;
+  }
+  const channelId = fieldValue(form, "channelId");
+  const key = idempotencyKey();
+  setBusy(form, true);
+  setResult(form, `Saving notification channel with Idempotency-Key ${key}.`, "pending");
+  try {
+    const payload = await api(
+      channelId
+        ? `/api/v1/admin/notifications/channels/${encodeURIComponent(channelId)}`
+        : "/api/v1/admin/notifications/channels",
+      {
+        method: channelId ? "PATCH" : "POST",
+        body: { ...body, reason: fieldValue(form, "reason") },
+        idempotencyKey: key,
+      },
+    );
+    selectNotificationChannel(payload.channel || {});
+    setResult(
+      form,
+      `Notification channel ${payload.channel?.channelId || channelId || "created"} saved. `
+        + "Only the secret reference is stored; the secret value is resolved by the deployment.",
+      "result",
+    );
+    await loadNotificationChannels();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function testSelectedNotificationChannel() {
+  const form = document.querySelector("#notification-channel-form");
+  if (!form || !selectedNotificationChannel) {
+    if (form) setResult(form, "Select a saved notification channel first.", "error");
+    return;
+  }
+  const key = idempotencyKey();
+  setBusy(form, true);
+  setResult(form, `Testing notification channel with Idempotency-Key ${key}.`, "pending");
+  try {
+    const payload = await api(
+      `/api/v1/admin/notifications/channels/${encodeURIComponent(
+        selectedNotificationChannel.channelId,
+      )}/test`,
+      {
+        method: "POST",
+        body: { reason: fieldValue(form, "reason") },
+        idempotencyKey: key,
+      },
+    );
+    const test = payload.test || {};
+    setResult(
+      form,
+      `Channel test ${test.status || "finished"} with ${test.resultCode || "no_result_code"}.`,
+      test.status === "succeeded" ? "result" : "error",
+    );
+    await loadNotificationChannels();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function toggleSelectedNotificationChannel() {
+  const form = document.querySelector("#notification-channel-form");
+  if (!form || !selectedNotificationChannel) {
+    if (form) setResult(form, "Select a saved notification channel first.", "error");
+    return;
+  }
+  const key = idempotencyKey();
+  setBusy(form, true);
+  try {
+    const payload = await api(
+      `/api/v1/admin/notifications/channels/${encodeURIComponent(
+        selectedNotificationChannel.channelId,
+      )}`,
+      {
+        method: "PATCH",
+        body: {
+          enabled: !selectedNotificationChannel.enabled,
+          reason: fieldValue(form, "reason"),
+        },
+        idempotencyKey: key,
+      },
+    );
+    selectNotificationChannel(payload.channel || {});
+    setResult(
+      form,
+      `Notification channel ${payload.channel?.enabled ? "enabled" : "disabled"}.`,
+      "result",
+    );
+    await loadNotificationChannels();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+function notificationRuleBody(form) {
+  const dimensions = splitList(fieldValue(form, "aggregationDimensions"));
+  return {
+    name: fieldValue(form, "name"),
+    enabled: fieldValue(form, "enabled") === "true",
+    priority: Number(fieldValue(form, "priority")),
+    eventTypes: splitList(fieldValue(form, "eventTypes")),
+    severities: splitList(fieldValue(form, "severities")),
+    targetOrgUnitId: fieldValue(form, "targetOrgUnitId"),
+    channelId: fieldValue(form, "channelId"),
+    suppressionWindowSeconds: Number(fieldValue(form, "suppressionWindowSeconds") || 0),
+    aggregation: {
+      enabled: fieldValue(form, "aggregationEnabled") === "true",
+      dimensions: dimensions.length > 0
+        ? dimensions
+        : ["eventType", "targetType", "targetId", "targetOrgUnitId"],
+      windowSeconds: Number(fieldValue(form, "aggregationWindowSeconds") || 300),
+    },
+    escalation: {
+      enabled: fieldValue(form, "escalationEnabled") === "true",
+      thresholdCount: Number(fieldValue(form, "escalationThresholdCount") || 0),
+      delaySeconds: Number(fieldValue(form, "escalationDelaySeconds") || 0),
+      channelId: fieldValue(form, "escalationChannelId"),
+    },
+  };
+}
+
+function selectNotificationRule(rule) {
+  const form = document.querySelector("#notification-rule-form");
+  if (!form || !rule) return;
+  selectedNotificationRule = rule;
+  const values = {
+    ruleId: rule.ruleId,
+    expectedUpdatedAt: rule.updatedAt || "",
+    name: rule.name,
+    enabled: rule.enabled ? "true" : "false",
+    priority: String(rule.priority ?? 100),
+    eventTypes: (rule.eventTypes || []).join("\n"),
+    severities: (rule.severities || []).join("\n"),
+    targetOrgUnitId: rule.targetOrgUnitId || "",
+    channelId: rule.channelId || "",
+    suppressionWindowSeconds: String(rule.suppressionWindowSeconds || 0),
+    aggregationEnabled: rule.aggregation?.enabled ? "true" : "false",
+    aggregationDimensions: (rule.aggregation?.dimensions || []).join("\n"),
+    aggregationWindowSeconds: String(rule.aggregation?.windowSeconds ?? 300),
+    escalationEnabled: rule.escalation?.enabled ? "true" : "false",
+    escalationThresholdCount: String(rule.escalation?.thresholdCount || 0),
+    escalationDelaySeconds: String(rule.escalation?.delaySeconds || 0),
+    escalationChannelId: rule.escalation?.channelId || "",
+    reason: "",
+  };
+  for (const [name, value] of Object.entries(values)) {
+    const input = field(form, name);
+    if (input) input.value = value;
+  }
+  const selection = document.querySelector("#notification-rule-selection");
+  if (selection) {
+    selection.textContent = `${rule.ruleId} · ${rule.name} · priority ${rule.priority} · `
+      + `${rule.enabled ? "enabled" : "disabled"}`;
+  }
+  form.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function resetNotificationRule() {
+  selectedNotificationRule = null;
+  const form = document.querySelector("#notification-rule-form");
+  if (!form) return;
+  form.reset();
+  for (const [name, value] of [
+    ["ruleId", ""],
+    ["expectedUpdatedAt", ""],
+    ["priority", "100"],
+    ["suppressionWindowSeconds", "0"],
+    ["aggregationWindowSeconds", "300"],
+    ["escalationThresholdCount", "0"],
+    ["escalationDelaySeconds", "0"],
+    ["aggregationDimensions", "eventType\ntargetType\ntargetId\ntargetOrgUnitId"],
+  ]) {
+    const input = field(form, name);
+    if (input) input.value = value;
+  }
+  const selection = document.querySelector("#notification-rule-selection");
+  if (selection) selection.textContent = "New rule.";
+}
+
+function renderNotificationRules(rules) {
+  const target = document.querySelector("#notification-rule-list");
+  if (!target) return;
+  clear(target);
+  if (rules.length === 0) {
+    target.append(node("p", "No notification rules are registered."));
+    return;
+  }
+  const canWrite = Boolean(document.querySelector("#notification-rule-form"));
+  target.append(dataTable(
+    ["Name", "Priority", "Enabled", "Events", "Severities", "Organization", "Channel", "Suppress", "Aggregation", "Escalation", "Updated"],
+    rules.map((rule) => [
+      rule.name,
+      rule.priority,
+      rule.enabled ? "enabled" : "disabled",
+      (rule.eventTypes || []).join(", ") || "all allowed events",
+      (rule.severities || []).join(", ") || "all severities",
+      rule.targetOrgUnitId || "all organizations",
+      rule.channelId,
+      `${rule.suppressionWindowSeconds || 0}s`,
+      rule.aggregation?.enabled
+        ? `${rule.aggregation.windowSeconds}s · ${(rule.aggregation.dimensions || []).join(", ")}`
+        : "disabled",
+      rule.escalation?.enabled
+        ? `${rule.escalation.thresholdCount || 0} events / ${rule.escalation.delaySeconds || 0}s`
+        : "disabled",
+      rule.updatedAt,
+    ]),
+    canWrite
+      ? rules.map((rule) => ({
+        label: "Edit",
+        run: () => selectNotificationRule(rule),
+      }))
+      : [],
+  ));
+  if (selectedNotificationRule) {
+    const refreshed = rules.find(
+      (rule) => rule.ruleId === selectedNotificationRule.ruleId,
+    );
+    if (refreshed) selectNotificationRule(refreshed);
+  }
+}
+
+async function loadNotificationRules() {
+  const form = document.querySelector("#notification-rule-filter");
+  if (!form) return;
+  setResult(form, "Loading notification rules.", "pending");
+  try {
+    const payload = await api("/api/v1/admin/notifications/rules");
+    const rules = payload.rules || [];
+    renderNotificationRules(rules);
+    setResult(form, `${rules.length} notification rule(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
+async function saveNotificationRule(form) {
+  let body;
+  try {
+    body = notificationRuleBody(form);
+  } catch (error) {
+    setResult(form, error.message, "error");
+    return;
+  }
+  const ruleId = fieldValue(form, "ruleId");
+  const expectedUpdatedAt = fieldValue(form, "expectedUpdatedAt");
+  const key = idempotencyKey();
+  setBusy(form, true);
+  setResult(form, `Saving notification rule with Idempotency-Key ${key}.`, "pending");
+  try {
+    const payload = await api(
+      ruleId
+        ? `/api/v1/admin/notifications/rules/${encodeURIComponent(ruleId)}`
+        : "/api/v1/admin/notifications/rules",
+      {
+        method: ruleId ? "PATCH" : "POST",
+        body: {
+          ...body,
+          reason: fieldValue(form, "reason"),
+          ...(ruleId ? { expectedUpdatedAt } : {}),
+        },
+        idempotencyKey: key,
+      },
+    );
+    selectNotificationRule(payload.rule || {});
+    setResult(
+      form,
+      `Notification rule ${payload.rule?.ruleId || ruleId || "created"} saved.`,
+      "result",
+    );
+    await loadNotificationRules();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+function renderNotificationDeliveries(records, selector, canReplay = false) {
+  const target = document.querySelector(selector);
+  if (!target) return;
+  clear(target);
+  if (records.length === 0) {
+    target.append(node("p", "No notification deliveries matched these filters."));
+    return;
+  }
+  target.append(dataTable(
+    ["Created", "Status", "Severity", "Event", "Channel", "Attempts", "Last error", "Target", "Summary"],
+    records.map((delivery) => [
+      delivery.createdAt,
+      delivery.status,
+      delivery.severity,
+      delivery.eventType,
+      delivery.channelId || "default route",
+      delivery.attemptCount,
+      delivery.lastErrorCode,
+      delivery.targetOrgUnitId || delivery.targetId || "",
+      delivery.summary,
+    ]),
+    canReplay
+      ? records.map((delivery) => ({
+        label: "Replay",
+        run: () => {
+          selectedNotificationDeliveryId = delivery.deliveryId;
+          const selection = document.querySelector("#notification-replay-selection");
+          if (selection) {
+            selection.textContent = `${delivery.deliveryId} · ${delivery.eventType} · `
+              + `${delivery.severity}`;
+          }
+          const form = document.querySelector("#notification-replay-form");
+          form?.scrollIntoView({ behavior: "smooth", block: "center" });
+          field(form, "reason")?.focus();
+        },
+      }))
+      : [],
+  ));
+}
+
+async function loadNotificationDeliveries() {
+  const form = document.querySelector("#notification-delivery-filter");
+  if (!form) return;
+  const params = queryFromForm(form);
+  setResult(form, "Loading notification deliveries.", "pending");
+  try {
+    const payload = await api(`/api/v1/admin/notifications/deliveries?${params}`);
+    renderNotificationDeliveries(payload.deliveries || [], "#notification-delivery-list");
+    setResult(form, `${(payload.deliveries || []).length} delivery record(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
+async function loadNotificationDeadLetters() {
+  const form = document.querySelector("#notification-dead-letter-filter");
+  if (!form) return;
+  const params = queryFromForm(form);
+  setResult(form, "Loading notification dead letters.", "pending");
+  try {
+    const payload = await api(`/api/v1/admin/notifications/dead-letters?${params}`);
+    const deadLetters = payload.deadLetters || [];
+    const summary = document.querySelector("#notification-dead-letter-summary");
+    if (summary) {
+      summary.textContent = `${payload.count || 0} dead letter(s); `
+        + `${payload.criticalCount || 0} critical; oldest ${payload.oldestCreatedAt || "none"}; `
+        + `critical visibility target ${payload.visibilityTargetSeconds || 0}s.`;
+    }
+    renderNotificationDeliveries(
+      deadLetters,
+      "#notification-dead-letter-list",
+      Boolean(document.querySelector("#notification-replay-form")),
+    );
+    setResult(form, `${deadLetters.length} dead letter(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
+async function replaySelectedNotificationDelivery(form) {
+  if (!selectedNotificationDeliveryId) {
+    setResult(form, "Select a dead-letter delivery first.", "error");
+    return;
+  }
+  const key = idempotencyKey();
+  setBusy(form, true);
+  try {
+    const payload = await api(
+      `/api/v1/admin/notifications/deliveries/${encodeURIComponent(
+        selectedNotificationDeliveryId,
+      )}/retry`,
+      {
+        method: "POST",
+        body: { reason: fieldValue(form, "reason") },
+        idempotencyKey: key,
+      },
+    );
+    setResult(
+      form,
+      `Delivery ${payload.delivery?.deliveryId || selectedNotificationDeliveryId} `
+        + `${payload.replayed ? "requeued" : "was already requeued by this key"}.`,
+      "result",
+    );
+    selectedNotificationDeliveryId = "";
+    await loadNotificationDeadLetters();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+function renderNotificationTimeline(records, selector, headers, mapRow, emptyText) {
+  const target = document.querySelector(selector);
+  if (!target) return;
+  clear(target);
+  if (records.length === 0) {
+    target.append(node("p", emptyText));
+    return;
+  }
+  target.append(dataTable(headers, records.map(mapRow)));
+}
+
+async function loadNotificationOperations() {
+  const form = document.querySelector("#notification-operations-filter");
+  if (!form) return;
+  const params = queryFromForm(form);
+  setResult(form, "Loading notification aggregation and escalation state.", "pending");
+  try {
+    const [aggregates, suppressions, escalations] = await Promise.all([
+      api(`/api/v1/admin/notifications/aggregates?${params}`),
+      api(`/api/v1/admin/notifications/suppressions?${params}`),
+      api(`/api/v1/admin/notifications/escalations?${params}`),
+    ]);
+    renderNotificationTimeline(
+      aggregates.aggregates || [],
+      "#notification-aggregate-list",
+      ["Updated", "Event", "Severity", "Count", "Window ends", "Status", "Escalation", "Organization"],
+      (aggregate) => [
+        aggregate.updatedAt,
+        aggregate.eventType,
+        aggregate.severity,
+        aggregate.count,
+        aggregate.windowEndsAt,
+        aggregate.status,
+        `${aggregate.escalationStatus || "not_configured"}`
+          + `${aggregate.escalationErrorCode ? ` · ${aggregate.escalationErrorCode}` : ""}`,
+        aggregate.targetOrgUnitId || "global",
+      ],
+      "No notification aggregates are currently recorded.",
+    );
+    renderNotificationTimeline(
+      suppressions.suppressions || [],
+      "#notification-suppression-list",
+      ["Updated", "Rule", "Count", "Window ends", "Organization"],
+      (suppression) => [
+        suppression.updatedAt,
+        suppression.ruleId,
+        suppression.count,
+        suppression.windowEndsAt,
+        suppression.targetOrgUnitId || "global",
+      ],
+      "No notification suppressions are currently active in the returned window.",
+    );
+    renderNotificationTimeline(
+      escalations.escalations || [],
+      "#notification-escalation-list",
+      ["Created", "Trigger", "Status", "Count", "Rule", "Channel", "Error", "Organization"],
+      (escalation) => [
+        escalation.createdAt,
+        escalation.trigger,
+        escalation.status,
+        escalation.count,
+        escalation.ruleId,
+        escalation.channelId,
+        escalation.errorCode,
+        escalation.targetOrgUnitId || "global",
+      ],
+      "No notification escalations are currently recorded.",
+    );
+    setResult(
+      form,
+      `${(aggregates.aggregates || []).length} aggregate(s), `
+        + `${(suppressions.suppressions || []).length} suppression(s), `
+        + `${(escalations.escalations || []).length} escalation(s) loaded.`,
+      "result",
+    );
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
 document.addEventListener("click", (event) => {
   const button = event.target.closest?.(".row-action[data-write-action]");
   if (!button) return;
@@ -1113,7 +1770,11 @@ document.addEventListener("submit", async (event) => {
     + "#approval-decision-form, #approval-revoke-form, #approval-withdraw-form, "
     + "#approval-transfer-form, #break-glass-request-form, #break-glass-filter, "
     + "#break-glass-review-form, #export-form, "
-    + "#operation-write-form, #operation-filter, #reconcile-form, #audit-filter",
+    + "#operation-write-form, #operation-filter, #reconcile-form, #audit-filter, "
+    + "#notification-channel-form, #notification-channel-filter, "
+    + "#notification-delivery-filter, #notification-dead-letter-filter, "
+    + "#notification-replay-form, #notification-rule-form, "
+    + "#notification-rule-filter, #notification-operations-filter",
   );
   if (!known) return;
   event.preventDefault();
@@ -1151,6 +1812,22 @@ document.addEventListener("submit", async (event) => {
   } else if (form.id === "audit-filter") {
     auditCursor = "";
     await loadAuditLogs();
+  } else if (form.id === "notification-channel-form") {
+    await saveNotificationChannel(form);
+  } else if (form.id === "notification-channel-filter") {
+    await loadNotificationChannels();
+  } else if (form.id === "notification-delivery-filter") {
+    await loadNotificationDeliveries();
+  } else if (form.id === "notification-dead-letter-filter") {
+    await loadNotificationDeadLetters();
+  } else if (form.id === "notification-replay-form") {
+    await replaySelectedNotificationDelivery(form);
+  } else if (form.id === "notification-rule-form") {
+    await saveNotificationRule(form);
+  } else if (form.id === "notification-rule-filter") {
+    await loadNotificationRules();
+  } else if (form.id === "notification-operations-filter") {
+    await loadNotificationOperations();
   }
 });
 
@@ -1167,8 +1844,29 @@ document.querySelector("#audit-next")?.addEventListener("click", () => {
   if (auditCursor) loadAuditLogs(auditCursor);
 });
 
+document.querySelector("#notification-channel-test")?.addEventListener("click", () => {
+  testSelectedNotificationChannel();
+});
+
+document.querySelector("#notification-channel-toggle")?.addEventListener("click", () => {
+  toggleSelectedNotificationChannel();
+});
+
+document.querySelector("#notification-channel-reset")?.addEventListener("click", () => {
+  resetNotificationChannel();
+});
+
+document.querySelector("#notification-rule-reset")?.addEventListener("click", () => {
+  resetNotificationRule();
+});
+
 document.querySelector("#usage-filter")?.requestSubmit();
 document.querySelector("#approval-filter")?.requestSubmit();
 document.querySelector("#break-glass-filter")?.requestSubmit();
 document.querySelector("#operation-filter")?.requestSubmit();
 document.querySelector("#audit-filter")?.requestSubmit();
+document.querySelector("#notification-channel-filter")?.requestSubmit();
+document.querySelector("#notification-delivery-filter")?.requestSubmit();
+document.querySelector("#notification-dead-letter-filter")?.requestSubmit();
+document.querySelector("#notification-rule-filter")?.requestSubmit();
+document.querySelector("#notification-operations-filter")?.requestSubmit();

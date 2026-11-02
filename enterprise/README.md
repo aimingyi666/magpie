@@ -30,8 +30,8 @@ OIDC step-up、APR-01d 的审批箱/串并行步骤/quorum/转交/撤回、APR-0
 管理额度/模型 API、持久化幂等、管理审计、审批申请/决策/撤销、审批一次性消费、
 schema v1 的网关策略机器回读/原子写入、受控 `gateway-control` 适配器、正式只读模型目录，
 以及 auth-service 的用户级策略状态机。`gateway-control` 已通过 15 项 Mock/故障测试；
-auth-service 已通过 25 项测试；admin-service 已通过 95 项测试（75 项管理服务集成测试 +
-7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项），当前合计 135 项通过、0 失败。
+auth-service 已通过 25 项测试；admin-service 已通过 104 项测试（77 项管理服务集成测试 +
+7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），当前合计 144 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -49,8 +49,9 @@ NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `ema
 APR-01c、NOTIFY-01a、NOTIFY-01b 和 NOTIFY-01c 后端已实现，但真实渠道环境未验收。APR-01b
 当前是 HMAC 回调适配器，真实飞书/OA/ServiceNow/Jira 适配和故障演练未验证；NOTIFY-01b
 是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/Slack/ServiceNow/Jira SDK，真实
-证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收，
-NOTIFY-01d 的规则/抑制、聚合、升级和通知运营页以及 M3-M6 仍未实现；M2-D 核心已实现，
+证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收。
+NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页已实现并通过 Mock/集成测试；
+M3-M6 仍未实现；M2-D 核心已实现，
 生产验收未完成。当前不是生产就绪版本。
 
 ## M2-C4 目标边界（C4-01/C4-02/C4-03a/C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C4-04 完整策略流 E2E 已通过）
@@ -156,8 +157,9 @@ outbox、租约、幂等、退避、死信、重启恢复、deliveries 查询和
 L0 schema 和 dead-letters API 也已实现。APR-01d 已交付：内置审批箱、串行/并行步骤、
 显式 `stepId`、quorum、转交和申请人撤回已接入管理页。APR-01e 的 15 分钟单次
 break-glass、强制 step-up、24 小时事后复核、RBAC、告警事件、审计、API 和管理页已完成
+Mock/集成核心。NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页也已完成
 Mock/集成核心。仍未验收的是真实 OA/厂商连接器、真实 IdP/MFA、SIEM/告警、浏览器 E2E、
-NOTIFY-01d 的规则/抑制、聚合、升级和运营页，以及真实生产复核演练。不能把 Mock/API
+真实生产复核演练和生产值班闭环。不能把 Mock/API
 证据描述成生产审批或通知闭环。
 
 ```text
@@ -171,7 +173,7 @@ M2-E 的统一边界是：
 APR-01a/b/c
   -> NOTIFY-01a/b/c
   -> M2-D
-  -> APR-01d [done] -> APR-01e [core done] + NOTIFY-01d [pending]
+  -> APR-01d [done] -> APR-01e [core done] + NOTIFY-01d [core done]
 ```
 
 - `APR-01a`：风险分级、规范化 payload、绑定摘要、审批状态机、自审批拒绝、一次性消费和
@@ -194,12 +196,12 @@ APR-01a/b/c
   HTTPS:443/TLS:6514、allowlist、固定 DNS、SSRF 防护和 dead-letters API 已实现；默认
   32 KiB 上限、critical 优先和 5 分钟轮询上限。真实 SIEM/Collector/Syslog 和生产证书
   未验收。
-- `NOTIFY-01d`：通知渠道、规则、投递、抑制、聚合、死信和重试运营页。
+- `NOTIFY-01d`：通知渠道、规则、投递、抑制、聚合、阈值/延迟升级、死信和受审计重放运营页。
 
 当前仓库已有 APR-01b 的 HMAC 外部审批回调适配器、APR-01c 的 step-up 门禁、APR-01d 的
 内置审批箱与多步骤审批、NOTIFY-01a 的 outbox/租约/重试/死信/人工重放核心、NOTIFY-01b
-的渠道 API/统一 HTTPS transport，以及 NOTIFY-01c 的 SIEM transport；没有真实 OA 连接器、
-原生厂商 SDK、真实 SIEM 接入、rules/suppress 或完整通知运营页面。默认禁用渠道，
+的渠道 API/统一 HTTPS transport、NOTIFY-01c 的 SIEM transport，以及 NOTIFY-01d 的规则、
+抑制、聚合、升级和通知运营页面；没有真实 OA 连接器、原生厂商 SDK 或真实 SIEM 接入。默认禁用渠道，
 未启用渠道或没有 transport 时不创建 dispatcher，不会伪造“已投递”。业务请求不能同步调用
 外部通知渠道；渠道故障不能回滚已成功的业务事务。APR-01a/b/c 和 NOTIFY-01a/b/c 不证明真实
 OA、真实 IdP step-up、真实 break-glass 告警/工单、真实厂商网关、真实 SIEM 接入或生产通知

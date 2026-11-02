@@ -15,6 +15,8 @@ export const ROLES = Object.freeze({
     "usage.read",
     "approvals.read",
     "notifications.read",
+    "notifications.rules.read",
+    "notifications.operations.read",
   ],
   enterprise_admin: [
     "users.read",
@@ -50,6 +52,9 @@ export const ROLES = Object.freeze({
     "notifications.channels.read",
     "notifications.channels.write",
     "notifications.channels.test",
+    "notifications.rules.read",
+    "notifications.rules.write",
+    "notifications.operations.read",
   ],
   auditor: [
     "users.read",
@@ -60,6 +65,8 @@ export const ROLES = Object.freeze({
     "approvals.read",
     "notifications.read",
     "notifications.channels.read",
+    "notifications.rules.read",
+    "notifications.operations.read",
   ],
   security_admin: [
     "devices.read",
@@ -72,13 +79,17 @@ export const ROLES = Object.freeze({
     "approvals.read",
     "approvals.decide",
     "breakglass.review",
+    "notifications.read",
     "notifications.channels.read",
+    "notifications.rules.read",
+    "notifications.operations.read",
   ],
   ops_admin: [
     "devices.read",
     "devices.revoke",
     "system.read",
     "approvals.read",
+    "notifications.operations.read",
   ],
   super_admin: [
     "users.read",
@@ -116,6 +127,9 @@ export const ROLES = Object.freeze({
     "notifications.channels.read",
     "notifications.channels.write",
     "notifications.channels.test",
+    "notifications.rules.read",
+    "notifications.rules.write",
+    "notifications.operations.read",
   ],
 });
 

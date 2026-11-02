@@ -33,7 +33,7 @@
 证据；C4-01 的 schema v1 机器协议已实现，并通过 Go 单测、gateway-key CLI 回归和隔离
 真实二进制冒烟；C4-02 `enterprise/gateway-control/` 受控适配器已实现，并通过 15 项
 Mock/故障测试。C4-03a 正式只读模型目录已实现，并通过 7 项目录专项；当前 admin-service
-95 项测试通过（75 项管理服务集成、7 项目录专项、7 项通知渠道专项、6 项 SIEM 专项）；C4-03b 的用户级
+104 项测试通过（77 项管理服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项）；C4-03b 的用户级
 `gatewayPolicy` 核心已在 auth-service 实现，
 覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 25 项测试通过。
 C4-03c 的管理 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿
@@ -56,7 +56,8 @@ deliveries 查询和受审计人工重放已实现并通过 Mock/故障测试。
 SIEM transport 已实现并通过 6 项专项测试，但真实 SIEM/Collector/Syslog/生产证书未验收；
 APR-01d 审批箱、串并行步骤、quorum、转交和撤回已实现并通过 Mock/集成测试；APR-01e
 break-glass 的 15 分钟单次授权、24 小时复核、提醒、通知、审计、API 和管理页已完成
-Mock/集成核心；NOTIFY-01d 仍未实现；M2-D 核心已实现，生产验收尚未完成。
+Mock/集成核心；NOTIFY-01d 的规则、抑制、聚合、升级、受审计重放和运营页也已完成
+Mock/集成核心；M2-D 核心已实现，生产验收尚未完成。
 真实企业 IdP、Docker Compose、真实共享卷、Windows 计划任务、反向代理、
 生产部署中的操作审计查询、中央 MCP/资源库、会话正文审计、安全运营和 HA 尚未完成生产
 验收。当前只能定位为“可演示、可受控技术试点”，不能称为“企业生产版完成”。
@@ -367,7 +368,7 @@ Issue、临时豁免期限和负责人。
 M2-C4 的目标不是“在管理页写一个额度数字”，而是证明用户级 `gatewayPolicy` 已经在所有
 活跃网关凭证上生效。C4-01 已完成底层机器协议和本地测试；C4-02 已完成受控适配器和
 15 项 Mock/故障测试，但 Docker/Compose、真实共享卷和健康检查尚未实机验收；C4-03a 已完成
-管理服务只读目录和 95 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
+管理服务只读目录和 104 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
 核心并通过 25 项测试；C4-03c 已完成管理 API、幂等签发、issuance journal、自动
 apply/readback、同步后交付、失败补偿和启动恢复的本地 Mock/故障链路，并通过 C4-04 的
 真实 Magpie 管理链路验证；真实共享卷和部署验收未完成。C4-03d/C5/M2-D 已完成管理页
@@ -381,7 +382,7 @@ C4-04 已通过隔离真实链路，仍需 Docker/共享卷、真实企业 IdP�
 | --- | --- | --- | --- | --- |
 | C4-01 | 已完成，本地测试通过 | `feat/m2-c4-gateway-contract` | `magpie gateway-key describe <id> --json` 和原子 `magpie gateway-key policy apply <id> --json` | schema v1、无秘密输出、文件锁内原子替换、`expectedPolicyRevision` 冲突不写文件、64 KiB 输入输出上限；Go 单测、CLI 回归和隔离真实二进制冒烟通过 |
 | C4-02 | 已完成 Mock/故障测试，待 Docker/真实卷验收 | `feat/m2-c4-gateway-control` | 独立的 `enterprise/gateway-control/` 服务 | 仅 describe/apply/健康检查；专用非 root 账号、固定 `GATEWAY_CONTROL_CONFIG_HOME`、独立 Bearer 服务令牌、无公网端口、无 Docker socket、写后独立回读、默认 10 秒超时并终止子进程；Docker/Compose、真实共享卷、mTLS 和生产环境未验收 |
-| C4-03a | 已实现，待真实部署验收 | `feat/m2-c4-gateway-policy` | admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、SHA-256 digest 和安全投影 | 7 项专项 + 75 项管理集成测试通过；坏文件、未知字段、重复 ID/group、空目录、未知引用和超 2 MiB 失败关闭；真实只读挂载/digest 重启待完成 |
+| C4-03a | 已实现，待真实部署验收 | `feat/m2-c4-gateway-policy` | admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、SHA-256 digest 和安全投影 | 7 项专项 + 77 项管理集成测试通过；坏文件、未知字段、重复 ID/group、空目录、未知引用和超 2 MiB 失败关闭；真实只读挂载/digest 重启待完成 |
 | C4-03b | 核心已实现，管理链路已接通 | `feat/m2-c4-gateway-policy` | auth-service 的 `gatewayPolicy`、旧 M1 `unknown` 迁移和首次初始化 | 25/25 测试已验证 quota/models 分步提交不伪造另一项、缺项 `policy_setup_required`、版本冲突、回读确认和员工门户脱敏；真实部署待验收 |
 | C4-03c | 核心已实现，Mock/故障测试通过 | `feat/m2-c4-gateway-policy` | 额度/模型管理 API、issuance journal、apply/readback 和同步后交付 | 版本与 `If-Match`、payload 指纹、apply/独立回读/原子持久化后才交付；失败补偿和启动恢复已有测试；真实环境待验收 |
 | C4-03d | 部分实现，基础页面已接入 | `feat/m2-c4-gateway-policy-ui` | 管理页额度/模型写表单、完整证据链状态、停用/吊销/轮换、审批、operation/audit 查询、人工对账、CSV 导出和员工只读状态门户 | 管理页自动携带 CSRF/幂等键/理由/版本并区分 pending/partial/unknown；员工页展示本人额度、模型、凭证、设备和同步；浏览器 E2E、失败恢复入口、完整运营体验和生产验收待完成 |

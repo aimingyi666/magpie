@@ -17,7 +17,7 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 95 项管理测试通过（75 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项）。
+当前总计 104 项管理测试通过（77 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）。
 auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
@@ -445,16 +445,24 @@ GET   /api/v1/admin/notifications/channels
 POST  /api/v1/admin/notifications/channels
 PATCH /api/v1/admin/notifications/channels/{channelId}
 POST  /api/v1/admin/notifications/channels/{channelId}/test
+GET   /api/v1/admin/notifications/rules
+POST  /api/v1/admin/notifications/rules
+PATCH /api/v1/admin/notifications/rules/{ruleId}
+GET   /api/v1/admin/notifications/aggregates
+GET   /api/v1/admin/notifications/suppressions
+GET   /api/v1/admin/notifications/escalations
 GET   /api/v1/admin/notifications/dead-letters
 ```
 
 读操作要求 `notifications.channels.read`；创建/更新要求 `.write`，测试要求 `.test`。所有写
 操作还要求管理会话、CSRF、非空理由、`Idempotency-Key`、审计和 H 风险 step-up。渠道测试
 只写 `notificationChannelTests` 结果，不创建伪造的业务 delivery。默认禁用渠道；未启用渠道
-或没有 transport 时不会创建 dispatcher，也不会把事件标成 `delivered`。邮件/IM/工单使用
+或没有 transport 时不会创建 dispatcher，也不会把事件标成 `delivered`。规则可按事件类型、
+严重级别、目标类型、目标 ID 和组织选择渠道，并配置抑制窗口、聚合维度/窗口、阈值或延迟
+升级；聚合、抑制和升级记录可查询，dead-letter 重放要求权限、理由、幂等和审计。邮件/IM/工单使用
 厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/ServiceNow/Jira SDK。`siem` 渠道支持
 `http-collector`/`otlp-http`/`syslog-tls`，使用固定 L0 schema；真实 SIEM/Collector/
-Syslog/生产证书、rules/suppress API、完整通知运营页和真实厂商网关验收仍未完成。
+Syslog/生产证书、真实厂商网关、生产值班闭环和浏览器 E2E 仍未验收。
 
 四个写接口的成功响应包含 `requestId`、`operationId`、动作名、目标 ID 和白名单业务摘要。
 请求可携带 `Idempotency-Key`（去空白后最长 128 个字符且不得含控制字符）。服务端只持久化
@@ -487,11 +495,11 @@ Get-ChildItem src\*.js | ForEach-Object {
   & $node --check $_.FullName
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-& $node --test test\admin-service.test.mjs test\model-catalog.test.mjs test\notification-channels.test.mjs test\notification-siem.test.mjs
+& $node --test test\admin-service.test.mjs test\model-catalog.test.mjs test\notification-channels.test.mjs test\notification-rules.test.mjs test\notification-siem.test.mjs
 ```
 
-2026-11-02 的实际结果：`95 passed, 0 failed`（75 项管理服务集成测试 + 7 项目录专项测试 +
-7 项通知渠道专项测试 + 6 项 SIEM 专项测试）。
+2026-11-02 的实际结果：`104 passed, 0 failed`（77 项管理服务集成测试 + 7 项目录专项测试 +
+7 项通知渠道专项测试 + 7 项通知规则专项测试 + 6 项 SIEM 专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
 拒绝、用户详情跨范围拒绝、会话过期、IP fail-closed、依赖不可用、凭证元数据、用量归属、
@@ -523,10 +531,13 @@ essential `auth_time`/ACR 请求、未配置时失败关闭、站外返回路径
 幂等、租约恢复、并发串行、1/5/15/60/360 分钟退避、死信、deliveries 脱敏查询、受审计
 人工重放、审批/结果审计与 outbox 原子提交、渠道 RBAC/CSRF/step-up/理由/幂等/审计、
 渠道投影与收件人限制、Webhook HMAC、HTTPS/allowlist/DNS 固定解析、SSRF 和重定向拒绝、
-fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。管理服务当前为
-`95 passed, 0 failed`（75 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 6 项 SIEM 专项），
+fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。NOTIFY-01d 新增覆盖规则
+CRUD、组织范围、`expectedUpdatedAt` 冲突、抑制窗口、聚合维度、阈值/延迟升级、单条升级失败
+隔离、aggregates/suppressions/escalations 查询、dead-letter 幂等重放和运营页面静态契约。
+管理服务当前为 `104 passed, 0 failed`（77 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 +
+7 项通知规则专项 + 6 项 SIEM 专项），
 auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，合计
-`135 passed, 0 failed`。
+`144 passed, 0 failed`。
 
 尚未验证：
 
@@ -547,8 +558,9 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - NOTIFY-01a/01b/01c 默认不启用渠道；未启用渠道或没有 transport 时正常启动不创建 dispatcher。
   `operation.audit_failed` 只有 schema、暂无可靠触发点；deliveries 查询无 cursor。
   邮件/IM/工单是统一 HTTPS 网关契约，不是原生厂商 SDK；真实网关、证书、租户配置和投递
-  未验收。SIEM transport 已实现并通过 6 项专项测试，但真实 SIEM/Collector/Syslog/
-  生产证书、rules/suppress API、聚合、升级和完整通知运营页面未实现/未验收。
+  未验收。SIEM transport 已实现并通过 6 项专项测试；NOTIFY-01d 的规则、抑制、聚合、
+  升级、受审计重放和运营页已实现，但真实 SIEM/Collector/Syslog、生产证书、真实厂商渠道、
+  浏览器 E2E 和生产值班闭环未验收。
 - 四个 M2-C2 写接口在真实 IdP、反向代理、真实 auth-service 和真实网关上的端到端演练。
 
 ## 当前限制
@@ -558,9 +570,10 @@ auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - result 审计失败时 operation 会停在 `dependency_invoked`；C5 已提供查询、审计分页和受控
   对账，但自动补偿、告警队列和真实运维演练仍未实现/验收。
 - 审批已有服务端 API、一次性消费、HMAC 外部回调适配器、APR-01c step-up 和 APR-01d
-  审批箱/多步骤核心；NOTIFY-01a/01b/01c 已有 outbox、渠道 API、统一 HTTPS/SIEM transport
-  与死信重放。APR-01e 已有 break-glass Mock/集成核心，但没有真实 OA 连接器、
-  SIEM/告警、通知运营页、生产事后复核演练或真实厂商网关验收；审批、step-up、
+  审批箱/多步骤核心；NOTIFY-01a/01b/01c/01d 已有 outbox、渠道 API、统一 HTTPS/SIEM
+  transport、规则/抑制/聚合/升级、运营页与死信重放。APR-01e 已有 break-glass Mock/集成
+  核心，但没有真实 OA 连接器、SIEM/告警、生产事后复核演练、真实厂商网关或生产值班闭环
+  验收；审批、step-up、
   渠道和 outbox 状态存储仍是
   单实例 JSON，尚未做多实例并发和真实 OA/IdP 验收。
 - 角色/组织目前没有管理 API，尚未接入 SCIM 或 IdP Group 映射。

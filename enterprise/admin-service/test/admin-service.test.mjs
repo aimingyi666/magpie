@@ -879,6 +879,7 @@ async function fixture(options = {}) {
         callbackSecret,
       },
       async close() {
+        await admin.notificationEscalationScheduler?.stop();
         await admin.breakGlassScheduler?.stop();
         await admin.notificationDispatcher?.stop();
         await close(admin.server);
@@ -888,6 +889,7 @@ async function fixture(options = {}) {
       },
     };
   } catch (error) {
+    await admin?.notificationEscalationScheduler?.stop();
     await admin?.breakGlassScheduler?.stop();
     await admin?.notificationDispatcher?.stop();
     if (admin?.server?.listening) await close(admin.server);
@@ -4243,6 +4245,16 @@ test("M2-D admin UI and operation listings expose scoped controls without inline
     "Create export",
     "Load operations",
     "Load audit metadata",
+    "Notifications",
+    "Register or edit a notification channel",
+    "Create or edit a notification rule",
+    "Replay selected dead letter",
+    "Load aggregation and escalation state",
+    'id="notification-channel-form"',
+    'id="notification-delivery-filter"',
+    'id="notification-rule-form"',
+    'id="notification-aggregate-list"',
+    'id="notification-escalation-list"',
     'src="/admin/app.js"',
   ]) {
     assert.ok(html.includes(expected), `admin page should include ${expected}`);
@@ -4250,6 +4262,10 @@ test("M2-D admin UI and operation listings expose scoped controls without inline
   assert.ok(!/<script(?![^>]*\bsrc=)/i.test(html));
   assert.ok(!/\son[a-z]+\s*=/i.test(html));
   assertNoWriteSecrets(html, f, jar);
+  const appScript = await fs.readFile(new URL("../src/admin-app.js", import.meta.url), "utf8");
+  assert.match(appScript, /notification_channels_unavailable/);
+  assert.match(appScript, /loadNotificationOperations/);
+  assert.match(appScript, /saveNotificationRule/);
 
   await bindRole(f, current.body.user.id, "department_admin", "org-root");
   const scoped = await adminGet(f, jar, "/api/v1/admin/operations?limit=200");
@@ -5433,7 +5449,10 @@ test("startup recovery turns a reserved approval into a fail-closed consumed app
   });
 
   const restarted = await createEnterpriseAdminServer(f.config);
-  t.after(() => restarted.breakGlassScheduler?.stop());
+  t.after(async () => {
+    await restarted.notificationEscalationScheduler?.stop();
+    await restarted.breakGlassScheduler?.stop();
+  });
   const recovered = await restarted.store.read((data) => ({
     approval: structuredClone(data.approvalRequests[approval.approvalId]),
     consumption: structuredClone(data.approvalConsumptions[approval.approvalId]),
@@ -7322,4 +7341,513 @@ test("NOTIFY-01c SIEM channels are manageable through the notification channel A
   );
   assert.equal(unsafe.response.status, 400);
   assert.equal(unsafe.body.error.code, "invalid_notification_channel");
+});
+
+test("NOTIFY-01d rule APIs enforce scope, step-up, idempotency and optimistic concurrency", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture({
+    notificationChannelsEnabled: true,
+    adminServerOptions: {
+      notificationChannelTransport: {
+        async deliver() {
+          return { ok: true, statusCode: 204 };
+        },
+        async test() {},
+      },
+    },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const superJar = await adminLogin(f);
+  const superCurrent = await me(f, superJar);
+
+  const channelCreate = await adminPost(
+    f,
+    superJar,
+    "/api/v1/admin/notifications/channels",
+    {
+      name: "Notification rule endpoint",
+      type: "webhook",
+      provider: "generic",
+      secretRef: "MAGPIE_NOTIFICATION_RULE_WEBHOOK_SECRET",
+      eventTypes: [
+        "approval.requested",
+        "operation.failed",
+        "approval.rejected",
+      ],
+      config: { endpointRef: "MAGPIE_NOTIFICATION_RULE_WEBHOOK" },
+      reason: "Create a channel for notification rule integration tests",
+    },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-channel-create" },
+  );
+  assert.equal(channelCreate.response.status, 201, JSON.stringify(channelCreate.body));
+  const channelId = channelCreate.body.channel.channelId;
+
+  const department = await independentApprover(f, {
+    role: "department_admin",
+    scopeOrgUnitId: "org-root",
+  });
+  const rulesPath = "/api/v1/admin/notifications/rules";
+  const baseRule = {
+    name: "Platform approval routing",
+    enabled: true,
+    priority: 100,
+    eventTypes: ["approval.requested"],
+    severities: ["warning"],
+    targetOrgUnitId: "org-platform",
+    channelId,
+    suppressionWindowSeconds: 0,
+    aggregation: {
+      enabled: true,
+      dimensions: ["eventType", "targetOrgUnitId"],
+      windowSeconds: 300,
+    },
+    escalation: {
+      enabled: false,
+      thresholdCount: 0,
+      delaySeconds: 0,
+      channelId: "",
+    },
+    reason: "Route platform approvals to the on-call webhook",
+  };
+
+  const unauthenticated = await fetch(`${f.base}${rulesPath}`);
+  assert.equal(unauthenticated.status, 401);
+
+  const noCsrf = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    baseRule,
+    "",
+    { "idempotency-key": "notify-01d-no-csrf" },
+  );
+  assert.equal(noCsrf.response.status, 403);
+  assert.equal(noCsrf.body.error.code, "csrf_invalid");
+
+  const noReason = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    { ...baseRule, reason: "" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-no-reason" },
+  );
+  assert.equal(noReason.response.status, 400);
+  assert.equal(noReason.body.error.code, "invalid_reason");
+
+  const noIdempotency = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    baseRule,
+    superCurrent.body.csrfToken,
+  );
+  assert.equal(noIdempotency.response.status, 400);
+  assert.equal(noIdempotency.body.error.code, "idempotency_key_required");
+
+  const forbidden = await adminPost(
+    f,
+    department.jar,
+    rulesPath,
+    baseRule,
+    department.current.body.csrfToken,
+    { "idempotency-key": "notify-01d-department-write" },
+  );
+  assert.equal(forbidden.response.status, 403);
+  assert.equal(forbidden.body.error.code, "forbidden_role");
+
+  const noStepJar = new CookieJar();
+  await adminLogin(f, noStepJar, {
+    sub: "notify-rule-no-step-up",
+    email: "notify-no-step-up@corp.example",
+    name: "Notification No Step Up",
+  }, { stepUp: false });
+  let noStepCurrent = await me(f, noStepJar);
+  await addRoleBinding(
+    f,
+    "rb-notify-rule-no-step-up",
+    noStepCurrent.body.user.id,
+    "enterprise_admin",
+    "*",
+  );
+  noStepCurrent = await me(f, noStepJar);
+  const noStep = await adminPost(
+    f,
+    noStepJar,
+    rulesPath,
+    baseRule,
+    noStepCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-no-step-up" },
+  );
+  assert.equal(noStep.response.status, 403);
+  assert.equal(noStep.body.error.code, "step_up_required");
+
+  const missingChannel = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    {
+      ...baseRule,
+      channelId: `nch_${"f".repeat(24)}`,
+      reason: "Verify channel references",
+    },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-missing-channel" },
+  );
+  assert.equal(missingChannel.response.status, 400);
+  assert.equal(
+    missingChannel.body.error.code,
+    "notification_rule_channel_not_found",
+  );
+
+  const plaintextSecret = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    {
+      ...baseRule,
+      name: "Rule with plaintext secret",
+      aggregation: { ...baseRule.aggregation, token: "must-not-be-stored" },
+      reason: "Verify secret rejection",
+    },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-plaintext-secret" },
+  );
+  assert.equal(plaintextSecret.response.status, 400);
+  assert.equal(plaintextSecret.body.error.code, "invalid_notification_rule");
+
+  const created = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    baseRule,
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-rule-create" },
+  );
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.created, true);
+  const rule = created.body.rule;
+  assert.match(rule.ruleId, /^nrul_[a-f0-9]{24}$/);
+
+  const replayed = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    baseRule,
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-rule-create" },
+  );
+  assert.equal(replayed.response.status, 200);
+  assert.equal(replayed.body.created, false);
+  assert.equal(replayed.body.rule.ruleId, rule.ruleId);
+
+  const conflict = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    { ...baseRule, name: "A different rule" },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-rule-create" },
+  );
+  assert.equal(conflict.response.status, 409);
+  assert.equal(conflict.body.error.code, "notification_rule_request_conflict");
+
+  const salesRule = await adminPost(
+    f,
+    superJar,
+    rulesPath,
+    {
+      ...baseRule,
+      name: "Sales approval routing",
+      targetOrgUnitId: "org-sales",
+      aggregation: { enabled: false },
+      escalation: { enabled: false },
+      reason: "Route sales approvals separately",
+    },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-sales-rule" },
+  );
+  assert.equal(salesRule.response.status, 201, JSON.stringify(salesRule.body));
+
+  const departmentRules = await adminGet(f, department.jar, rulesPath);
+  assert.equal(departmentRules.response.status, 200);
+  assert.equal(departmentRules.body.rules.length, 1);
+  assert.equal(departmentRules.body.rules[0].ruleId, rule.ruleId);
+
+  const rulePath = `${rulesPath}/${rule.ruleId}`;
+  const updated = await adminPatch(
+    f,
+    superJar,
+    rulePath,
+    {
+      enabled: false,
+      expectedUpdatedAt: rule.updatedAt,
+      reason: "Pause the platform routing rule during maintenance",
+    },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-rule-update" },
+  );
+  assert.equal(updated.response.status, 200, JSON.stringify(updated.body));
+  assert.equal(updated.body.updated, true);
+  assert.equal(updated.body.rule.enabled, false);
+
+  const updateConflict = await adminPatch(
+    f,
+    superJar,
+    rulePath,
+    {
+      enabled: true,
+      expectedUpdatedAt: rule.updatedAt,
+      reason: "Retry with stale optimistic concurrency metadata",
+    },
+    superCurrent.body.csrfToken,
+    { "idempotency-key": "notify-01d-rule-update-conflict" },
+  );
+  assert.equal(updateConflict.response.status, 409);
+  assert.equal(
+    updateConflict.body.error.code,
+    "notification_rule_update_conflict",
+  );
+
+  const data = await readAdminData(f);
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "notification.rule.created"
+      && audit.ruleId === rule.ruleId
+      && audit.reason === baseRule.reason));
+  assert.ok(data.adminSystemAuditLogs.some((audit) =>
+    audit.action === "notification.rule.updated"
+      && audit.ruleId === rule.ruleId));
+  assert.ok(!JSON.stringify(created.body).includes("must-not-be-stored"));
+  assert.ok(!JSON.stringify(data.notificationRules).includes("must-not-be-stored"));
+});
+
+test("NOTIFY-01d operations APIs expose scoped timelines and isolate escalation failures", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture({
+    notificationChannelsEnabled: true,
+    adminServerOptions: {
+      notificationChannelTransport: {
+        async deliver() {
+          return { ok: true, statusCode: 204 };
+        },
+        async test() {},
+      },
+    },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const superJar = await adminLogin(f);
+  const superCurrent = await me(f, superJar);
+  const department = await independentApprover(f, {
+    role: "department_admin",
+    scopeOrgUnitId: "org-root",
+  });
+
+  async function createChannel(name, suffix) {
+    const created = await adminPost(
+      f,
+      superJar,
+      "/api/v1/admin/notifications/channels",
+      {
+        name,
+        type: "webhook",
+        provider: "generic",
+        secretRef: "MAGPIE_NOTIFICATION_OPERATIONS_WEBHOOK_SECRET",
+        eventTypes: ["approval.requested", "approval.rejected", "operation.failed"],
+        config: { endpointRef: "MAGPIE_NOTIFICATION_RULE_WEBHOOK" },
+        reason: "Create a channel for notification operations tests",
+      },
+      superCurrent.body.csrfToken,
+      { "idempotency-key": `notify-01d-ops-channel-${suffix}` },
+    );
+    assert.equal(created.response.status, 201, JSON.stringify(created.body));
+    return created.body.channel.channelId;
+  }
+
+  const goodChannelId = await createChannel("Operations webhook", "good");
+  const failedChannelId = await createChannel("Retiring webhook", "failed");
+
+  async function createRule(body, suffix) {
+    const created = await adminPost(
+      f,
+      superJar,
+      "/api/v1/admin/notifications/rules",
+      {
+        enabled: true,
+        priority: 100,
+        severities: ["warning"],
+        targetOrgUnitId: "org-platform",
+        suppressionWindowSeconds: 0,
+        aggregation: { enabled: false },
+        escalation: { enabled: false },
+        ...body,
+        reason: "Create a notification rule for operations tests",
+      },
+      superCurrent.body.csrfToken,
+      { "idempotency-key": `notify-01d-ops-rule-${suffix}` },
+    );
+    assert.equal(created.response.status, 201, JSON.stringify(created.body));
+    return created.body.rule;
+  }
+
+  const aggregateRule = await createRule({
+    name: "Platform aggregate with delayed escalation",
+    eventTypes: ["approval.requested"],
+    channelId: goodChannelId,
+    aggregation: {
+      enabled: true,
+      dimensions: ["eventType", "targetOrgUnitId", "targetId"],
+      windowSeconds: 600,
+    },
+    escalation: {
+      enabled: true,
+      thresholdCount: 0,
+      delaySeconds: 60,
+      channelId: goodChannelId,
+    },
+  }, "aggregate");
+  const failedRule = await createRule({
+    name: "Escalation channel that is later retired",
+    eventTypes: ["approval.rejected"],
+    channelId: failedChannelId,
+    aggregation: {
+      enabled: true,
+      dimensions: ["eventType", "targetOrgUnitId", "targetId"],
+      windowSeconds: 600,
+    },
+    escalation: {
+      enabled: true,
+      thresholdCount: 0,
+      delaySeconds: 60,
+      channelId: failedChannelId,
+    },
+  }, "failed");
+  const suppressionRule = await createRule({
+    name: "Suppress duplicate operation failures",
+    eventTypes: ["operation.failed"],
+    channelId: goodChannelId,
+    suppressionWindowSeconds: 300,
+  }, "suppression");
+  const salesRule = await createRule({
+    name: "Sales rule remains outside department scope",
+    eventTypes: ["approval.rejected"],
+    targetOrgUnitId: "org-sales",
+    channelId: goodChannelId,
+  }, "sales");
+
+  await f.admin.store.mutate((data) => {
+    const channels = Object.values(data.notificationChannels);
+    f.admin.notificationRuleRouter.route(
+      data,
+      notificationEvent({
+        eventId: "evt_notify_ops_aggregate",
+        eventType: "approval.requested",
+        targetOrgUnitId: "org-platform",
+      }),
+      { channels },
+    );
+    f.admin.notificationRuleRouter.route(
+      data,
+      notificationEvent({
+        eventId: "evt_notify_ops_failed",
+        eventType: "approval.rejected",
+        targetOrgUnitId: "org-platform",
+      }),
+      { channels },
+    );
+    const suppressionEvent = notificationEvent({
+      eventId: "evt_notify_ops_suppressed_1",
+      eventType: "operation.failed",
+      targetOrgUnitId: "org-platform",
+    });
+    f.admin.notificationRuleRouter.route(data, suppressionEvent, { channels });
+    f.admin.notificationRuleRouter.route(data, {
+      ...suppressionEvent,
+      eventId: "evt_notify_ops_suppressed_2",
+    }, { channels });
+    f.admin.notificationRuleRouter.route(
+      data,
+      notificationEvent({
+        eventId: "evt_notify_ops_sales",
+        eventType: "approval.rejected",
+        targetOrgUnitId: "org-sales",
+      }),
+      { channels },
+    );
+    for (const aggregate of Object.values(data.notificationAggregates)) {
+      aggregate.firstEventAt = "2026-11-02T00:00:00.000Z";
+      aggregate.updatedAt = "2026-11-02T00:00:00.000Z";
+    }
+    data.notificationChannels[failedChannelId].enabled = false;
+    data.notificationChannels[failedChannelId].updatedAt = "2026-11-02T00:00:00.000Z";
+  });
+
+  const escalated = await f.admin.notificationEscalationScheduler.runOnce();
+  assert.deepEqual(escalated, { sent: 1, failed: 1 });
+
+  const aggregates = await adminGet(
+    f,
+    department.jar,
+    "/api/v1/admin/notifications/aggregates?limit=20",
+  );
+  assert.equal(aggregates.response.status, 200);
+  assert.ok(aggregates.body.count >= 2);
+  assert.ok(aggregates.body.aggregates.every((aggregate) =>
+    aggregate.targetOrgUnitId === "org-platform"));
+
+  const suppressions = await adminGet(
+    f,
+    department.jar,
+    "/api/v1/admin/notifications/suppressions?limit=20",
+  );
+  assert.equal(suppressions.response.status, 200);
+  assert.equal(suppressions.body.count, 1);
+  assert.equal(suppressions.body.suppressions[0].ruleId, suppressionRule.ruleId);
+  assert.equal(suppressions.body.suppressions[0].targetOrgUnitId, "org-platform");
+
+  const escalations = await adminGet(
+    f,
+    department.jar,
+    "/api/v1/admin/notifications/escalations?limit=20",
+  );
+  assert.equal(escalations.response.status, 200);
+  assert.equal(escalations.body.count, 2);
+  assert.ok(escalations.body.escalations.some((escalation) =>
+    escalation.ruleId === aggregateRule.ruleId && escalation.status === "sent"));
+  assert.ok(escalations.body.escalations.some((escalation) =>
+    escalation.ruleId === failedRule.ruleId
+      && escalation.status === "failed"
+      && escalation.errorCode === "escalation_channel_unavailable"));
+  assert.ok(escalations.body.escalations.every((escalation) =>
+    escalation.targetOrgUnitId === "org-platform"));
+
+  const allEscalations = await adminGet(
+    f,
+    superJar,
+    "/api/v1/admin/notifications/escalations?limit=20",
+  );
+  assert.equal(allEscalations.response.status, 200);
+  assert.equal(allEscalations.body.count, 2);
+
+  const salesRules = await adminGet(f, department.jar, "/api/v1/admin/notifications/rules");
+  assert.equal(salesRules.response.status, 200);
+  assert.ok(!salesRules.body.rules.some((candidate) =>
+    candidate.ruleId === salesRule.ruleId));
+
+  const invalidLimit = await adminGet(
+    f,
+    department.jar,
+    "/api/v1/admin/notifications/escalations?limit=0",
+  );
+  assert.equal(invalidLimit.response.status, 400);
+  assert.equal(invalidLimit.body.error.code, "invalid_limit");
+
+  const unauthenticated = await fetch(
+    `${f.base}/api/v1/admin/notifications/aggregates`,
+  );
+  assert.equal(unauthenticated.status, 401);
 });

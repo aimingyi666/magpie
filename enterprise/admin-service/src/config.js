@@ -282,6 +282,13 @@ export function loadConfig(env = process.env) {
         1,
         300,
       ) * 1000,
+      escalationPollIntervalMs: integer(
+        env,
+        "ADMIN_NOTIFICATION_ESCALATION_POLL_SECONDS",
+        30,
+        1,
+        300,
+      ) * 1000,
       leaseMs: integer(
         env,
         "ADMIN_NOTIFICATION_OUTBOX_LEASE_SECONDS",

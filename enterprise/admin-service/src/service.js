@@ -76,6 +76,16 @@ import {
 } from "./notification-channels.js";
 import { SIEM_CRITICAL_VISIBILITY_TARGET_MS } from "./notification-siem.js";
 import {
+  NotificationEscalationScheduler,
+  NotificationRuleRouter,
+  createNotificationRule,
+  publicNotificationAggregate,
+  publicNotificationEscalation,
+  publicNotificationRule,
+  publicNotificationSuppression,
+  updateNotificationRule,
+} from "./notification-rules.js";
+import {
   BREAK_GLASS_GRANT_TTL_MS,
   BREAK_GLASS_POLICY_VERSION,
   BREAK_GLASS_REVIEW_CONCLUSIONS,
@@ -1329,6 +1339,178 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
       </form>
       <div id="audit-list" aria-live="polite"></div>`
     : `<p class="notice">Your role cannot read audit metadata.</p>`;
+  const notificationDeliveryPanel = can("notifications.read")
+    ? `<form id="notification-delivery-filter" class="toolbar">
+        <label>Status
+          <select name="status">
+            <option value="">All delivery states</option>
+            <option value="pending">Pending</option>
+            <option value="leased">Leased</option>
+            <option value="delivering">Delivering</option>
+            <option value="delivered">Delivered</option>
+            <option value="retry_wait">Waiting to retry</option>
+            <option value="dead_letter">Dead letter</option>
+          </select>
+        </label>
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load deliveries</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="notification-delivery-list" aria-live="polite"></div>
+      <form id="notification-dead-letter-filter" class="toolbar">
+        <label>Dead-letter limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load dead letters</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="notification-dead-letter-summary" class="notice"></div>
+      <div id="notification-dead-letter-list" aria-live="polite"></div>`
+    : `<p class="notice">Your role cannot read notification delivery metadata.</p>`;
+  const notificationReplayPanel = can("notifications.replay")
+    ? `<form id="notification-replay-form" class="stack-form">
+        <h3>Replay selected dead letter</h3>
+        <p id="notification-replay-selection">No notification delivery selected.</p>
+        <label>Replay reason <input name="reason" maxlength="500" required></label>
+        <button type="submit">Requeue delivery</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : `<p class="notice">Your role can inspect dead letters but cannot replay them.</p>`;
+  const notificationChannelPanel = can("notifications.channels.read")
+    ? `<form id="notification-channel-filter" class="toolbar">
+        <button type="submit">Refresh channels</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      ${can("notifications.channels.write")
+        ? `<form id="notification-channel-form" class="stack-form">
+            <h3>Register or edit a notification channel</h3>
+            <p id="notification-channel-selection">New channel.</p>
+            <input type="hidden" name="channelId">
+            <div class="editor-grid">
+              <div>
+                <label>Name <input name="name" maxlength="100" required></label>
+                <label>Type
+                  <select name="type">
+                    <option value="webhook">Webhook</option>
+                    <option value="email">Email</option>
+                    <option value="im">IM</option>
+                    <option value="ticketing">Ticketing</option>
+                    <option value="siem">SIEM</option>
+                  </select>
+                </label>
+                <label>Provider <input name="provider" maxlength="30" placeholder="generic" required></label>
+                <label>Enabled
+                  <select name="enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+                </label>
+              </div>
+              <div>
+                <label>Event types (one per line; blank matches all)
+                  <textarea name="eventTypes" rows="5" placeholder="approval.requested&#10;operation.failed"></textarea>
+                </label>
+                <label>Secret reference (environment variable name; never a secret value)
+                  <input name="secretRef" maxlength="80" placeholder="MAGPIE_NOTIFICATION_WEBHOOK_SECRET">
+                </label>
+              </div>
+            </div>
+            <label>Safe configuration (JSON; reference names and endpoints only)
+              <textarea name="config" rows="5" placeholder='{"endpointRef":"MAGPIE_SECURITY_WEBHOOK_URL","timeoutMs":5000}'>{}</textarea>
+            </label>
+            <label>Reason <input name="reason" maxlength="500" required></label>
+            <div class="button-row">
+              <button type="submit">Save channel</button>
+              ${can("notifications.channels.test")
+                ? '<button type="button" id="notification-channel-test">Test saved channel</button>'
+                : ""}
+              <button type="button" id="notification-channel-toggle">Enable or disable saved channel</button>
+              <button type="button" id="notification-channel-reset">New channel</button>
+            </div>
+            <p class="write-result" role="status" aria-live="polite"></p>
+          </form>`
+        : `<p class="notice">Your role can inspect notification channels but cannot create, change, or test them.</p>`}
+      <div id="notification-channel-list" aria-live="polite"></div>`
+    : `<p class="notice">Your role cannot read notification channel metadata.</p>`;
+  const notificationRulePanel = can("notifications.rules.read")
+    ? `<form id="notification-rule-filter" class="toolbar">
+        <button type="submit">Refresh rules</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      ${can("notifications.rules.write")
+        ? `<form id="notification-rule-form" class="stack-form">
+            <h3>Create or edit a notification rule</h3>
+            <p id="notification-rule-selection">New rule.</p>
+            <input type="hidden" name="ruleId">
+            <input type="hidden" name="expectedUpdatedAt">
+            <div class="editor-grid">
+              <div>
+                <label>Name <input name="name" maxlength="100" required></label>
+                <label>Enabled
+                  <select name="enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+                </label>
+                <label>Priority (0-1000) <input name="priority" type="number" min="0" max="1000" value="100"></label>
+                <label>Target organization
+                  <select name="targetOrgUnitId"><option value="">All organizations</option>${orgOptions}</select>
+                </label>
+                <label>Primary channel <select name="channelId" required><option value="">Load channels first</option></select></label>
+                <label>Suppression window (seconds) <input name="suppressionWindowSeconds" type="number" min="0" max="2592000" value="0"></label>
+              </div>
+              <div>
+                <label>Event types (one per line; blank matches all)
+                  <textarea name="eventTypes" rows="4" placeholder="approval.requested&#10;operation.failed"></textarea>
+                </label>
+                <label>Severities (one per line; blank matches all)
+                  <textarea name="severities" rows="3" placeholder="warning&#10;critical"></textarea>
+                </label>
+                <label>Aggregation dimensions (one per line)
+                  <textarea name="aggregationDimensions" rows="3">eventType
+targetType
+targetId
+targetOrgUnitId</textarea>
+                </label>
+              </div>
+            </div>
+            <div class="editor-grid">
+              <div>
+                <h4>Aggregation</h4>
+                <label>Enabled
+                  <select name="aggregationEnabled"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+                </label>
+                <label>Window (seconds) <input name="aggregationWindowSeconds" type="number" min="60" max="604800" value="300"></label>
+              </div>
+              <div>
+                <h4>Escalation</h4>
+                <label>Enabled
+                  <select name="escalationEnabled"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+                </label>
+                <label>Threshold count <input name="escalationThresholdCount" type="number" min="0" max="1000000" value="0"></label>
+                <label>Delay (seconds) <input name="escalationDelaySeconds" type="number" min="0" max="2592000" value="0"></label>
+                <label>Escalation channel <select name="escalationChannelId"><option value="">None</option></select></label>
+              </div>
+            </div>
+            <label>Reason <input name="reason" maxlength="500" required></label>
+            <div class="button-row">
+              <button type="submit">Save rule</button>
+              <button type="button" id="notification-rule-reset">New rule</button>
+            </div>
+            <p class="write-result" role="status" aria-live="polite"></p>
+          </form>`
+        : `<p class="notice">Your role can inspect notification rules but cannot create or change them.</p>`}
+      <div id="notification-rule-list" aria-live="polite"></div>`
+    : `<p class="notice">Your role cannot read notification rules.</p>`;
+  const notificationOperationsPanel = can("notifications.operations.read")
+    ? `<form id="notification-operations-filter" class="toolbar">
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load aggregation and escalation state</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <h3>Aggregates</h3><div id="notification-aggregate-list" aria-live="polite"></div>
+      <h3>Suppressions</h3><div id="notification-suppression-list" aria-live="polite"></div>
+      <h3>Escalations</h3><div id="notification-escalation-list" aria-live="polite"></div>`
+    : `<p class="notice">Your role cannot read notification aggregation or escalation state.</p>`;
+  const notificationPanel = [
+    notificationDeliveryPanel,
+    notificationReplayPanel,
+    notificationChannelPanel,
+    notificationRulePanel,
+    notificationOperationsPanel,
+  ].join("");
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1375,6 +1557,7 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
   <h2>Break-glass</h2>${breakGlassRequest}${breakGlassList}${breakGlassReview}
   <h2>Exports</h2>${exportPanel}
   <h2>Operations</h2>${operationPanel}
+  <h2>Notifications</h2>${notificationPanel}
   <h2>Audit metadata</h2>${auditPanel}
   <h2>Usage overview</h2>${usageBox}
   <h2>Users</h2>
@@ -1514,12 +1697,15 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       })
       : null
   );
+  const notificationRuleRouter = options.notificationRuleRouter
+    || new NotificationRuleRouter({ now: options.notificationNow });
   const notificationOutbox = options.notificationOutbox || new NotificationOutbox(store, {
     maxAttempts: config.notifications?.maxAttempts || 6,
     now: options.notificationNow,
     channelProvider: notificationChannelSettings.enabled
       ? channelProviderFromData
       : null,
+    router: notificationRuleRouter,
   });
   const notificationTransport = options.notificationTransport || (
     notificationChannelTransport
@@ -4853,6 +5039,364 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       || access.scopeOrgUnitIds.includes(targetOrgUnitId);
   }
 
+  function notificationRuleVisible(access, rule) {
+    const targetOrgUnitId = String(rule?.targetOrgUnitId || "");
+    if (!targetOrgUnitId) return access.scopeOrgUnitIds.includes("*");
+    return access.scopeOrgUnitIds.includes("*")
+      || access.scopeOrgUnitIds.includes(targetOrgUnitId);
+  }
+
+  function notificationOperationsLimit(searchParams) {
+    const limit = Number(String(searchParams.get("limit") || "100").trim());
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) {
+      throw new HttpError(400, "invalid_limit", "limit must be an integer from 1 to 200");
+    }
+    return limit;
+  }
+
+  function notificationNow() {
+    if (typeof options.notificationNow === "function") {
+      return new Date(options.notificationNow());
+    }
+    if (options.notificationNow != null) return new Date(options.notificationNow);
+    return new Date();
+  }
+
+  function notificationRuleInput(body, update = false) {
+    const allowed = new Set([
+      "reason",
+      "name",
+      "enabled",
+      "priority",
+      "eventTypes",
+      "severities",
+      "targetOrgUnitId",
+      "channelId",
+      "suppressionWindowSeconds",
+      "aggregation",
+      "escalation",
+      ...(update ? ["expectedUpdatedAt"] : []),
+    ]);
+    const unexpected = Object.keys(body).find((key) => !allowed.has(key));
+    if (unexpected) {
+      throw new HttpError(
+        400,
+        "invalid_request",
+        `Unexpected notification rule field: ${unexpected}`,
+      );
+    }
+    const input = {};
+    for (const key of allowed) {
+      if (key !== "reason" && key !== "expectedUpdatedAt" && body[key] !== undefined) {
+        input[key] = body[key];
+      }
+    }
+    if (update && Object.keys(input).length === 0) {
+      throw new HttpError(400, "invalid_request", "Notification rule update is empty");
+    }
+    const expectedUpdatedAt = update ? String(body.expectedUpdatedAt || "").trim() : "";
+    if (expectedUpdatedAt && !Number.isFinite(Date.parse(expectedUpdatedAt))) {
+      throw new HttpError(
+        400,
+        "invalid_expected_updated_at",
+        "expectedUpdatedAt must be an ISO timestamp",
+      );
+    }
+    return { input, expectedUpdatedAt };
+  }
+
+  function normalizedRulePayload(rule) {
+    const projected = publicNotificationRule(rule);
+    return {
+      name: projected.name,
+      enabled: projected.enabled,
+      priority: projected.priority,
+      eventTypes: projected.eventTypes,
+      severities: projected.severities,
+      targetOrgUnitId: projected.targetOrgUnitId,
+      channelId: projected.channelId,
+      suppressionWindowSeconds: projected.suppressionWindowSeconds,
+      aggregation: projected.aggregation,
+      escalation: projected.escalation,
+    };
+  }
+
+  function notificationRuleFingerprint(action, ruleId, reason, payload, expectedUpdatedAt = "") {
+    return sha256(JSON.stringify(canonicalValue({
+      action,
+      ruleId,
+      reason,
+      expectedUpdatedAt,
+      payload,
+    })));
+  }
+
+  function assertNotificationRuleChannels(data, rule) {
+    if (!data.notificationChannels[rule.channelId]) {
+      throw new HttpError(
+        400,
+        "notification_rule_channel_not_found",
+        "The notification rule channel does not exist",
+      );
+    }
+    if (rule.escalation?.enabled && !data.notificationChannels[rule.escalation.channelId]) {
+      throw new HttpError(
+        400,
+        "notification_rule_channel_not_found",
+        "The notification escalation channel does not exist",
+      );
+    }
+  }
+
+  function assertRuleScope(data, session, targetOrgUnitId) {
+    const decision = authorize(
+      data,
+      session.subjectId,
+      "notifications.rules.write",
+      targetOrgUnitId || "*",
+    );
+    if (!decision.allowed) {
+      throw new HttpError(403, decision.reason, "This action is not allowed");
+    }
+  }
+
+  async function listNotificationRules(session) {
+    const result = await requirePermission(session, "notifications.rules.read");
+    return store.read((data) => Object.values(data.notificationRules)
+      .filter((rule) => notificationRuleVisible(result.access, rule))
+      .sort((left, right) => {
+        const byPriority = Number(right.priority || 0) - Number(left.priority || 0);
+        if (byPriority !== 0) return byPriority;
+        return String(left.createdAt || "").localeCompare(String(right.createdAt || ""));
+      })
+      .map(publicNotificationRule));
+  }
+
+  async function listNotificationAggregates(session, searchParams) {
+    const limit = notificationOperationsLimit(searchParams);
+    const result = await requirePermission(session, "notifications.operations.read");
+    const aggregates = await store.read((data) => Object.values(data.notificationAggregates)
+      .filter((aggregate) => notificationRuleVisible(result.access, aggregate))
+      .sort((left, right) => String(right.updatedAt || "")
+        .localeCompare(String(left.updatedAt || "")))
+      .slice(0, limit)
+      .map(publicNotificationAggregate));
+    return { aggregates, count: aggregates.length, limit };
+  }
+
+  async function listNotificationSuppressions(session, searchParams) {
+    const limit = notificationOperationsLimit(searchParams);
+    const result = await requirePermission(session, "notifications.operations.read");
+    const suppressions = await store.read((data) => Object.values(data.notificationSuppressions)
+      .filter((suppression) => notificationRuleVisible(result.access, suppression))
+      .sort((left, right) => String(right.updatedAt || "")
+        .localeCompare(String(left.updatedAt || "")))
+      .slice(0, limit)
+      .map(publicNotificationSuppression));
+    return { suppressions, count: suppressions.length, limit };
+  }
+
+  async function listNotificationEscalations(session, searchParams) {
+    const limit = notificationOperationsLimit(searchParams);
+    const result = await requirePermission(session, "notifications.operations.read");
+    const escalations = await store.read((data) => Object.values(data.notificationEscalations)
+      .filter((escalation) => notificationRuleVisible(result.access, escalation))
+      .sort((left, right) => String(right.createdAt || "")
+        .localeCompare(String(left.createdAt || "")))
+      .slice(0, limit)
+      .map(publicNotificationEscalation));
+    return { escalations, count: escalations.length, limit };
+  }
+
+  async function createNotificationRuleResource(req, res) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    await requirePermission(current.session, "notifications.rules.write");
+    await requireStepUp(current, req, "notification.rule.create", "H");
+    const { input } = notificationRuleInput(body);
+    let candidate;
+    try {
+      candidate = createNotificationRule(input, {
+        actorSubjectId: current.session.subjectId,
+        now: notificationNow(),
+      });
+    } catch (error) {
+      throw new HttpError(400, "invalid_notification_rule", error.message);
+    }
+    await requirePermission(
+      current.session,
+      "notifications.rules.write",
+      candidate.targetOrgUnitId || "*",
+    );
+    const payload = normalizedRulePayload(candidate);
+    const requestFingerprint = notificationRuleFingerprint(
+      "notification.rule.create",
+      "",
+      reason,
+      payload,
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const outcome = await store.mutate((data) => {
+      const existing = data.notificationRuleRequests[idempotencyKeyHash];
+      if (existing) {
+        if (existing.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "notification_rule_request_conflict",
+            "Idempotency-Key was already used for a different notification rule request",
+          );
+        }
+        const rule = data.notificationRules[existing.ruleId];
+        if (!rule) {
+          throw new HttpError(
+            503,
+            "storage_unavailable",
+            "The notification rule request points to a missing rule",
+          );
+        }
+        return { rule: structuredClone(rule), created: false };
+      }
+      assertRuleScope(data, current.session, candidate.targetOrgUnitId);
+      assertNotificationRuleChannels(data, candidate);
+      if (data.notificationRules[candidate.ruleId]) {
+        throw new HttpError(409, "notification_rule_conflict", "Rule already exists");
+      }
+      data.notificationRules[candidate.ruleId] = candidate;
+      data.notificationRuleRequests[idempotencyKeyHash] = {
+        idempotencyKeyHash,
+        requestFingerprint,
+        action: "create",
+        ruleId: candidate.ruleId,
+        status: "succeeded",
+        createdAt: candidate.createdAt,
+        updatedAt: candidate.createdAt,
+      };
+      data.adminSystemAuditLogs.push({
+        id: `audit_${crypto.randomUUID()}`,
+        action: "notification.rule.created",
+        timestamp: candidate.createdAt,
+        ruleId: candidate.ruleId,
+        targetOrgUnitId: candidate.targetOrgUnitId,
+        channelId: candidate.channelId,
+        priority: candidate.priority,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        result: "succeeded",
+      });
+      return { rule: structuredClone(candidate), created: true };
+    });
+    json(res, outcome.created ? 201 : 200, {
+      ok: true,
+      created: outcome.created,
+      rule: publicNotificationRule(outcome.rule),
+    });
+  }
+
+  async function updateNotificationRuleResource(req, res, ruleId) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrf(req, current.session);
+    const body = await readJsonBody(req);
+    const reason = cleanReason(body.reason);
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    await requirePermission(current.session, "notifications.rules.write");
+    await requireStepUp(current, req, "notification.rule.update", "H");
+    const { input, expectedUpdatedAt } = notificationRuleInput(body, true);
+    const existing = await store.read((data) => {
+      const rule = data.notificationRules[ruleId];
+      return rule ? structuredClone(rule) : null;
+    });
+    if (!existing) throw new HttpError(404, "notification_rule_not_found", "Rule not found");
+    await requirePermission(
+      current.session,
+      "notifications.rules.write",
+      existing.targetOrgUnitId || "*",
+    );
+    const requestFingerprint = notificationRuleFingerprint(
+      "notification.rule.update",
+      ruleId,
+      reason,
+      input,
+      expectedUpdatedAt,
+    );
+    const idempotencyKeyHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const outcome = await store.mutate((data) => {
+      const existingRequest = data.notificationRuleRequests[idempotencyKeyHash];
+      if (existingRequest) {
+        if (existingRequest.requestFingerprint !== requestFingerprint) {
+          throw new HttpError(
+            409,
+            "notification_rule_request_conflict",
+            "Idempotency-Key was already used for a different notification rule request",
+          );
+        }
+        const rule = data.notificationRules[existingRequest.ruleId];
+        if (!rule) {
+          throw new HttpError(
+            503,
+            "storage_unavailable",
+            "The notification rule request points to a missing rule",
+          );
+        }
+        return { rule: structuredClone(rule), updated: false };
+      }
+      const stored = data.notificationRules[ruleId];
+      if (!stored) throw new HttpError(404, "notification_rule_not_found", "Rule not found");
+      if (expectedUpdatedAt && stored.updatedAt !== expectedUpdatedAt) {
+        throw new HttpError(
+          409,
+          "notification_rule_update_conflict",
+          "The notification rule changed since it was loaded",
+        );
+      }
+      let updated;
+      try {
+        updated = updateNotificationRule(stored, input, {
+          actorSubjectId: current.session.subjectId,
+          now: notificationNow(),
+        });
+      } catch (error) {
+        throw new HttpError(400, "invalid_notification_rule", error.message);
+      }
+      assertRuleScope(data, current.session, updated.targetOrgUnitId);
+      assertNotificationRuleChannels(data, updated);
+      data.notificationRules[ruleId] = updated;
+      data.notificationRuleRequests[idempotencyKeyHash] = {
+        idempotencyKeyHash,
+        requestFingerprint,
+        action: "update",
+        ruleId,
+        status: "succeeded",
+        createdAt: updated.updatedAt,
+        updatedAt: updated.updatedAt,
+      };
+      data.adminSystemAuditLogs.push({
+        id: `audit_${crypto.randomUUID()}`,
+        action: "notification.rule.updated",
+        timestamp: updated.updatedAt,
+        ruleId,
+        targetOrgUnitId: updated.targetOrgUnitId,
+        channelId: updated.channelId,
+        priority: updated.priority,
+        actorSubjectId: current.session.subjectId,
+        actorEmail: current.session.email,
+        reason,
+        result: "succeeded",
+      });
+      return { rule: structuredClone(updated), updated: true };
+    });
+    json(res, 200, {
+      ok: true,
+      updated: outcome.updated,
+      rule: publicNotificationRule(outcome.rule),
+    });
+  }
+
   function notificationQuery(searchParams) {
     const status = String(searchParams.get("status") || "").trim();
     if (status && !NOTIFICATION_STATUSES.includes(status)) {
@@ -7346,6 +7890,46 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/notifications/rules") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, { rules: await listNotificationRules(current.session) });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/notifications/rules") {
+      await createNotificationRuleResource(req, res);
+      return;
+    }
+
+    const notificationRuleMatch =
+      /^\/api\/v1\/admin\/notifications\/rules\/(nrul_[a-f0-9]{24})$/.exec(url.pathname);
+    if (req.method === "PATCH" && notificationRuleMatch) {
+      await updateNotificationRuleResource(req, res, notificationRuleMatch[1]);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/notifications/aggregates") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, await listNotificationAggregates(current.session, url.searchParams));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/notifications/suppressions") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, await listNotificationSuppressions(current.session, url.searchParams));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/notifications/escalations") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      json(res, 200, await listNotificationEscalations(current.session, url.searchParams));
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/api/v1/admin/notifications/channels") {
       await createNotificationChannelResource(req, res);
       return;
@@ -7671,6 +8255,12 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   server.requestTimeout = 30000;
   server.headersTimeout = 10000;
   notificationDispatcher?.start();
+  const notificationEscalationScheduler = options.notificationEscalationScheduler
+    || new NotificationEscalationScheduler(store, notificationOutbox, {
+      intervalMs: options.notificationEscalationIntervalMs
+        || config.notifications?.escalationPollIntervalMs,
+    });
+  notificationEscalationScheduler.start();
   const breakGlassScheduler = new BreakGlassReviewScheduler(
     store,
     notificationOutbox,
@@ -7688,6 +8278,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     modelCatalog,
     notificationOutbox,
     notificationDispatcher,
+    notificationRuleRouter,
+    notificationEscalationScheduler,
     breakGlassScheduler,
   };
 }

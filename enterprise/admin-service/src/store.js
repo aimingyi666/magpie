@@ -16,6 +16,7 @@ import {
   NOTIFICATION_STATUSES,
 } from "./notification-outbox.js";
 import { validateNotificationChannelStore } from "./notification-channels.js";
+import { validateNotificationRuleStore } from "./notification-rules.js";
 
 function emptyStore() {
   return {
@@ -42,6 +43,11 @@ function emptyStore() {
     notificationChannels: {},
     notificationChannelTests: {},
     notificationChannelRequests: {},
+    notificationRules: {},
+    notificationRuleRequests: {},
+    notificationSuppressions: {},
+    notificationAggregates: {},
+    notificationEscalations: {},
     adminExports: {},
     adminExportTokens: {},
     adminExportRequests: {},
@@ -90,6 +96,11 @@ function validateLoaded(value) {
     "notificationChannels",
     "notificationChannelTests",
     "notificationChannelRequests",
+    "notificationRules",
+    "notificationRuleRequests",
+    "notificationSuppressions",
+    "notificationAggregates",
+    "notificationEscalations",
     "adminExports",
     "adminExportTokens",
     "adminExportRequests",
@@ -552,6 +563,7 @@ function validateLoaded(value) {
     }
   }
   validateNotificationChannelStore(value);
+  validateNotificationRuleStore(value);
   for (const [exportId, exportRecord] of Object.entries(value.adminExports)) {
     if (!exportRecord
         || typeof exportRecord !== "object"
