@@ -3,7 +3,8 @@
 状态：**M3-C-1 客户端同步控制面已接入。同步引擎、短期同步凭证、desired-state、
 设备上报、管理员 JSON 查询 API 和客户端 HTTP 传输适配器已实现，并通过 24 项单元/Mock
 测试；管理台资源/漂移页、本地 helper 产品入口、Windows ACL、MDM、目标 Agent 文件映射
-和企业生产验收仍未完成。M3-D 与 M4-M6 仍未实现。**
+和企业生产验收仍未完成；M3-D 运行时核心已在 `enterprise/local-mcp` 实现，但 helper
+集成和生产验收未完成，M4-M6 仍未实现。**
 
 这个包提供本机 Magpie/helper 所需的企业资源同步核心：
 

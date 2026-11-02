@@ -3,7 +3,8 @@
 状态：**M3-C-1 客户端同步控制面，24 项单元/Mock 测试通过。同步引擎、短期同步凭证、
 desired-state、设备上报、管理员 JSON 查询 API 和客户端 HTTP 传输适配器已实现；管理台
 资源/漂移页、本地 helper 产品入口、Windows ACL、MDM、目标 Agent 文件映射和企业生产
-环境验收仍未完成。M3-D 与 M4-M6 仍未实现。**
+环境验收仍未完成；M3-D 运行时核心已在 `enterprise/local-mcp` 实现，但 helper 集成和
+生产验收未完成，M4-M6 仍未实现。**
 
 ## 1. 目标与信任边界
 

@@ -48,12 +48,12 @@ Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项�
 核心已通过 14 项测试；M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员
 JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
 client-sync 24 项（16 核心 + 8 传输）测试通过；M3-C-2 已实现 admin-service 只读资源/
-同步报告 API 和管理页面板，admin-service 109 项通过；当前本地/Mock 回归合计 203 项。
+同步报告 API 和管理页面板，admin-service 109 项、local-mcp 21 项通过；既有企业回归 203 项，合计 224 项。
 M3-A/M3-B 只有核心服务 API；M3-C-1/M3-C-2 已有控制面 API 和只读管理页，但尚未接入
 admin-service 真实审批、资源发布/回滚 UI、发布/回滚审批联动、OIDC 组织分配和本地 helper
 产品入口；
 M3-B 的审批 nonce/限流器仅单进程，注册表/审计/幂等不是同一事务，存在提交后审计失败窗口。
-M3-D、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
+M3-D 运行时核心已实现并通过 21 项测试，但本地 helper/管理台集成、外部 OS 沙箱和生产验收仍未完成；S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
 反向代理和生产环境均未验收。
 第 10 节描述的是 C4-01/C4-02/C4-03a/C4-04 的已实现边界和待验收项；当前不能把受控适配器、
@@ -378,6 +378,26 @@ volumes:
 管理服务只读 `usage.jsonl`，不能写网关数据卷；文件缺失、损坏、尾部半行或超过限制时返回
 `503 storage_unavailable`，不会输出部分报表。
 
+### 9.1.3 M3-D 受控本地 MCP 运行时核心
+
+`enterprise/local-mcp/` 是员工设备侧的 Node 运行时核心，不是 Compose 服务。它先验证
+Ed25519 签名包、canonical manifest、文件 SHA-256 和公钥指纹，再以 staging/fsync/复验/
+原子 rename 安装；运行时套用 Node permission model、受限环境和企业能力策略，高风险工具
+调用需要绑定包 digest 与工具名的审批，Secret 通过 HTTPS Broker 在调用时短期解析。
+
+tests:
+
+```powershell
+& 'D:\Environment\node-v26.12.1\node.exe' --test enterprise\local-mcp\test\*.test.mjs
+```
+
+当前 local-mcp 21 项测试通过，既有企业回归 203 项，合计 224 项。测试只使用精确文件路径、
+临时目录和隔离子进程，不读取真实 usage、管理员会话、Agent 配置或生产 Secret。
+
+生产阻断项：尚未接入本地 helper/Agent 配置和管理台；真实 OIDC、审批服务、Secret Broker、
+KMS/HSM、Windows ACL/MDM、代码签名、安装升级/回滚和已证明的外部 OS 沙箱未验收；
+Docker/VM、共享卷并发、浏览器 E2E、HA 和生产验收未完成。
+
 ### 9.2 管理员流程
 
 1. 管理员打开 `https://admin.ai.corp.example/admin/`。
@@ -457,7 +477,7 @@ C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 
   发布/回滚与 MCP 故障演练。M3-C-2 仍须完成资源发布/回滚 UI、审批联动、浏览器 E2E、
   Docker/Compose 实机、灰度/自动回滚和生产验收；M3-C-1 仍须完成本地 helper、目标 Agent
   文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机和生产验收；
-  M3-D 受控本地 MCP 当前未实现。
+  M3-D 受控本地 MCP 运行时核心已实现并通过 21 项测试，但本地 helper/管理台集成、外部 OS 沙箱和生产验收未完成。
 - 备份恢复、灰度、回滚、至少一次跨部门越权和设备丢失演练。
 
 上述任何一项没有证据，发布结论只能是“受控试点”，不能写“企业生产已完成”。

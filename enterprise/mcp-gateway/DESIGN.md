@@ -2,7 +2,9 @@
 
 Status: M3-B core implemented and covered by 14 unit/Mock integration tests.
 The M3-C resource-sync core is implemented separately in
-`enterprise/client-sync`; M3-D and production acceptance remain unimplemented.
+`enterprise/client-sync`; the M3-D runtime core is implemented in
+`enterprise/local-mcp`, while helper/admin integration and production acceptance
+remain incomplete.
 This document defines the frozen M3-B contract; the README records operating
 instructions and the concrete failure boundaries.
 

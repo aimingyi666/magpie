@@ -61,7 +61,7 @@ APR-01c、NOTIFY-01a、NOTIFY-01b 和 NOTIFY-01c 后端已实现，但真实渠�
 是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/Slack/ServiceNow/Jira SDK，真实
 证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收。
 NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页已实现并通过 Mock/集成测试；
-M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现，M3-D 与 M4-M6 仍未实现；
+M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现；M3-D 受控本地 MCP 运行时核心已实现，但本地 helper/管理台集成和生产验收尚未完成，M4-M6 仍未实现；
 M2-D 核心已实现，生产验收未完成。M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
@@ -363,7 +363,7 @@ allow/deny、可见性和风险策略；high/critical 工具还要求短期 HMAC
 客户端 token 只存 SHA-256，上游凭据只保存环境变量名，审计不记录参数或正文。
 
 当前严格边界：M3-B 只是核心后端，尚未接入 admin-service 真实审批查询/一次性消费、管理台、
-OIDC 组织分配或员工客户端同步；M3-C-1 已有独立同步控制面和客户端核心，M3-D 未实现。审批 nonce 和限流器只在单进程内存中，
+OIDC 组织分配或员工客户端同步；M3-C-1 已有独立同步控制面和客户端核心，M3-D 受控本地 MCP 运行时核心已实现于 `enterprise/local-mcp`，但尚未接入本地 helper、管理台和生产验收。审批 nonce 和限流器只在单进程内存中，
 不能多副本。注册表和审计是分开的持久化写入，审计落盘失败可能发生在状态提交之后；client
 签发场景会留下无法取回明文 token 的孤立 client，必须吊销后重新签发。生产部署需要共享事务
 存储或审计 intent/补偿状态机、不可篡改审计、KMS/HSM、mTLS、真实 MCP/IdP 和浏览器 E2E。
@@ -411,6 +411,19 @@ M3-C-2 已提供管理页的只读资源目录和同步报告/漂移可见性。
 管理页已提供“Resources and client sync”只读面板。仍未实现：资源发布/回滚 UI、发布/回滚
 审批联动、灰度/自动回滚、M3-B MCP 管理台、真实 IdP、浏览器 E2E、Docker/Compose 实机验收、
 Windows ACL/MDM 和生产验收。
+
+### 4.5 受控本地 MCP（M3-D：运行时核心）
+
+`enterprise/local-mcp/` 已实现 M3-D 的客户端运行时核心：Ed25519 签名包、canonical manifest、
+SHA-256 文件摘要和公钥指纹；staging/fsync/复验/原子 rename 安装与并发锁；Node permission
+model、`shell: false`、受限环境及发布者/工具/风险/文件/网络/秘密/解释器策略；高风险工具
+审批绑定包 digest 和工具名；HTTPS Secret Broker 短期租约；JSON-RPC 超时、响应上限和工具
+目录一致性检查；fail-closed 审计及有界健康计数。本核心通过 21 项隔离单元/Mock 测试。
+
+严格边界：尚未接入本地 helper、目标 Agent 配置和管理台员工产品流；真实 OIDC、审批服务、
+Secret Broker、KMS/HSM、Windows ACL/MDM、代码签名、安装升级/回滚和已证明的外部 OS 沙箱
+仍需验收。Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把
+M3-D 运行时核心写成产品化或生产可用。
 
 ## 5. 当前员工与管理员流程（只列已实现）
 
@@ -462,7 +475,7 @@ Windows ACL/MDM 和生产验收。
    M3-C-1 已提供设备同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端同步核心，
    包括强制/推荐、原子安装和漂移检测；M3-C-2 已接入只读资源/漂移页。但资源发布/回滚 UI、
    审批联动、本地 helper 产品流和目标 Agent 文件映射仍未实现；受控本地 MCP 属于 M3-D，
-   仍未实现。
+   运行时核心已实现，但尚未接入本地 helper 和管理台。
 8. 管理员不能直接读取或改写员工本机 Agent 配置。后续中央策略也必须通过本地 Magpie/helper
    的受控同步接口落地，浏览器不能获得任意本机文件写权限。
 
