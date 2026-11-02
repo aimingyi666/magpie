@@ -1,7 +1,10 @@
 import crypto from "node:crypto";
 
+import { ContentGrantError } from "./content-grant.js";
+import { ContentRetrievalError } from "./content-retrieval.js";
 import {
   AuditContentValidationError,
+  CONTENT_PURPOSES,
   publicContentStream,
   validateContentRef,
   validateContentStreamRequest,
@@ -10,8 +13,12 @@ import { ContentStreamError } from "./content-streams.js";
 
 const SCHEMA_VERSION = 1;
 const IDEMPOTENCY_KEY_PATTERN = /^[\u0021-\u007e]{1,128}$/;
-const AUTHORIZATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{7,127}$/;
+const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/;
+const ADMIN_SESSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{7,255}$/;
+const APPROVAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{7,127}$/;
 const MAX_ACCESS_REASON_LENGTH = 1024;
+const GRANT_REQUEST_FIELDS = new Set(["purpose", "reason", "approvalId", "ttlSeconds"]);
+const PURPOSE_SET = new Set(CONTENT_PURPOSES);
 
 export class ContentApiError extends Error {
   constructor(statusCode, code, message, retryable = false) {
@@ -27,6 +34,11 @@ function safeEqual(left, right) {
   const a = Buffer.from(String(left));
   const b = Buffer.from(String(right));
   return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function bearerToken(req) {
+  const match = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization || "").trim());
+  return match ? match[1] : "";
 }
 
 function jsonResponse(res, statusCode, value, reqId, headers = {}) {
@@ -84,30 +96,69 @@ function requireMethod(req, expected) {
   }
 }
 
-function accessReason(req) {
-  const value = String(req.headers["x-audit-content-reason"] || "").trim();
-  if (value.length < 8
+function accessReasonFromGrant(value) {
+  if (typeof value !== "string"
+      || value.length < 8
       || value.length > MAX_ACCESS_REASON_LENGTH
       || /[\u0000-\u001f\u007f]/.test(value)) {
     throw new ContentApiError(
       400,
-      "content_access_reason_required",
-      "A valid X-Audit-Content-Reason header is required",
+      "content_grant_reason_required",
+      "A valid grant reason is required",
     );
   }
   return value;
 }
 
-function accessAuthorization(req) {
-  const value = String(req.headers["x-audit-content-authorization"] || "").trim();
-  if (!AUTHORIZATION_ID_PATTERN.test(value)) {
+function validateGrantRequest(value) {
+  if (!value
+      || typeof value !== "object"
+      || Array.isArray(value)
+      || Object.getPrototypeOf(value) !== Object.prototype) {
     throw new ContentApiError(
       400,
-      "content_access_authorization_required",
-      "A valid X-Audit-Content-Authorization header is required",
+      "invalid_content_grant",
+      "The content grant request must be a JSON object",
     );
   }
-  return value;
+  const unknown = Object.keys(value).find((key) => !GRANT_REQUEST_FIELDS.has(key));
+  if (unknown) {
+    throw new ContentApiError(
+      400,
+      "invalid_content_grant",
+      `The content grant request contains an unknown field: ${unknown}`,
+    );
+  }
+  if (!PURPOSE_SET.has(value.purpose)) {
+    throw new ContentApiError(
+      400,
+      "content_grant_purpose_invalid",
+      "A supported grant purpose is required",
+    );
+  }
+  if (!APPROVAL_ID_PATTERN.test(String(value.approvalId || ""))) {
+    throw new ContentApiError(
+      400,
+      "content_grant_approval_required",
+      "A valid approvalId is required",
+    );
+  }
+  if (value.ttlSeconds !== undefined
+      && (!Number.isSafeInteger(value.ttlSeconds)
+        || value.ttlSeconds < 15
+        || value.ttlSeconds > 300)) {
+    throw new ContentApiError(
+      400,
+      "content_grant_ttl_invalid",
+      "ttlSeconds must be from 15 to 300",
+    );
+  }
+  return {
+    purpose: value.purpose,
+    reason: accessReasonFromGrant(value.reason),
+    approvalId: value.approvalId,
+    ...(value.ttlSeconds !== undefined ? { ttlSeconds: value.ttlSeconds } : {}),
+  };
 }
 
 function sourceHash(req, config) {
@@ -156,7 +207,9 @@ function publicReadResult(result) {
 
 export function normalizeContentError(error) {
   if (error instanceof ContentApiError) return error;
-  if (error instanceof ContentStreamError) {
+  if (error instanceof ContentStreamError
+      || error instanceof ContentGrantError
+      || error instanceof ContentRetrievalError) {
     return new ContentApiError(error.statusCode, error.code, error.message, error.retryable);
   }
   if (error instanceof AuditContentValidationError) {
@@ -182,16 +235,75 @@ export function contentRoute(pathname) {
   if (pathname === "/api/v1/internal/audit/content/streams") {
     return { name: "content_streams" };
   }
+  if (pathname === "/api/v1/admin/audit/content/streams") {
+    return { name: "content_admin_streams" };
+  }
   const chunks = /^\/api\/v1\/internal\/audit\/content\/streams\/(str_[A-Za-z0-9_-]{43})\/chunks$/
     .exec(pathname);
   if (chunks) return { name: "content_chunks", streamId: chunks[1] };
   const stream = /^\/api\/v1\/admin\/audit\/content\/streams\/(str_[A-Za-z0-9_-]{43})$/
     .exec(pathname);
   if (stream) return { name: "content_stream", streamId: stream[1] };
+  const grants = /^\/api\/v1\/admin\/audit\/content\/(ct_[A-Za-z0-9_-]{43})\/grants$/
+    .exec(pathname);
+  if (grants) return { name: "content_grant", contentRef: grants[1] };
   const content = /^\/api\/v1\/admin\/audit\/content\/(ct_[A-Za-z0-9_-]{43})$/
     .exec(pathname);
   if (content) return { name: "content_object", contentRef: content[1] };
   return null;
+}
+
+function requireServiceAuth(req, config) {
+  if (!safeEqual(bearerToken(req), config.serviceToken)) {
+    throw new ContentApiError(401, "unauthorized", "A valid service token is required");
+  }
+}
+
+function adminContext(req, content) {
+  if (!content.adminEnabled) {
+    throw new ContentApiError(
+      503,
+      "content_admin_disabled",
+      "Content administration is disabled",
+    );
+  }
+  if (!safeEqual(bearerToken(req), content.adminToken)) {
+    throw new ContentApiError(
+      401,
+      "content_admin_unauthorized",
+      "A valid content administrator token is required",
+    );
+  }
+  const adminId = String(req.headers["x-audit-admin-id"] || "").trim();
+  if (!SAFE_ID_PATTERN.test(adminId)) {
+    throw new ContentApiError(
+      400,
+      "content_admin_identity_required",
+      "A valid X-Audit-Admin-Id header is required",
+    );
+  }
+  const organizationId = String(req.headers["x-audit-organization-id"] || "").trim();
+  if (!SAFE_ID_PATTERN.test(organizationId)
+      || !safeEqual(organizationId, content.organizationId)) {
+    throw new ContentApiError(
+      403,
+      "content_admin_scope_mismatch",
+      "The administrator organization scope is invalid",
+    );
+  }
+  const sessionId = String(req.headers["x-audit-admin-session"] || "").trim();
+  if (!ADMIN_SESSION_PATTERN.test(sessionId)) {
+    throw new ContentApiError(
+      400,
+      "content_admin_session_required",
+      "A valid X-Audit-Admin-Session header is required",
+    );
+  }
+  return {
+    adminId,
+    organizationId,
+    sessionId,
+  };
 }
 
 export async function handleContentRoute(context) {
@@ -212,6 +324,7 @@ export async function handleContentRoute(context) {
       );
     }
     if (route.name === "content_streams") {
+      requireServiceAuth(req, config);
       requireMethod(req, "POST");
       const key = idempotencyKey(req);
       const body = await readJsonBody(req, config.contentMaxBodyBytes);
@@ -227,6 +340,7 @@ export async function handleContentRoute(context) {
       return;
     }
     if (route.name === "content_chunks") {
+      requireServiceAuth(req, config);
       requireMethod(req, "POST");
       const key = idempotencyKey(req);
       const body = await readJsonBody(req, config.contentMaxBodyBytes);
@@ -248,8 +362,20 @@ export async function handleContentRoute(context) {
       jsonResponse(res, 200, value, reqId);
       return;
     }
+    if (route.name === "content_admin_streams") {
+      requireMethod(req, "GET");
+      adminContext(req, content);
+      const result = await content.retrieval.list(new URL(req.url || "/", "http://localhost"));
+      jsonResponse(res, 200, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        ...result,
+      }, reqId);
+      return;
+    }
     if (route.name === "content_stream") {
       requireMethod(req, "GET");
+      adminContext(req, content);
       const stream = await content.manager.get(route.streamId);
       if (!stream) {
         throw new ContentApiError(404, "content_stream_not_found", "Content stream not found");
@@ -261,16 +387,57 @@ export async function handleContentRoute(context) {
       }, reqId);
       return;
     }
+    if (route.name === "content_grant") {
+      requireMethod(req, "POST");
+      const administrator = adminContext(req, content);
+      const contentRef = validateContentRef(route.contentRef);
+      if (!await content.store.hasObject(contentRef)) {
+        throw new ContentApiError(404, "content_object_not_found", "Content object not found");
+      }
+      const request = validateGrantRequest(
+        await readJsonBody(req, config.contentMaxBodyBytes),
+      );
+      const issued = await content.grants.issue({
+        ...administrator,
+        contentRef,
+        ...request,
+      });
+      jsonResponse(res, 201, {
+        schemaVersion: SCHEMA_VERSION,
+        ok: true,
+        grant: issued.grant,
+        grantId: issued.grantId,
+        contentRef: issued.contentRef,
+        issuedAt: issued.issuedAt,
+        expiresAt: issued.expiresAt,
+      }, reqId);
+      return;
+    }
     if (route.name === "content_object") {
       requireMethod(req, "GET");
-      assertContentReadAllowed(req, config);
+      const administrator = adminContext(req, content);
       const contentRef = validateContentRef(route.contentRef);
-      const reason = accessReason(req);
-      const authorizationId = accessAuthorization(req);
-      const accessedAt = new Date().toISOString();
+      const grantToken = String(req.headers["x-audit-content-grant"] || "").trim();
+      if (!grantToken) {
+        throw new ContentApiError(
+          401,
+          "content_grant_required",
+          "A one-time content grant is required",
+        );
+      }
+      const grant = await content.grants.consume(grantToken, {
+        ...administrator,
+        contentRef,
+      });
+      const accessedAt = content.store.timestamp();
       const result = await content.store.readObject(contentRef, {
-        reason,
-        authorizationId,
+        reason: grant.reason,
+        authorizationId: grant.approvalId,
+        approvalId: grant.approvalId,
+        grantId: grant.grantId,
+        adminId: grant.adminId,
+        organizationId: grant.organizationId,
+        purpose: grant.purpose,
         accessedAt,
         requestId: reqId,
         sourceHash: sourceHash(req, config),
@@ -288,23 +455,5 @@ export async function handleContentRoute(context) {
     throw new ContentApiError(404, "not_found", "Route not found");
   } catch (error) {
     throw normalizeContentError(error);
-  }
-}
-
-function assertContentReadAllowed(req, config) {
-  if (!config.contentReadToken) {
-    throw new ContentApiError(
-      503,
-      "content_read_disabled",
-      "Content read access is disabled",
-    );
-  }
-  const token = String(req.headers["x-audit-content-token"] || "").trim();
-  if (!safeEqual(token, config.contentReadToken)) {
-    throw new ContentApiError(
-      401,
-      "content_read_unauthorized",
-      "A valid content read token is required",
-    );
   }
 }

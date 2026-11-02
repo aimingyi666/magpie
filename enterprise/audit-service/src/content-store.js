@@ -20,6 +20,9 @@ const STREAM_ID_PATTERN = /^str_[A-Za-z0-9_-]{43}$/;
 const CONTENT_REF_PATTERN = /^ct_[A-Za-z0-9_-]{43}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
 const AUTHORIZATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{7,127}$/;
+const GRANT_ID_PATTERN = /^grt_[A-Za-z0-9_-]{43}$/;
+const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/;
+const PURPOSE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const SOURCE_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ERROR_CODE_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
 const MAX_ACCESS_RECORDS = 10_000;
@@ -54,6 +57,14 @@ function safeInteger(value, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
 
 function randomId(prefix) {
   return `${prefix}${crypto.randomBytes(32).toString("base64url")}`;
+}
+
+function compareStreamsDesc(left, right) {
+  if (left.createdAt !== right.createdAt) {
+    return left.createdAt < right.createdAt ? 1 : -1;
+  }
+  if (left.streamId === right.streamId) return 0;
+  return left.streamId < right.streamId ? 1 : -1;
 }
 
 function idempotencyKeyHash(scope, key) {
@@ -206,6 +217,11 @@ function validateAccessRecord(record) {
         "sourceHash",
         "outcome",
         "errorCode",
+        "grantId",
+        "adminId",
+        "organizationId",
+        "purpose",
+        "approvalId",
       ].includes(key))
       || !/^acc_[A-Za-z0-9_-]{43}$/.test(record.accessId || "")
       || !requiredString(record.accessedAt, 64)
@@ -215,6 +231,12 @@ function validateAccessRecord(record) {
       || !requiredString(record.requestId, 136)
       || !SOURCE_HASH_PATTERN.test(record.sourceHash || "")
       || !["success", "failed"].includes(record.outcome)
+      || (record.grantId !== undefined && !GRANT_ID_PATTERN.test(record.grantId))
+      || (record.adminId !== undefined && !SAFE_ID_PATTERN.test(record.adminId))
+      || (record.organizationId !== undefined && !SAFE_ID_PATTERN.test(record.organizationId))
+      || (record.purpose !== undefined && !PURPOSE_PATTERN.test(record.purpose))
+      || (record.approvalId !== undefined
+        && !AUTHORIZATION_ID_PATTERN.test(record.approvalId))
       || (record.outcome === "failed" && !ERROR_CODE_PATTERN.test(record.errorCode || ""))
       || (record.outcome === "success" && record.errorCode !== undefined)) {
     throw new ContentStoreError(500, "content_store_corrupt", "Content access audit is invalid");
@@ -410,6 +432,40 @@ export class ContentStore {
     const normalized = validateContentStreamId(streamId);
     const stream = this.index.streams[normalized];
     return stream ? this.clone(stream) : null;
+  }
+
+  async searchStreams(filters = {}, after = null, limit = 51) {
+    this.assertLoaded();
+    if (!safeInteger(limit, 1, 201)) {
+      throw new ContentStoreError(400, "invalid_content_query", "Content query limit is invalid");
+    }
+    const matches = (stream) => {
+      const request = stream.request || {};
+      return (!filters.userId || request.userId === filters.userId)
+        && (!filters.departmentId || request.departmentId === filters.departmentId)
+        && (!filters.deviceId || request.deviceId === filters.deviceId)
+        && (!filters.agentId || request.agentId === filters.agentId)
+        && (!filters.modelId || request.modelId === filters.modelId)
+        && (!filters.mcpServerId || request.mcpServerId === filters.mcpServerId)
+        && (!filters.toolName || request.toolName === filters.toolName)
+        && (!filters.contentKind || request.contentKind === filters.contentKind)
+        && (!filters.status || stream.status === filters.status)
+        && (!filters.from || stream.createdAt >= filters.from)
+        && (!filters.to || stream.createdAt <= filters.to);
+    };
+    return Object.values(this.index.streams)
+      .filter(matches)
+      .sort(compareStreamsDesc)
+      .filter((stream) => !after || stream.createdAt < after.createdAt
+        || (stream.createdAt === after.createdAt && stream.streamId < after.streamId))
+      .slice(0, limit)
+      .map((stream) => this.clone(stream));
+  }
+
+  async hasObject(contentRef) {
+    this.assertLoaded();
+    const normalized = validateContentRef(contentRef);
+    return Boolean(this.index.objects[normalized]);
   }
 
   async acceptChunk(streamId, sequence, chunkFingerprintSha256, idempotencyKey, byteLength) {
@@ -639,15 +695,28 @@ export class ContentStore {
       sourceHash: context.sourceHash,
       outcome,
       ...(errorCode ? { errorCode } : {}),
+      ...(context.grantId ? { grantId: context.grantId } : {}),
+      ...(context.adminId ? { adminId: context.adminId } : {}),
+      ...(context.organizationId ? { organizationId: context.organizationId } : {}),
+      ...(context.purpose ? { purpose: context.purpose } : {}),
+      ...(context.approvalId ? { approvalId: context.approvalId } : {}),
     };
     validateAccessRecord(record);
-    const records = this.index.access[contentRef] || [];
+    const existing = this.index.access[contentRef];
+    const records = existing ? existing.slice() : [];
+    if (existing) this.index.access[contentRef] = records;
+    else this.index.access[contentRef] = records;
     records.push(record);
     if (records.length > MAX_ACCESS_RECORDS) {
       records.splice(0, records.length - MAX_ACCESS_RECORDS);
     }
-    this.index.access[contentRef] = records;
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (error) {
+      if (existing) this.index.access[contentRef] = existing;
+      else delete this.index.access[contentRef];
+      throw error;
+    }
     return this.clone(record);
   }
 
@@ -657,7 +726,13 @@ export class ContentStore {
         || context.reason.length < 8
         || !AUTHORIZATION_ID_PATTERN.test(context.authorizationId || "")
         || !requiredString(context.requestId, 136)
-        || !SOURCE_HASH_PATTERN.test(context.sourceHash || "")) {
+        || !SOURCE_HASH_PATTERN.test(context.sourceHash || "")
+        || (context.grantId !== undefined && !GRANT_ID_PATTERN.test(context.grantId))
+        || (context.adminId !== undefined && !SAFE_ID_PATTERN.test(context.adminId))
+        || (context.organizationId !== undefined && !SAFE_ID_PATTERN.test(context.organizationId))
+        || (context.purpose !== undefined && !PURPOSE_PATTERN.test(context.purpose))
+        || (context.approvalId !== undefined
+          && !AUTHORIZATION_ID_PATTERN.test(context.approvalId))) {
       throw new ContentStoreError(400, "invalid_content_access", "Content access context is invalid");
     }
   }

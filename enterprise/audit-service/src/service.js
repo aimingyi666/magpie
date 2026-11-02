@@ -7,6 +7,8 @@ import {
   contentRoute,
   handleContentRoute,
 } from "./content-service.js";
+import { ContentGrantManager } from "./content-grant.js";
+import { ContentRetrieval } from "./content-retrieval.js";
 import { ContentStreamManager } from "./content-streams.js";
 import { AuditPipeline } from "./pipeline.js";
 import { AuditStore } from "./store.js";
@@ -305,6 +307,8 @@ export async function createAuditServer(config, options = {}) {
   const limiter = new FixedWindowRateLimiter(config.rateLimitPerMinute, options.nowMs || Date.now);
   let contentStore = null;
   let contentManager = null;
+  let contentGrants = null;
+  let contentRetrieval = null;
   if (config.contentEnabled) {
     contentStore = options.contentStore || new ContentStore({
       directory: config.contentStoreDir,
@@ -322,11 +326,29 @@ export async function createAuditServer(config, options = {}) {
       now: options.nowMs || Date.now,
     });
     if (!options.contentManager) contentManager.start();
+    if (config.contentAdminEnabled) {
+      contentGrants = options.contentGrants || new ContentGrantManager({
+        filePath: config.contentGrantStorePath,
+        secret: config.contentGrantSecret,
+        defaultTtlSeconds: config.contentGrantTtlSeconds,
+        maxTtlSeconds: 300,
+        now: options.nowMs || Date.now,
+      });
+      if (!options.contentGrants) await contentGrants.load();
+      contentRetrieval = options.contentRetrieval || new ContentRetrieval(contentStore, {
+        cursorSecret: config.contentCursorSecret,
+      });
+    }
   }
   const content = {
     enabled: Boolean(config.contentEnabled),
+    adminEnabled: Boolean(config.contentAdminEnabled),
+    organizationId: config.contentOrganizationId,
+    adminToken: config.contentAdminToken,
     store: contentStore,
     manager: contentManager,
+    grants: contentGrants,
+    retrieval: contentRetrieval,
   };
 
   const server = http.createServer(async (req, res) => {
@@ -349,7 +371,8 @@ export async function createAuditServer(config, options = {}) {
       if (!limiter.allow(req.socket.remoteAddress || "unknown")) {
         throw new ApiError(429, "rate_limited", "Too many requests", true);
       }
-      if (!safeEqual(bearerToken(req), config.serviceToken)) {
+      if (!route.name.startsWith("content_")
+          && !safeEqual(bearerToken(req), config.serviceToken)) {
         throw new ApiError(401, "unauthorized", "A valid service token is required");
       }
 
@@ -451,6 +474,7 @@ export async function createAuditServer(config, options = {}) {
           response.content = {
             ...(await content.store.status()),
             ...content.manager.status(),
+            ...(content.grants ? await content.grants.status() : {}),
           };
         }
         jsonResponse(res, 200, response, reqId);
@@ -472,6 +496,7 @@ export async function createAuditServer(config, options = {}) {
       });
     }
     if (content.manager) await content.manager.close();
+    if (content.grants) await content.grants.close();
     if (content.store) await content.store.close();
     await pipeline.drainAll();
   };
@@ -481,6 +506,8 @@ export async function createAuditServer(config, options = {}) {
     pipeline,
     contentStore,
     contentManager,
+    contentGrants,
+    contentRetrieval,
     contentStatus: () => (content.manager ? content.manager.status() : null),
     close,
   };

@@ -190,10 +190,12 @@ services:
       retries: 3
       start_period: 10s
 
-  # M4-A audit event pipeline core. This service is internal-only: it accepts
-  # L0/L1 metadata events, persists an idempotent queue, and exposes metadata
-  # query endpoints. Gateway/UI integration, administrator OIDC/RBAC, L2/L3
-  # content, retention, HA and production acceptance are not implemented.
+  # M4-A/M4-B/M4-C audit core. This service is internal-only: it accepts
+  # L0/L1 metadata events, stores optional L2 redacted content, and exposes
+  # filtered content metadata plus one-time body grants to a trusted
+  # management gateway. Administrator OIDC/RBAC/step-up orchestration, the
+  # admin UI, retention/deletion, HA and production acceptance are not
+  # implemented here.
   # Start it explicitly with:
   #   docker compose --profile audit up -d audit
   audit:
@@ -222,7 +224,12 @@ services:
       AUDIT_RATE_LIMIT_PER_MINUTE: ${AUDIT_RATE_LIMIT_PER_MINUTE:-6000}
       AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-false}
       AUDIT_CONTENT_ENCRYPTION_KEY: ${AUDIT_CONTENT_ENCRYPTION_KEY:-}
-      AUDIT_CONTENT_READ_TOKEN: ${AUDIT_CONTENT_READ_TOKEN:-}
+      AUDIT_CONTENT_ADMIN_ENABLED: ${AUDIT_CONTENT_ADMIN_ENABLED:-false}
+      AUDIT_CONTENT_ADMIN_TOKEN: ${AUDIT_CONTENT_ADMIN_TOKEN:-}
+      AUDIT_CONTENT_ORGANIZATION_ID: ${AUDIT_CONTENT_ORGANIZATION_ID:-}
+      AUDIT_CONTENT_GRANT_SECRET: ${AUDIT_CONTENT_GRANT_SECRET:-}
+      AUDIT_CONTENT_CURSOR_SECRET: ${AUDIT_CONTENT_CURSOR_SECRET:-}
+      AUDIT_CONTENT_GRANT_TTL_SECONDS: ${AUDIT_CONTENT_GRANT_TTL_SECONDS:-120}
       AUDIT_CONTENT_STORE_DIR: ${AUDIT_CONTENT_STORE_DIR:-/data/audit-content}
       AUDIT_CONTENT_MAX_BODY_BYTES: ${AUDIT_CONTENT_MAX_BODY_BYTES:-393216}
       AUDIT_CONTENT_MAX_CHUNK_BYTES: ${AUDIT_CONTENT_MAX_CHUNK_BYTES:-262144}
