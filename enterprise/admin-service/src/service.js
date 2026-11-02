@@ -2,6 +2,7 @@ import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { AuthServiceClient } from "./auth-client.js";
+import { ResourceServiceClient, ResourceServiceError } from "./resource-client.js";
 import {
   normalizeAdminIdentity,
   OidcClient,
@@ -633,6 +634,121 @@ function orgUnitSummary(org) {
     path: org.path,
     status: org.status,
   };
+}
+
+// M3-C-2 read-only projections for the resource catalog and client sync
+// control plane. Every field is allowlisted here so resource bodies, signing
+// keys, tokens, and actor identities from the upstream service can never
+// reach a browser, a log, or an API response.
+function safeResourceText(value, fallback = "") {
+  return typeof value === "string" ? value : fallback;
+}
+
+function safeResourceList(value) {
+  return Array.isArray(value) ? value.map(String) : [];
+}
+
+function safeResourceNumber(value) {
+  return Number.isFinite(Number(value)) ? Number(value) : 0;
+}
+
+function publicSyncDrift(item) {
+  return {
+    resourceId: safeResourceText(item?.resourceId),
+    state: safeResourceText(item?.state),
+    expectedReleaseId: safeResourceText(item?.expectedReleaseId),
+    actualReleaseId: safeResourceText(item?.actualReleaseId),
+  };
+}
+
+function publicSyncInstalled(item) {
+  return {
+    resourceId: safeResourceText(item?.resourceId),
+    releaseId: safeResourceText(item?.releaseId),
+    manifestDigest: safeResourceText(item?.manifestDigest),
+  };
+}
+
+function publicSyncReport(report) {
+  return {
+    userId: safeResourceText(report?.userId),
+    deviceId: safeResourceText(report?.deviceId),
+    revision: safeResourceText(report?.revision),
+    status: safeResourceText(report?.status),
+    clientVersion: safeResourceText(report?.clientVersion),
+    installed: Array.isArray(report?.installed)
+      ? report.installed.map(publicSyncInstalled)
+      : [],
+    drift: Array.isArray(report?.drift) ? report.drift.map(publicSyncDrift) : [],
+    driftCount: Array.isArray(report?.drift) ? report.drift.length : 0,
+    reportedAt: safeResourceText(report?.reportedAt),
+    receivedAt: safeResourceText(report?.receivedAt),
+  };
+}
+
+function publicResourceRelease(release) {
+  if (!release || typeof release !== "object") return null;
+  return {
+    id: safeResourceText(release.id),
+    resourceId: safeResourceText(release.resourceId),
+    resourceVersion: safeResourceText(release.resourceVersion),
+    status: safeResourceText(release.status),
+    hash: safeResourceText(release.hash),
+    contentBytes: safeResourceNumber(release.contentBytes),
+    mediaType: safeResourceText(release.mediaType),
+    manifestDigest: safeResourceText(release.manifestDigest),
+    previousReleaseId: safeResourceText(release.previousReleaseId),
+    createdAt: safeResourceText(release.createdAt),
+    publishedAt: safeResourceText(release.publishedAt),
+  };
+}
+
+function publicCatalogResource(resource, access) {
+  const assignments = safeResourceList(resource?.assignments);
+  return {
+    id: safeResourceText(resource?.id),
+    kind: safeResourceText(resource?.kind),
+    name: safeResourceText(resource?.name),
+    description: safeResourceText(resource?.description),
+    publisher: safeResourceText(resource?.publisher),
+    deliveryMode: safeResourceText(resource?.deliveryMode),
+    assignments: hasGlobalScope(access)
+      ? assignments
+      : assignments.filter(
+        (assignment) => assignment === "*" || access.scopeOrgUnitIds.includes(assignment),
+      ),
+    compatibility: plainObjectShape(resource?.compatibility),
+    status: safeResourceText(resource?.status),
+    currentReleaseId: safeResourceText(resource?.currentReleaseId),
+    currentRelease: publicResourceRelease(resource?.currentRelease),
+    createdAt: safeResourceText(resource?.createdAt),
+    updatedAt: safeResourceText(resource?.updatedAt),
+  };
+}
+
+function plainObjectShape(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const output = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (typeof item === "string") output[key] = item;
+    else if (Array.isArray(item)) output[key] = item.map(String);
+    else if (Number.isFinite(Number(item)) && item !== null && item !== "") {
+      output[key] = Number(item);
+    }
+  }
+  return output;
+}
+
+// A resource is visible when it is assigned to "*" or to at least one org
+// unit inside the administrator's effective scope. The projection then keeps
+// only "*" and in-scope assignment values, so a visible resource never
+// reveals targeting for org units outside the administrator's scope.
+function resourceInScope(access, resource) {
+  if (hasGlobalScope(access)) return true;
+  const assignments = safeResourceList(resource?.assignments);
+  return assignments.some(
+    (assignment) => assignment === "*" || access.scopeOrgUnitIds.includes(assignment),
+  );
 }
 
 function finiteWindow(searchParams, maxRangeDays) {
@@ -1511,6 +1627,36 @@ targetOrgUnitId</textarea>
     notificationRulePanel,
     notificationOperationsPanel,
   ].join("");
+  // M3-C-2: read-only resource catalog and client sync visibility. The panels
+  // are rendered empty on the server and filled by /admin/app.js from the
+  // scoped JSON APIs, so no resource content or token can be embedded here.
+  const canReadSyncReports = can("devices.read");
+  const canReadResources = can("resources.read");
+  const resourceSyncPanel = canReadSyncReports || canReadResources
+    ? `<form id="resource-sync-filter" class="toolbar">
+        <label>Resource <input name="resourceId" maxlength="128" placeholder="res_..."></label>
+        <label>Device <input name="deviceId" maxlength="128" placeholder="device id"></label>
+        <label>User <input name="userId" maxlength="128"></label>
+        <label>Status <input name="status" maxlength="32"></label>
+        <label>Only drifted <select name="drifted"><option value="">Any</option><option value="true">Drift only</option></select></label>
+        <button type="submit">Refresh resources and sync</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      ${canReadResources
+    ? `<h3>Published resources</h3>
+        <p class="notice">Metadata only. Resource content, signing keys, and service tokens are never shown.</p>
+        <div id="resource-list" aria-live="polite"></div>`
+    : `<p class="notice">Your role cannot read the resource catalog.</p>`}
+      ${canReadSyncReports
+    ? `<h3>Client sync reports</h3>
+        <p class="notice">Reports are attributed to identities inside your organization scope; anything unresolvable stays hidden.</p>
+        <div id="resource-sync-report-list" aria-live="polite"></div>
+        <section class="detail-panel">
+          <h3>Selected sync report</h3>
+          <pre id="resource-sync-report-detail">Select a device to inspect its safe sync metadata.</pre>
+        </section>`
+    : `<p class="notice">Your role cannot read device sync reports.</p>`}`
+    : `<p class="notice">Your role cannot read the resource catalog or client sync state.</p>`;
   return `<!doctype html>
 <html lang="en">
 <head>
@@ -1642,6 +1788,7 @@ targetOrgUnitId</textarea>
     ]),
     { htmlColumns: [8] },
   )}
+  <h2>Resources and client sync</h2>${resourceSyncPanel}
   <h2>Visible organization units</h2><ul>${orgRows}</ul>
   <h2>Session</h2>
   <p>Expires at ${escapeHtml(session.expiresAt)}. Every request recalculates roles from the store.</p>
@@ -1680,6 +1827,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     ? (options.stepUpOidc || new OidcClient(config.stepUpOidc))
     : null;
   const authService = options.authService || new AuthServiceClient(config.authService);
+  const resourceService = options.resourceService
+    || new ResourceServiceClient(config.resourceService || { enabled: false });
   const notificationChannelSettings = config.notifications?.channels || {};
   const notificationChannelTransport = options.notificationChannelTransport || (
     notificationChannelSettings.enabled
@@ -4859,6 +5008,119 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         .map(publicAdminCredential)
         .sort((left, right) => String(right.createdAt)
           .localeCompare(String(left.createdAt))),
+    };
+  }
+
+  // M3-C-2: read-only visibility into the resource catalog and client sync
+  // reports. Reports are attributed through auth-service, so a report whose
+  // user or device cannot be resolved is hidden instead of shown as unknown.
+  function requireResourceService() {
+    if (!resourceService.enabled) {
+      throw new HttpError(
+        503,
+        "resource_service_unavailable",
+        "The resource catalog service is not configured",
+      );
+    }
+  }
+
+  function resourceDependencyError(error) {
+    if (error instanceof HttpError) throw error;
+    if (error instanceof ResourceServiceError && error.statusCode === 404) {
+      throw new HttpError(404, "target_not_found", "The requested record was not found");
+    }
+    throw new HttpError(
+      503,
+      "resource_service_unavailable",
+      "The resource catalog service is unavailable",
+    );
+  }
+
+  async function scopedSyncReports(session, permission = "devices.read") {
+    const result = await requirePermission(session, permission);
+    requireResourceService();
+    const [{ users }, { devices }, reports] = await Promise.all([
+      authService.users(),
+      authService.devices(),
+      resourceService.listSyncReports().catch(resourceDependencyError),
+    ]);
+    const visible = visibleUserIds(result.data, result.access, users);
+    const deviceById = new Map(devices.map((device) => [device.id, device]));
+    return {
+      ...result,
+      reports: reports
+        .map(publicSyncReport)
+        .filter((report) => {
+          // Fail closed: the device must exist, belong to a visible user, and
+          // agree with the report's own user attribution.
+          const device = deviceById.get(report.deviceId);
+          if (!device) return false;
+          if (!visible.has(device.userId)) return false;
+          return device.userId === report.userId;
+        })
+        .sort((left, right) => String(right.receivedAt).localeCompare(String(left.receivedAt))),
+    };
+  }
+
+  async function scopedSyncReportDetail(session, deviceId) {
+    const result = await requirePermission(session, "devices.read");
+    requireResourceService();
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(deviceId)) {
+      throw new HttpError(404, "target_not_found", "The requested record was not found");
+    }
+    const [{ users }, { devices }, report] = await Promise.all([
+      authService.users(),
+      authService.devices(),
+      resourceService.getSyncReport(deviceId).catch(resourceDependencyError),
+    ]);
+    const projected = publicSyncReport(report);
+    const device = devices.find((candidate) => candidate.id === projected.deviceId);
+    const userId = device ? device.userId : projected.userId;
+    // Fail closed: a cross-scope report is refused without confirming it exists.
+    if (!device || !userInScope(result.data, result.access, userId)) {
+      throw new HttpError(403, "forbidden_scope", "This device is outside your organization scope");
+    }
+    const visible = visibleUserIds(result.data, result.access, users);
+    if (!visible.has(userId)) {
+      throw new HttpError(403, "forbidden_scope", "This device is outside your organization scope");
+    }
+    return { ...result, report: projected };
+  }
+
+  async function scopedResources(session) {
+    const result = await requirePermission(session, "resources.read");
+    requireResourceService();
+    const resources = await resourceService.listResources().catch(resourceDependencyError);
+    return {
+      ...result,
+      resources: resources
+        .filter((resource) => resourceInScope(result.access, resource))
+        .map((resource) => publicCatalogResource(resource, result.access))
+        .sort((left, right) => String(right.updatedAt).localeCompare(String(left.updatedAt))),
+    };
+  }
+
+  async function scopedResourceDetail(session, resourceId) {
+    const result = await requirePermission(session, "resources.read");
+    requireResourceService();
+    if (!/^res_[a-z0-9]{16,64}$/.test(resourceId)) {
+      throw new HttpError(404, "target_not_found", "The requested record was not found");
+    }
+    const payload = await resourceService.getResource(resourceId).catch(resourceDependencyError);
+    if (!resourceInScope(result.access, payload.resource)) {
+      throw new HttpError(
+        403,
+        "forbidden_scope",
+        "This resource is outside your organization scope",
+      );
+    }
+    return {
+      ...result,
+      resource: publicCatalogResource(payload.resource, result.access),
+      releases: (Array.isArray(payload.releases) ? payload.releases : [])
+        .filter((release) => release?.resourceId === payload.resource?.id)
+        .map(publicResourceRelease)
+        .filter(Boolean),
     };
   }
 
@@ -8131,6 +8393,44 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
       await requirePermission(current.session, "models.read");
       json(res, 200, publicModelCatalog(modelCatalog));
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/resource-sync/reports") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const result = await scopedSyncReports(current.session);
+      json(res, 200, { reports: result.reports });
+      return;
+    }
+
+    const syncReportMatch = /^\/api\/v1\/admin\/resource-sync\/reports\/([A-Za-z0-9._:-]+)$/.exec(
+      url.pathname,
+    );
+    if (req.method === "GET" && syncReportMatch) {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const result = await scopedSyncReportDetail(current.session, syncReportMatch[1]);
+      json(res, 200, { report: result.report });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/resources") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const result = await scopedResources(current.session);
+      json(res, 200, { resources: result.resources });
+      return;
+    }
+
+    const resourceMatch = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})$/.exec(
+      url.pathname,
+    );
+    if (req.method === "GET" && resourceMatch) {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const result = await scopedResourceDetail(current.session, resourceMatch[1]);
+      json(res, 200, { resource: result.resource, releases: result.releases });
       return;
     }
 

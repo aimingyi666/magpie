@@ -1094,6 +1094,162 @@ function splitList(value) {
     .filter(Boolean);
 }
 
+function renderResources(resources) {
+  const target = document.querySelector("#resource-list");
+  if (!target) return;
+  clear(target);
+  if (resources.length === 0) {
+    target.append(node("p", "No published resource is assigned to your organization scope."));
+    return;
+  }
+  target.append(dataTable(
+    ["Name", "Kind", "Status", "Delivery", "Assignments", "Current release", "Updated"],
+    resources.map((resource) => [
+      resource.name,
+      resource.kind,
+      resource.status,
+      resource.deliveryMode,
+      (resource.assignments || []).join(", "),
+      resource.currentRelease
+        ? `${resource.currentRelease.resourceVersion} (${resource.currentRelease.status})`
+        : resource.currentReleaseId || "",
+      resource.updatedAt,
+    ]),
+    resources.map((resource) => ({
+      label: "Inspect",
+      run: () => inspectResource(resource.id),
+    })),
+  ));
+}
+
+async function inspectResource(resourceId) {
+  const target = document.querySelector("#resource-list");
+  if (!target || !resourceId) return;
+  const form = document.querySelector("#resource-sync-filter");
+  if (form) setResult(form, `Loading resource ${resourceId}.`, "pending");
+  try {
+    const payload = await api(`/api/v1/admin/resources/${encodeURIComponent(resourceId)}`);
+    const detail = node("pre", JSON.stringify(payload, null, 2), "detail-panel");
+    target.append(detail);
+    if (form) setResult(form, "Resource metadata loaded.", "result");
+  } catch (error) {
+    if (form) showError(form, error);
+  }
+}
+
+function renderSyncReports(reports) {
+  const target = document.querySelector("#resource-sync-report-list");
+  if (!target) return;
+  clear(target);
+  if (reports.length === 0) {
+    target.append(node("p", "No client sync report was received from your organization scope."));
+    return;
+  }
+  const detail = document.querySelector("#resource-sync-report-detail");
+  target.append(dataTable(
+    ["Device", "User", "Status", "Client", "Revision", "Drift", "Reported"],
+    reports.map((report) => [
+      report.deviceId,
+      report.userId,
+      report.status,
+      report.clientVersion,
+      report.revision,
+      String(report.driftCount ?? (report.drift || []).length),
+      report.reportedAt,
+    ]),
+    reports.map((report) => ({
+      label: "Inspect",
+      run: () => {
+        if (detail) {
+          detail.textContent = JSON.stringify(report, null, 2);
+        }
+        loadSyncReportDetail(report.deviceId);
+      },
+    })),
+  ));
+}
+
+async function loadSyncReportDetail(deviceId) {
+  const detail = document.querySelector("#resource-sync-report-detail");
+  const form = document.querySelector("#resource-sync-filter");
+  if (!deviceId) return;
+  try {
+    const payload = await api(
+      `/api/v1/admin/resource-sync/reports/${encodeURIComponent(deviceId)}`,
+    );
+    if (detail) detail.textContent = JSON.stringify(payload.report || {}, null, 2);
+  } catch (error) {
+    if (detail) {
+      detail.textContent = `This sync report is outside your scope or unavailable: ${error.code || error.message || "error"}`;
+    }
+    if (form) showError(form, error);
+  }
+}
+
+async function loadResourceSyncVisibility(form) {
+  if (!form) return;
+  const params = queryFromForm(form);
+  const resourceList = document.querySelector("#resource-list");
+  const reportList = document.querySelector("#resource-sync-report-list");
+  setResult(form, "Loading resources and client sync state.", "pending");
+  const loaded = [];
+  const failures = [];
+  if (resourceList) {
+    try {
+      const payload = await api("/api/v1/admin/resources");
+      const resources = (payload.resources || []).filter((resource) => {
+        const resourceId = String(params.get("resourceId") || "").trim();
+        if (!resourceId) return true;
+        return resource.id.includes(resourceId)
+          || String(resource.name || "").toLowerCase().includes(resourceId.toLowerCase());
+      });
+      renderResources(resources);
+      loaded.push(`${resources.length} resource(s)`);
+    } catch (error) {
+      clear(resourceList);
+      resourceList.append(node(
+        "p",
+        `The resource catalog is unavailable (${error.code || error.message || "error"}). `
+        + "This list is not empty: it failed closed.",
+        "notice",
+      ));
+      failures.push(error);
+    }
+  }
+  if (reportList) {
+    try {
+      const payload = await api("/api/v1/admin/resource-sync/reports");
+      const reports = (payload.reports || []).filter((report) => {
+        const deviceId = String(params.get("deviceId") || "").trim();
+        const userId = String(params.get("userId") || "").trim();
+        const status = String(params.get("status") || "").trim();
+        const drifted = String(params.get("drifted") || "").trim();
+        if (deviceId && !String(report.deviceId || "").includes(deviceId)) return false;
+        if (userId && !String(report.userId || "").includes(userId)) return false;
+        if (status && report.status !== status) return false;
+        if (drifted === "true" && (report.drift || []).length === 0) return false;
+        return true;
+      });
+      renderSyncReports(reports);
+      loaded.push(`${reports.length} sync report(s)`);
+    } catch (error) {
+      clear(reportList);
+      reportList.append(node(
+        "p",
+        `Client sync reports are unavailable (${error.code || error.message || "error"}). `
+        + "This list is not empty: it failed closed.",
+        "notice",
+      ));
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0) {
+    showError(form, failures[0]);
+    return;
+  }
+  setResult(form, `${loaded.join(" and ")} loaded.`, "result");
+}
+
 function notificationTestLabel(test) {
   if (!test) return "Not tested";
   return `${test.status || "unknown"} · ${test.resultCode || "no_result_code"}`;
@@ -1774,7 +1930,8 @@ document.addEventListener("submit", async (event) => {
     + "#notification-channel-form, #notification-channel-filter, "
     + "#notification-delivery-filter, #notification-dead-letter-filter, "
     + "#notification-replay-form, #notification-rule-form, "
-    + "#notification-rule-filter, #notification-operations-filter",
+    + "#notification-rule-filter, #notification-operations-filter, "
+    + "#resource-sync-filter",
   );
   if (!known) return;
   event.preventDefault();
@@ -1828,6 +1985,8 @@ document.addEventListener("submit", async (event) => {
     await loadNotificationRules();
   } else if (form.id === "notification-operations-filter") {
     await loadNotificationOperations();
+  } else if (form.id === "resource-sync-filter") {
+    await loadResourceSyncVisibility(form);
   }
 });
 
@@ -1870,3 +2029,4 @@ document.querySelector("#notification-delivery-filter")?.requestSubmit();
 document.querySelector("#notification-dead-letter-filter")?.requestSubmit();
 document.querySelector("#notification-rule-filter")?.requestSubmit();
 document.querySelector("#notification-operations-filter")?.requestSubmit();
+document.querySelector("#resource-sync-filter")?.requestSubmit();

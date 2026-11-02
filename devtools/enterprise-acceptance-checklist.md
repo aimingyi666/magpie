@@ -65,7 +65,7 @@
 | W-01 | 停用/启用员工 | 权限、范围、幂等、理由、CSRF、审计和依赖失败正确 | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
 | W-02 | 吊销设备 | 当前 Key 失效、刷新拒绝、设备和凭证状态正确 | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
 | W-03 | 轮换凭证 | 旧 Key 失效、新 Key 可用、失败无孤儿 Key | Auth 内部接口、管理 API、权限/CSRF/范围/理由、幂等和 intent/result 审计 Mock 已通过；真实环境待验收 |
-| W-04a | 正式模型目录（C4-03a） | 只读 `ADMIN_MODEL_CATALOG_PATH`；`schemaVersion=1`、稳定模型 ID、显式 Provider 通配符、group 只引用已知模型、2 MiB 上限、目录摘要和稳定错误码 | 已实现；7 项专项和 77 项管理集成测试通过；真实 Docker/只读挂载/digest 重启未验收；auth-service 不加载目录，只接收稳定模型 ID |
+| W-04a | 正式模型目录（C4-03a） | 只读 `ADMIN_MODEL_CATALOG_PATH`；`schemaVersion=1`、稳定模型 ID、显式 Provider 通配符、group 只引用已知模型、2 MiB 上限、目录摘要和稳定错误码 | 已实现；7 项目录专项通过，当前管理服务 109/109 通过；真实 Docker/只读挂载/digest 重启未验收；auth-service 不加载目录，只接收稳定模型 ID |
 | W-04b | 首次策略初始化与 `unknown` 迁移（C4-03b） | 旧 M1 只迁移为 `quotaStatus/modelStatus=unknown`；quota/models 可任意顺序首次提交但不得伪造缺项；缺项返回 `policy_setup_required`；两项完整并逐凭证回读后才 `known` | auth-service 核心已实现，`26/26` 测试通过；管理端已编排额度/模型写入；C4-04 已验证首次设置、真实请求限额/模型拒绝和 refresh/rotate 继承；真实 Compose/共享卷和真实 IdP 尚未验收 |
 | W-04c | 管理 API 与同步后交付（C4-03c） | `PUT quota`/`PATCH models` 具备会话、CSRF、RBAC、范围、理由、版本、payload 指纹和 intent/result 审计；issuance journal -> 签发 -> apply -> 独立回读 -> 原子持久化 -> 才交付；同步前客户端拿不到 Key；任一步失败撤销且启动恢复处理可确认的孤儿 Key | 核心已实现并通过 Mock/故障测试；C4-04 已用隔离真实 Magpie 覆盖 apply/readback、多凭证部分失败和恢复；真实共享卷、真实 IdP 和生产验收未完成 |
 | W-04d | 页面与运营状态（C4-03d） | `unknown/pending/partial_success/dependency_invoked` 显示真实状态、计数、失败凭证和恢复入口；只有 `succeeded + known + synced + 回读一致` 显示“已生效”；禁止自动重试不确定操作 | 部分实现；管理页已有额度/模型写表单、完整证据链和失败证据，员工页已有本人额度/模型/凭证/设备只读门户；基础停用/吊销/轮换、operation/audit 查询和人工对账页面已接入；浏览器 E2E、失败恢复入口、完整运营体验和生产验收未完成 |
@@ -105,7 +105,7 @@ Docker/Compose 构建、启动、健康检查和真实共享卷验证状态
 ```
 
 C4-01 已完成本地单元、CLI 回归和隔离真实二进制冒烟；C4-02 已完成 Node 语法检查和
-15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项；当前管理服务 104/104 通过（77 项管理服务
+15 项 Mock/故障测试。C4-03a 已完成 7 项目录专项；当前管理服务 109/109 通过（82 项管理服务
 集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项）；真实 Compose、只读挂载和 digest
 重启仍未验收。
 C4-03b/C4-03c/C5 核心已通过
@@ -178,7 +178,7 @@ v1、64 KiB 输入输出上限、稳定错误码、无秘密输出、`expectedPo
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 104/104 已覆盖 |
+| R-01 | 用户/部门/设备/凭证 | 管理员按范围看到元数据；不返回 Key/hash/token | 管理服务 109/109 已覆盖 |
 | R-02 | 用量归属 | `callerKeyId -> credential -> user -> 组织` 正确 | Mock 已覆盖；真实 usage 卷未验收 |
 | R-03 | 时间序列 | `groupBy=user/department/model/agent`，`bucket=hour/day` | Mock 已覆盖 |
 | R-04 | 数据损坏 | 缺失、尾半行、坏 JSON、超行/超字段/超记录返回稳定存储错误 | Mock 已覆盖 |
@@ -258,10 +258,10 @@ outbox 状态、attempt、渠道、HTTP/协议结果、死信和人工重放
 | M-01 | MCP 目录 | 管理员登记远程/本地 MCP、工具、风险和适用范围 | M3-A 可登记 `mcp` 资源类型、签名版本和适用范围；M3-B 提供远程 MCP 注册/健康检查 API 和元数据注册表，但管理台、admin-service 编排和本地 MCP/M3-D 未实现 |
 | M-02 | 工具权限 | 未授权 MCP/工具不可见、不可调用；工具级 allow/deny 生效 | M3-B 核心通过 14 项单元/Mock 测试，覆盖 user/org/device/server scope、工具级 allow/deny、可见性和服务端拒绝；真实 MCP、管理台和客户端同步未验收 |
 | M-03 | 上游凭据隔离 | MCP 凭据只在网关/Secret Manager，不进入员工机 | M3-B 核心只存环境 Secret Reference，客户端/管理投影和审计不含凭据；真实 Secret Manager、mTLS、Docker/Compose 和生产验收未完成；M3-A 已拒绝资源内容/元数据中的明文秘密和私钥 |
-| M-04 | 资源发布 | 不可变版本、哈希、签名、审批和灰度 | 核心/Mock 测试完成：不可变版本、SHA-256、Ed25519 签名和发布/回滚已通过 11 项测试；`approvalId` 只是证据，真实审批、灰度、管理台和实机部署未验收 |
-| M-05 | 客户端同步 | 5 分钟内可见；校验签名；上报期望/实际版本 | M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输；resource 15 项（11 核心 + 4 控制面）、client-sync 24 项（16 核心 + 8 传输）测试通过，覆盖固定 Ed25519 公钥与指纹、manifest/内容/长度/SHA-256 校验、原子安装和离线使用；管理台资源/漂移页、本地 helper、真实网络同步和 5 分钟端到端验收未完成 |
+| M-04 | 资源发布 | 不可变版本、哈希、签名、审批和灰度 | 核心/Mock 测试完成：不可变版本、SHA-256、Ed25519 签名和发布/回滚已通过 11 项测试；M3-C-2 已提供只读资源目录，但资源发布/回滚 UI、`approvalId` 真实审批联动、灰度、实机部署和生产验收未完成 |
+| M-05 | 客户端同步 | 5 分钟内可见；校验签名；上报期望/实际版本 | M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输；M3-C-2 已提供管理页只读资源/同步可见性；resource 15 项（11 核心 + 4 控制面）、client-sync 24 项（16 核心 + 8 传输）、admin 新增 5 项测试通过，覆盖固定 Ed25519 公钥与指纹、manifest/内容/长度/SHA-256 校验、原子安装和离线使用；本地 helper、真实网络同步、浏览器 E2E 和 5 分钟端到端验收未完成 |
 | M-06 | 强制与回滚 | 强制资源不可关闭；失败自动回退上一版本 | 核心已实现并通过测试：forced/recommended 策略，新版本验签或安装失败时保留上一验签版本，首次安装失败不破坏现有资源；管理台策略、真实 Agent 文件映射和产品级操作回滚未接入 |
-| M-07 | 漂移与健康 | 管理员看到设备安装版本、同步错误和漂移 | 核心 `inspect()` 已能重新验签、检测 active/cache 漂移并生成脱敏报告；设备端元数据上报和管理员 JSON 查询 API 已实现；管理台资源/漂移页、本地 helper 产品入口和真实端到端健康验收未实现 |
+| M-07 | 漂移与健康 | 管理员看到设备安装版本、同步错误和漂移 | 核心 `inspect()` 已能重新验签、检测 active/cache 漂移并生成脱敏报告；设备端元数据上报、管理员 JSON 查询 API 和管理页只读资源/漂移可见性已实现；本地 helper 产品入口、浏览器 E2E 和真实端到端健康验收未实现 |
 
 ## 9. 内容审计
 

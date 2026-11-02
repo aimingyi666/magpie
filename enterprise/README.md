@@ -34,13 +34,14 @@ schema v1 的网关策略机器回读/原子写入、受控 `gateway-control` �
 MCP 端点、工具级 allow/deny、健康检查、上游凭据隔离和元数据审计核心；M3-C-1 已提供
 设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输，
 `enterprise/client-sync` 包也提供签名 desired-state、原子安装、失败保留旧版本、离线缓存、
-强制/推荐策略和漂移检测核心。`gateway-control`
+强制/推荐策略和漂移检测核心；M3-C-2 已把资源目录和设备同步报告以只读、按组织范围过滤的
+方式接入管理页，并把依赖失败稳定映射为 `503 resource_service_unavailable`。`gateway-control`
 已通过 15 项 Mock/故障测试；
-auth-service 已通过 26 项测试；admin-service 已通过 104 项测试（77 项管理服务集成测试 +
+auth-service 已通过 26 项测试；admin-service 已通过 109 项测试（82 项管理服务集成测试 +
 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
 已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 14 项
 单元/Mock 集成测试；client-sync 已通过 24 项单元/Mock 集成测试（16 核心 + 8 传输）；
-当前合计 198 项通过、0 失败。
+当前合计 203 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -60,8 +61,9 @@ APR-01c、NOTIFY-01a、NOTIFY-01b 和 NOTIFY-01c 后端已实现，但真实渠�
 是厂商 HTTPS 网关契约，不是原生 SMTP/Graph/飞书/Teams/Slack/ServiceNow/Jira SDK，真实
 证书、租户配置和投递未验收；NOTIFY-01c 的真实 SIEM/Collector/Syslog/生产证书未验收。
 NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营页已实现并通过 Mock/集成测试；
-M3-A、M3-B 与 M3-C-1 核心与控制面已实现，M3-D 与 M4-M6 仍未实现；M2-D 核心已实现，生产验收未完成。
-M3-A/M3-B 尚未接入 admin-service 审批和管理台，M3-C-1 尚未接入管理台资源/漂移页和本地
+M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现，M3-D 与 M4-M6 仍未实现；
+M2-D 核心已实现，生产验收未完成。M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
+M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
 单进程内存状态，审计与注册表也不是同一事务；Compose 也未实机验收。当前不是生产就绪版本。
 
@@ -335,11 +337,12 @@ docker compose --profile resource up -d resource
 签名私钥通过 Compose secret 挂载，不能写入 `.env` 或仓库。接口、密钥生成、存储限制和
 安全边界见 [`resource-service/README.md`](resource-service/README.md)。
 
-当前边界：`approvalId` 只是必填证据，尚未查询或消费 admin-service 审批；没有管理台资源
-页面、灰度发布、S3/MinIO、KMS/HSM 或多副本。M3-C-1 已提供设备同步凭证、desired-state、
-设备上报和管理员 JSON 查询，独立客户端核心也支持强制/推荐、漂移检测和失败保留旧版本，
-但尚未接入本地 helper、目标 Agent 文件映射或管理台资源/漂移页。
-Docker/Compose 尚未实机启动和验收。
+当前边界：`approvalId` 只是必填证据，尚未查询或消费 admin-service 审批；没有资源发布/回滚
+UI、灰度发布、S3/MinIO、KMS/HSM 或多副本。M3-C-1 已提供设备同步凭证、desired-state、
+设备上报和管理员 JSON 查询，独立客户端核心也支持强制/推荐、漂移检测和失败保留旧版本；
+M3-C-2 已把资源目录和同步报告以只读方式接入管理页，并按管理员组织范围过滤。仍缺少资源
+发布/回滚 UI、审批联动、本地 helper、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、
+浏览器 E2E、Docker/Compose 实机验收、灰度/自动回滚和生产验收。
 
 ### 4.2 远程 MCP 网关（M3-B：核心后端）
 
@@ -382,10 +385,32 @@ hash、未知签名 key 和超大 manifest。测试：
 node --test enterprise/client-sync/test/*.test.mjs
 ```
 
-当前严格边界：已有员工设备短期同步凭证、desired-state、设备上报和管理员 JSON 查询，
-但还没有管理台资源/漂移页、本地 helper 产品入口、浏览器 E2E、Windows ACL、MDM、
-目标 Agent 文件映射或灰度发布；因此员工网页
-仍不能直接修改本机 Agent 文件，M3-C-1 不能据此宣称产品级同步完成。
+当前严格边界：已有员工设备短期同步凭证、desired-state、设备上报和管理员 JSON 查询；
+M3-C-2 已提供管理页的只读资源目录和同步报告/漂移可见性。但仍没有资源发布/回滚 UI、
+发布/回滚审批联动、本地 helper 产品入口、浏览器 E2E、Windows ACL、MDM、目标 Agent
+文件映射或灰度发布；因此员工网页仍不能直接修改本机 Agent 文件，M3-C-1/M3-C-2 不能据此
+宣称产品级同步完成。
+
+### 4.4 只读管理可见性（M3-C-2：admin-service）
+
+`admin-service` 新增四条只读接口：
+
+- `GET /api/v1/admin/resources` 和 `GET /api/v1/admin/resources/{resourceId}`，要求
+  `resources.read`；仅当资源分配到 `"*"` 或管理员组织范围时才可见，响应只含白名单元数据。
+- `GET /api/v1/admin/resource-sync/reports` 和
+  `GET /api/v1/admin/resource-sync/reports/{deviceId}`，要求 `devices.read`；设备必须存在、
+  属于可见用户，且报告 `userId` 与设备映射一致，否则不显示。
+
+配置为 `ADMIN_RESOURCE_SERVICE_URL` / `ADMIN_RESOURCE_SERVICE_TOKEN`（必须成对，令牌至少
+32 字符），并可用 `ADMIN_RESOURCE_SERVICE_TIMEOUT_MS`（默认 5000）和
+`ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES`（默认 4194304）收紧边界。客户端只发 GET、
+不跟随重定向；未配置、超时、坏 JSON、超大响应、5xx 或重定向统一返回
+`503 resource_service_unavailable`，不会显示为空列表。资源内容、签名私钥、服务令牌和
+上游 actor 字段不会进入响应或页面。
+
+管理页已提供“Resources and client sync”只读面板。仍未实现：资源发布/回滚 UI、发布/回滚
+审批联动、灰度/自动回滚、M3-B MCP 管理台、真实 IdP、浏览器 E2E、Docker/Compose 实机验收、
+Windows ACL/MDM 和生产验收。
 
 ## 5. 当前员工与管理员流程（只列已实现）
 
@@ -430,13 +455,14 @@ node --test enterprise/client-sync/test/*.test.mjs
    转交和申请人撤回。APR-01e 已提供 15 分钟单次紧急授权、24 小时复核、关键 step-up、
    RBAC、告警事件、审计和管理页/API；真实 OA 连接器、SIEM/告警、通知投递和浏览器 E2E
    仍未验收。
-7. 管理员当前**还不能通过管理台下发 MCP 服务器、企业 Skills/Instructions 或中央资源库**。
+7. 管理员当前可以通过管理页**只读查看**资源目录和员工设备同步报告，但**还不能通过管理台
+   发布/回滚资源、下发 MCP 服务器、企业 Skills/Instructions 或中央资源库**。
    M3-A 已提供内部资源目录、不可变版本、签名 manifest、发布/回滚和审计核心，M3-B 已提供
    远程 MCP 注册、统一企业 MCP 端点、工具级策略、健康检查、上游凭据隔离和元数据审计核心；
    M3-C-1 已提供设备同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端同步核心，
-   包括强制/推荐、原子安装和漂移检测。但这些能力尚未接入管理台资源/漂移页、本地 helper
-   产品流或目标 Agent 文件映射；受控本地 MCP 属于
-   M3-D，仍未实现。
+   包括强制/推荐、原子安装和漂移检测；M3-C-2 已接入只读资源/漂移页。但资源发布/回滚 UI、
+   审批联动、本地 helper 产品流和目标 Agent 文件映射仍未实现；受控本地 MCP 属于 M3-D，
+   仍未实现。
 8. 管理员不能直接读取或改写员工本机 Agent 配置。后续中央策略也必须通过本地 Magpie/helper
    的受控同步接口落地，浏览器不能获得任意本机文件写权限。
 
@@ -448,7 +474,8 @@ node --test enterprise/client-sync/test/*.test.mjs
 完整证据链状态、C5 查询/对账、M2-D CSV 导出、APR-01a 基础审批、APR-01b HMAC 回调
 适配器和 APR-01c step-up 门禁；C4-04 的真实管理链路 E2E 已通过，但仍缺少完整审批/运营
 体验、失败恢复入口、真实 OA 连接器、生产 break-glass 告警/复核、通知、Docker/共享卷、
-真实企业 IdP、浏览器和生产验收；M3-B/M3-C-1 仍未接入完整管理台、真实审批联动和员工产品流。
+真实企业 IdP、浏览器和生产验收；M3-C-2 已提供只读资源/同步可见性，M3-B/M3-C-1 仍未接入
+可写管理台、真实审批联动和员工产品流。
 在 M2-D 生产验收、M2-E 剩余项、M3/M4 和生产验收完成前，整体只能描述为“可演示、可受控
 技术试点”。
 

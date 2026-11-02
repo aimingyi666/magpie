@@ -71,7 +71,9 @@ services:
       start_period: 10s
 
   # M3-A resource catalog plus the M3-C client sync control plane. This
-  # service is internal-only and is not yet wired into the admin console.
+  # service is internal-only. The admin console now has read-only catalog and
+  # sync-report visibility; publish/rollback UI and approval integration are
+  # still unimplemented.
   # Start it explicitly with:
   #   docker compose --profile resource up -d resource
   resource:
@@ -295,6 +297,10 @@ services:
       ADMIN_AUTH_SERVICE_URL: http://auth:3444
       ADMIN_AUTH_SERVICE_TOKEN: ${AUTH_INTERNAL_ADMIN_TOKEN:-}
       ADMIN_AUTH_SERVICE_TIMEOUT_MS: ${ADMIN_AUTH_SERVICE_TIMEOUT_MS:-5000}
+      ADMIN_RESOURCE_SERVICE_URL: ${ADMIN_RESOURCE_SERVICE_URL:-}
+      ADMIN_RESOURCE_SERVICE_TOKEN: ${ADMIN_RESOURCE_SERVICE_TOKEN:-}
+      ADMIN_RESOURCE_SERVICE_TIMEOUT_MS: ${ADMIN_RESOURCE_SERVICE_TIMEOUT_MS:-5000}
+      ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES: ${ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES:-4194304}
       ADMIN_APPROVAL_CALLBACK_SECRET: ${ADMIN_APPROVAL_CALLBACK_SECRET:-}
       ADMIN_APPROVAL_CALLBACK_ISSUER: ${ADMIN_APPROVAL_CALLBACK_ISSUER:-}
       ADMIN_APPROVAL_CALLBACK_AUDIENCE: ${ADMIN_APPROVAL_CALLBACK_AUDIENCE:-}

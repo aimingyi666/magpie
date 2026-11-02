@@ -99,6 +99,21 @@ export function loadConfig(env = process.env) {
     60,
     604800,
   );
+  // M3-C-2: optional read-only link to the resource catalog and client sync
+  // control plane. The URL and token are configured together or not at all,
+  // so a half-configured dependency cannot silently read a wrong endpoint.
+  const resourceServiceUrl = String(env.ADMIN_RESOURCE_SERVICE_URL || "").trim();
+  const resourceServiceToken = String(env.ADMIN_RESOURCE_SERVICE_TOKEN || "").trim();
+  if (Boolean(resourceServiceUrl) !== Boolean(resourceServiceToken)) {
+    throw new Error(
+      "ADMIN_RESOURCE_SERVICE_URL and ADMIN_RESOURCE_SERVICE_TOKEN are required together",
+    );
+  }
+  if (resourceServiceToken && resourceServiceToken.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `ADMIN_RESOURCE_SERVICE_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+    );
+  }
   const stepUpClientId = String(env.ADMIN_STEP_UP_OIDC_CLIENT_ID || "").trim();
   const stepUpClientSecret = String(env.ADMIN_STEP_UP_OIDC_CLIENT_SECRET || "").trim();
   const stepUpRedirectUri = String(env.ADMIN_STEP_UP_REDIRECT_URI || "").trim();
@@ -239,6 +254,19 @@ export function loadConfig(env = process.env) {
       url: url(env, "ADMIN_AUTH_SERVICE_URL"),
       token: secret(env, "ADMIN_AUTH_SERVICE_TOKEN"),
       timeoutMs: integer(env, "ADMIN_AUTH_SERVICE_TIMEOUT_MS", 5000, 500, 30000),
+    },
+    resourceService: {
+      enabled: Boolean(resourceServiceUrl),
+      url: resourceServiceUrl ? url(env, "ADMIN_RESOURCE_SERVICE_URL") : "",
+      token: resourceServiceToken,
+      timeoutMs: integer(env, "ADMIN_RESOURCE_SERVICE_TIMEOUT_MS", 5000, 500, 30000),
+      maxResponseBytes: integer(
+        env,
+        "ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES",
+        4 * 1024 * 1024,
+        16 * 1024,
+        32 * 1024 * 1024,
+      ),
     },
     approvalCallback: {
       enabled: Boolean(approvalCallbackSecret),

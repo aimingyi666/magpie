@@ -18,7 +18,7 @@
 `gateway-key describe --json` 与原子 `gateway-key policy apply --json` 机器协议已实现，
 并通过 Go 单测、gateway-key CLI 回归和隔离真实二进制冒烟。C4-02
 `enterprise/gateway-control/` 受控适配器也已实现，并通过 15 项 Mock/故障测试。C4-03a
-正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 104 项测试通过（77 项管理
+正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 109 项测试通过（82 项管理
 服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项），`GET /api/v1/admin/models` 已使用正式目录，
 `ADMIN_MODELS` 仅保留
 无正式目录时的兼容显示。C4-03b 用户级 `gatewayPolicy` 核心已在 auth-service 实现，
@@ -47,9 +47,11 @@ M3-A 的 `enterprise/resource-service/` 已实现资源目录、不可变版本�
 Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项核心测试；M3-B 远程 MCP 治理
 核心已通过 14 项测试；M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员
 JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
-client-sync 24 项（16 核心 + 8 传输）测试通过；当前本地/Mock 回归合计 198 项。
-M3-A/M3-B 只有核心服务 API；M3-C-1 已有控制面 API，但尚未接入 admin-service 真实审批、
-管理台资源/漂移页、OIDC 组织分配和本地 helper 产品入口；
+client-sync 24 项（16 核心 + 8 传输）测试通过；M3-C-2 已实现 admin-service 只读资源/
+同步报告 API 和管理页面板，admin-service 109 项通过；当前本地/Mock 回归合计 203 项。
+M3-A/M3-B 只有核心服务 API；M3-C-1/M3-C-2 已有控制面 API 和只读管理页，但尚未接入
+admin-service 真实审批、资源发布/回滚 UI、发布/回滚审批联动、OIDC 组织分配和本地 helper
+产品入口；
 M3-B 的审批 nonce/限流器仅单进程，注册表/审计/幂等不是同一事务，存在提交后审计失败窗口。
 M3-D、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
@@ -358,8 +360,12 @@ Set-Location enterprise/client-sync
 ```
 
 当前 client-sync 24 项测试通过（16 核心 + 8 传输），resource-service 15 项测试通过
-（11 核心 + 4 控制面）。管理台资源/漂移页、本地 helper 产品入口、目标 Agent 文件映射、
-Windows ACL、MDM、浏览器 E2E、真实企业 IdP 和 Docker/Compose 实机均未验收。
+（11 核心 + 4 控制面）。M3-C-2 已把资源目录和同步报告以只读方式接入管理页：
+admin-service 使用 `ADMIN_RESOURCE_SERVICE_URL` 和独立 `ADMIN_RESOURCE_SERVICE_TOKEN`
+调用 resource-service，只发 GET、不跟随重定向，默认 5 秒超时和 4 MiB 响应上限；
+资源与报告按管理员组织范围过滤，依赖故障返回 `503 resource_service_unavailable`。
+资源发布/回滚 UI、发布/回滚审批联动、本地 helper 产品入口、目标 Agent 文件映射、
+Windows ACL、MDM、浏览器 E2E、真实企业 IdP、Docker/Compose 实机和灰度/自动回滚均未验收。
 
 Compose 必须把网关数据卷只读挂载到管理容器：
 
@@ -443,12 +449,14 @@ C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 
    失败恢复入口、完整运营体验和生产环境证据尚未验收。本地 Mock/故障测试不能替代这些部署验收。
 - M3-A 已通过 11 项 resource-service 核心单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
   单元/Mock 集成测试；M3-C-1 已通过 resource-service 15 项（11 核心 + 4 控制面）和
-  client-sync 24 项（16 核心 + 8 传输）单元/Mock 集成测试。仍须在真实
+  client-sync 24 项（16 核心 + 8 传输）单元/Mock 集成测试；M3-C-2 已通过 admin-service
+  109 项测试中的 5 项新增用例（企业全量 203 项）。仍须在真实
   Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
-  MCP 单副本限制，并接入 admin-service 真实审批、管理台和 OIDC 组织分配后再做发布/回滚
-  与 MCP 故障演练。M3-C-1 仍须完成管理台资源/漂移页、本地 helper、目标 Agent 文件映射、
-  Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机和生产验收；
+  MCP 单副本限制，并接入 admin-service 真实审批、可写管理台和 OIDC 组织分配后再做
+  发布/回滚与 MCP 故障演练。M3-C-2 仍须完成资源发布/回滚 UI、审批联动、浏览器 E2E、
+  Docker/Compose 实机、灰度/自动回滚和生产验收；M3-C-1 仍须完成本地 helper、目标 Agent
+  文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机和生产验收；
   M3-D 受控本地 MCP 当前未实现。
 - 备份恢复、灰度、回滚、至少一次跨部门越权和设备丢失演练。
 
@@ -643,7 +651,7 @@ Mock/故障测试已覆盖这些映射；真实 Docker/共享卷故障恢复仍�
 - 任何“页面值已变但实际请求未被限制/未被拒绝”的结果都视为 C4 失败。
 - C4-01 机器协议和 C4-02 `gateway-control` 已实现；C4-02 通过 15 项 Mock/故障测试，
   但 Docker/Compose、真实共享卷、健康检查和故障恢复尚未实机验收。C4-03a 正式只读目录
-  已通过 7 项目录专项；管理服务当前 104 项通过（含 7 项通知渠道、7 项通知规则和 6 项 SIEM 专项），
+  已通过 7 项目录专项；管理服务当前 109 项通过（含 7 项通知渠道、7 项通知规则和 6 项 SIEM 专项），
   但仍待真实部署验收。
   C4-03b/C4-03c 已接通本地 Mock/故障链路，C4-04 完整管理链路 E2E 已通过；C4-03d、C5
   和 M2-D 核心已实现，基础查询、对账和导出页面已接入，但浏览器 E2E、失败恢复入口和

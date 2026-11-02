@@ -140,7 +140,7 @@ API、数据模型和验收设计见 [`enterprise-feature-spec.md`](enterprise-f
 | E5 模型网关 | 模型目录、白名单、路由、回退、额度、限流、价格和稳定模型 ID | M0/M2-C/M2-D | 基础网关和额度已有；正式目录、用户级策略和真实管理闭环待贯通 |
 | E6 用量与成本 | 人/部门/设备/Agent/模型/Key 的 Token、费用、错误、趋势、导出和预算告警 | M2-B/D/M5 | 元数据汇总、时间序列、筛选和授权 CSV 导出已有；费用趋势看板、Excel/异步/对象存储导出和预算告警未实现 |
 | E7 MCP 治理 | 中央目录、远程/本地 MCP、工具级 allow/deny、健康检查、限流和熔断 | M3/M5 | M3-A 可登记 `mcp` 资源类型和签名版本；M3-B 已提供远程 MCP 注册、企业统一端点、工具级 allow/deny、健康检查、限流和每服务器熔断核心；管理台、真实审批联动、OIDC 组织分配、员工端同步接入、本地 MCP/M3-D 和生产验收未实现 |
-| E8 企业资源库 | Skills、Instructions、Subagents、模板、不可变版本、签名、审批、同步、漂移和回滚 | M3 | M3-A 核心后端已实现并通过 11 项测试；M3-C-1 已提供短期同步凭证、desired-state、设备上报和管理员 JSON 查询，resource 15 项、client-sync 24 项测试通过，覆盖签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐和漂移；真实审批、管理台资源/漂移页、本地 helper、目标 Agent 文件映射和产品级自动回滚未实现 |
+| E8 企业资源库 | Skills、Instructions、Subagents、模板、不可变版本、签名、审批、同步、漂移和回滚 | M3 | M3-A 核心后端已实现并通过 11 项测试；M3-C-1 已提供短期同步凭证、desired-state、设备上报和管理员 JSON 查询，resource 15 项、client-sync 24 项测试通过，覆盖签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐和漂移；M3-C-2 已提供管理页只读资源目录和同步报告/漂移可见性，admin-service 新增 5 项测试；真实审批、资源发布/回滚 UI、发布/回滚审批联动、本地 helper、目标 Agent 文件映射和产品级自动回滚未实现 |
 | E9 客户端策略 | 企业 Provider/网关锁定、最低版本、强制/推荐资源、离线策略和防绕过 | M3/M5 | 网络和 Key 基础已有；M3-C 已实现 forced/recommended 资源策略、最低版本、签名校验、离线缓存和防路径/符号链接核心；设备身份和短期同步凭证 API 已接入，但管理台策略、MDM/EDR 联动和完整防绕过未实现 |
 | E10 审计与通知 | L0-L3 分级、脱敏、留存、访问审计；outbox、邮件/IM/Webhook/SIEM/工单和死信 | M2-E/M4/M5 | 当前有 L0 元数据、NOTIFY-01a outbox、NOTIFY-01b 渠道管理/统一 HTTPS 网关适配器、NOTIFY-01c SIEM transport/固定 L0 schema/dead-letters API，以及 NOTIFY-01d 规则/抑制/聚合/升级/运营页；真实厂商连接、真实 SIEM 接收端、正文审计、生产值班闭环和生产验收未实现/未验收 |
 | E11 安全运营 | 异常用量、异地、越权、直连、敏感数据规则、告警、阻断、吊销、审批和 SIEM | M2-E/M5 | APR-01a 审批与职责分离、APR-01b HMAC/Mock 回调适配器、APR-01c 独立 step-up、APR-01e break-glass 核心和 NOTIFY-01c SIEM transport 已实现；真实 OA/IdP/MFA、M5 检测响应、告警/阻断、真实 SIEM 接收端和 break-glass 生产演练未验收 |
@@ -227,7 +227,7 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 | M2-C3 | 已实现，Mock 测试 | 持久化幂等、`operationId`、intent/result 审计和审计失败阻断 | 真实审计存储、生产查询/对账验收和人工运维演练 |
 | C4-01 | 已实现，本地测试通过 | schema v1、原子 `policy apply`、版本冲突、无秘密输出、文件锁和真实二进制冒烟 | 管理链路 |
 | C4-02 | 已实现，15 项 Mock/故障测试通过 | 固定路由/argv、服务令牌、超时、输出上限、独立回读和 `pending` | Docker、真实共享卷、mTLS |
-| C4-03a | 已实现，104/104 管理测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启 |
+| C4-03a | 已实现，当前管理服务 109/109 测试通过 | 正式只读模型目录、严格 JSON、稳定 ID、group、digest 和失败关闭 | 真实 Compose、只读挂载、digest 重启 |
 | C4-03b | 核心已实现，26/26 auth 测试通过 | 用户级 `gatewayPolicy`、M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | 真实部署和真实请求 E2E |
 | C4-03c | 核心已实现，Mock/故障测试通过 | 管理额度/模型 API、幂等签发、issuance journal、apply/readback、同步后交付、失败补偿和启动恢复 | 真实 Magpie/共享卷故障注入、真实 IdP 和生产验收 |
 | C4-03d | 部分实现 | 管理页有额度/模型写表单、完整证据链和失败证据；员工页有本人额度/模型/凭证/设备只读门户；M2-D 已接入基础 operation/audit 查询、人工对账、审批、导出和停用/吊销/轮换页面 | 浏览器 E2E、失败恢复入口、完整运营体验和生产验收 |
@@ -235,7 +235,7 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 | M2-C5 | 后端和基础页面已实现，Mock/故障测试通过 | operation 详情、脱敏审计分页、签名 cursor 和四种人工对账 API | 真实审计存储和生产运维演练 |
 | M2-E | APR-01a-e 核心与 NOTIFY-01a-d 已实现 | 服务端审批、绑定、职责分离、一次性消费、HMAC/Mock 外部审批回调、独立 OIDC step-up、审批箱/串并行/quorum/转交/撤回、break-glass 15 分钟单次授权/24 小时复核/提醒，以及事务性 outbox、租约、退避、死信、重启恢复、人工重放、渠道管理、渠道测试、统一 HTTPS 邮件/IM/Webhook/工单网关适配器、SIEM transport、dead-letters API、规则/抑制/聚合/升级和运营页已实现 | 真实 OA/IdP/MFA、break-glass 告警/工单和生产复核、真实 SIEM/Collector/Syslog/生产证书、真实厂商连接、生产值班闭环和生产投递 |
 | M2-D | 核心已实现，Mock/集成测试通过；生产验收尚未完成 | 基础写操作、审批、operation、用量/审计筛选、人工对账、CSV 导出和操作历史已实现 | 浏览器 E2E、失败恢复入口、真实数据/负载、完整运营看板和异步/对象存储导出 |
-| M3 | M3-A/M3-B/M3-C-1 核心与控制面已实现；M3-D 未实现 | resource-service 15 项、mcp-gateway 14 项、client-sync 24 项测试通过 | M3-A 已有资源目录、不可变版本、内容寻址、签名、发布/回滚和审计；M3-B 已有远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据隔离和审计；M3-C-1 已有设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和 HTTP 传输，叠加签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、路径/符号链接防护、并发锁和状态秘密隔离。管理台资源/漂移页、admin-service 真实审批联动、OIDC 组织分配、本地 helper、目标 Agent 文件映射、本地 MCP/M3-D 和生产验收未实现 |
+| M3 | M3-A/M3-B/M3-C-1/M3-C-2 核心、控制面与只读管理可见性已实现；M3-D 未实现 | resource-service 15 项、mcp-gateway 14 项、client-sync 24 项、admin-service 新增 5 项测试通过，企业全量 203 项 | M3-A 已有资源目录、不可变版本、内容寻址、签名、发布/回滚和审计；M3-B 已有远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据隔离和审计；M3-C-1 已有设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和 HTTP 传输，叠加签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、路径/符号链接防护、并发锁和状态秘密隔离；M3-C-2 已有按组织范围过滤的只读资源/同步 API、严格字段投影和只读管理页面板。资源发布/回滚 UI、admin-service 真实审批联动、OIDC 组织分配、本地 helper、目标 Agent 文件映射、本地 MCP/M3-D 和生产验收未实现 |
 | M4 | 未实现 | 只有审计分级设计 | 对话正文、工具审计、脱敏、检索、留存和导出 |
 | M5 | 未实现 | 只有规则与响应设计 | 告警、阻断、SIEM、值班处置闭环 |
 | M6 | 未实现 | 只有规模化设计 | PostgreSQL/ClickHouse、多副本、Redis、KMS、mTLS、多地域和灾备 |
@@ -243,12 +243,12 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 当前已执行并通过的本地测试：
 
 - `enterprise/auth-service`：`26 passed, 0 failed`
-- `enterprise/admin-service`：`104 passed, 0 failed`（77 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）
+- `enterprise/admin-service`：`109 passed, 0 failed`（82 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）
 - `enterprise/gateway-control`：`15 passed, 0 failed`
 - `enterprise/resource-service`：`15 passed, 0 failed`（11 核心 + 4 控制面）
 - `enterprise/mcp-gateway`：`14 passed, 0 failed`
 - `enterprise/client-sync`：`24 passed, 0 failed`（16 核心 + 8 传输）
-- 六套 Node/Mock 回归合计：`198 passed, 0 failed`
+- 六套 Node/Mock 回归合计：`203 passed, 0 failed`
 - `enterprise/test/c4-enterprise-policy-e2e.ps1`：18 阶段完整管理到真实 Magpie 策略流 E2E 通过
 
 以上本地/Mock 测试合计 `185 passed, 0 failed`。这些结果不等于真实 IdP、Docker、共享卷、
@@ -272,10 +272,10 @@ Windows、反向代理或生产部署验收。C4-04 只使用
   真实企业 IdP、生产反向代理和生产验收仍未完成，不能宣称生产自助管理完成。
 - 基础管理页面已支持 operations/audit-logs 查询、人工对账和 CSV 导出；仍缺浏览器 E2E、
   失败恢复入口、完整运营体验和生产验收，不能据此宣称生产自助管理完成。
-- 不能通过管理台配置远程 MCP、工具权限、客户端强制策略或查看员工资源漂移；M3-A 资源目录、
-  M3-B 远程 MCP 和 M3-C-1 同步控制面/客户端同步核心已实现，设备短期同步凭证和
-  desired-state/report API 已接入；但真实审批、管理台资源/漂移页、OIDC 组织分配、
-  本地 helper 产品流和目标 Agent 文件映射仍未完成；M3-D 尚未实现。
+- 不能通过管理台配置远程 MCP、工具权限、客户端强制策略或发布/回滚资源；M3-A 资源目录、
+  M3-B 远程 MCP、M3-C-1 同步控制面和 M3-C-2 只读资源/漂移可见性已实现，设备短期同步
+  凭证和 desired-state/report API 已接入；但真实审批、资源发布/回滚 UI、发布/回滚审批联动、
+  OIDC 组织分配、本地 helper 产品流和目标 Agent 文件映射仍未完成；M3-D 尚未实现。
 - 不能宣称真实 OA、真实 IdP/MFA、反向代理、break-glass、真实厂商 Webhook/SIEM/工单或完整审批
   运营已可用；APR-01a 服务端审批、APR-01b HMAC/Mock 回调适配器、APR-01c 独立 step-up、
   NOTIFY-01a outbox、NOTIFY-01b 渠道管理/统一 HTTPS 网关适配器、NOTIFY-01c SIEM transport
@@ -284,7 +284,7 @@ Windows、反向代理或生产部署验收。C4-04 只使用
   真实厂商连接、真实 SIEM 接收端和生产值班闭环尚未完成。
 - 不能宣称高可用、多副本、KMS、mTLS 或多地域已完成；M6 尚未实现。
 
-## 10. MCP 与企业资源库（M3-A/M3-B/M3-C-1 核心与控制面已实现，M3-D 未实现）
+## 10. MCP 与企业资源库（M3-A/M3-B/M3-C-1/M3-C-2 核心、控制面与只读管理可见性已实现，M3-D 未实现）
 
 M3 要解决的是“全公司能用什么”，不是只在员工电脑上手工装插件。
 
@@ -297,10 +297,12 @@ desired-state、设备上报和管理员 JSON 查询，并在 `enterprise/client
 固定 Ed25519 公钥/SPKI 指纹、manifest 和内容校验、staging/原子激活、失败保留上一验签版本、
 离线缓存、forced/recommended、漂移检测、路径/符号链接拒绝、并发锁和 `0600` 状态秘密隔离；
 resource-service 15 项（11 核心 + 4 控制面）和 client-sync 24 项（16 核心 + 8 传输）测试通过。
+M3-C-2 已在 admin-service 提供只读资源目录和同步报告/漂移 API，按管理员组织范围过滤并只
+投影白名单字段；依赖故障统一返回 `503 resource_service_unavailable`，管理页提供只读面板。
 `approvalId` 目前只是资源服务的必填证据，不会自行当作真实已批准事实；M3-B 的审批 token
-也未查询/消费 admin-service 真实审批。管理台资源/漂移页、OIDC 组织分配、本地 helper
-产品入口、目标 Agent 文件映射、Windows ACL、MDM、浏览器 E2E、Docker/Compose 实机验收和
-生产级自动回滚仍未实现；M3-D 受控本地
+也未查询/消费 admin-service 真实审批。资源发布/回滚 UI、发布/回滚审批联动、OIDC 组织分配、
+本地 helper 产品入口、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、
+Docker/Compose 实机验收、灰度/自动回滚和生产验收仍未实现；M3-D 受控本地
 MCP 未实现。M3-B 的审批 nonce 仅单进程内存，注册表/审计/幂等不是同一事务，存在提交后
 审计失败窗口。
 
@@ -319,9 +321,10 @@ MCP 未实现。M3-B 的审批 nonce 仅单进程内存，注册表/审计/幂�
 - 坏资源自动回退上一版本；强制资源不可由员工关闭。
 - 客户端只从企业签名源同步，不从任意公网地址拉取未审批资源。
 
-当前已有资源目录、远程 MCP 治理和客户端同步核心，但没有可供员工产品使用的设备同步凭证
-API、管理台分发入口、目标 Agent 文件映射或设备漂移上报闭环。不能把核心包或现有单机插件、
-模型 Provider 配置描述成已经上线的企业 MCP/资源治理。
+当前已有资源目录、远程 MCP 治理、客户端同步核心、设备同步凭证/desired-state/report API，
+以及管理页只读资源/漂移可见性；但没有资源发布/回滚 UI、发布/回滚审批联动、目标 Agent
+文件映射或本地 helper 产品入口。不能把核心包或现有单机插件、模型 Provider 配置描述成
+已经上线的企业 MCP/资源治理。
 
 ## 11. 会话与工具审计（M4，尚未实现）
 
@@ -488,15 +491,15 @@ OA/IdP/MFA、break-glass、真实厂商连接或生产通知闭环验收。
 
 - 不能承诺员工只打开网页、不安装任何本地程序就能自动配置本机 Agent。
 - 不能承诺当前管理员可以查看员工对话正文；当前只有 L0 用量元数据。
-- 不能承诺当前已可通过管理台上线中央 MCP、工具权限或公司资源库；核心已实现，但员工端
-  同步凭证、管理台、本地 helper、Agent 文件映射和生产验收未完成。
+- 不能承诺当前已可通过管理台发布/回滚公司资源或上线中央 MCP；核心和只读资源/同步可见性
+  已实现，但资源发布/回滚 UI、审批联动、员工端本地 helper、Agent 文件映射和生产验收未完成。
 - 不能承诺当前有对话正文/工具审计；属于 M4。
 - 不能承诺当前有真实 OA/IdP/MFA、反向代理、break-glass 生产告警/工单、Webhook/SIEM/工单、
   真实 SIEM 接收端或完整通知运营页；属于 M2-E/M5。当前已有 APR-01a 审批后端、APR-01b
   HMAC/Mock 回调适配器、APR-01c 独立 step-up 和 APR-01e break-glass 核心，但均不等于
   真实企业环境验收。
 - 不能承诺当前是高可用、多副本、多地域；属于 M6。
-- 不能把 104/25/15/11/14/16（合计 185）项本地/Mock 测试等同于真实 IdP、Docker、Windows、代理、
+- 不能把 109/26/15/15/14/24（合计 203）项本地/Mock 测试等同于真实 IdP、Docker、Windows、代理、
   真实 SIEM、真实审批和
   生产验收。
 

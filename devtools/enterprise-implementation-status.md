@@ -6,10 +6,13 @@
 [`enterprise-master-plan.md`](enterprise-master-plan.md) 和
 [`enterprise-roadmap.md`](enterprise-roadmap.md)。
 
-2026-11-02 方案基线更新到 v3.23。当前 `codex/m3-c-sync-control-plane` 分支在既有
+2026-11-02 方案基线更新到 v3.24。当前 `codex/m3-c2-admin-sync-visibility` 分支在既有
 M2-C1 auth-service 内部写接口、M2-C2 四个管理写接口和 M2-C3 幂等/管理审计状态机基础上，
-新增 **M3-C-1** 设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP
-传输适配器。此前 `feat/notify-01d-notification-ops` 分支实现了 **APR-01e break-glass** 的 15 分钟单次紧急授权、
+新增 **M3-C-2** 只读管理可见性：admin-service 通过独立服务令牌读取 resource-service 的
+资源目录和设备同步报告，按管理员组织范围过滤，并只投影白名单元数据；依赖故障统一返回
+`503 resource_service_unavailable`，管理页提供只读面板。此前 **M3-C-1** 已提供设备短期同步
+凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器。此前
+`feat/notify-01d-notification-ops` 分支实现了 **APR-01e break-glass** 的 15 分钟单次紧急授权、
 24 小时事后复核、复核提醒、通知事件、RBAC、关键 step-up、审计、API 和管理页，同时保留
 **APR-01d 审批箱**的审批视图、串行/并行步骤、quorum、显式 `stepId`、转交和申请人撤回；
 在既有 **M2-C5** operation 详情、脱敏审计分页和
@@ -36,13 +39,13 @@ binding 摘要；授权只能原子消费一次，审批与 break-glass 禁止�
 `security.break_glass_review_due`/`security.break_glass_review_overdue`。本轮 **NOTIFY-01d**
 新增通知规则、抑制、聚合、阈值/延迟升级、dead-letter 受审计重放，以及管理页的渠道、规则、
 投递、死信、聚合、抑制和升级运营视图；规则和渠道写操作继续要求管理会话、CSRF、RBAC、
-step-up、理由和幂等。admin-service 当前通过 **104 passed, 0 failed**（77 项管理服务
+step-up、理由和幂等。admin-service 当前通过 **109 passed, 0 failed**（82 项管理服务
 集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），
 auth-service 通过 **26 passed, 0 failed**，gateway-control 通过 **15 passed, 0 failed**，
 resource-service 通过 **15 passed, 0 failed**，mcp-gateway 通过 **14 passed, 0 failed**。
-本轮 **M3-C-1** 新增 4 项 resource-service 控制面测试和 8 项 client-sync 传输测试；
-叠加原有 client-sync 16 项核心测试后，当前企业全量 Node/Mock 回归合计
-**198 passed, 0 failed**。
+client-sync 通过 **24 passed, 0 failed**。本轮 **M3-C-2** 在既有 104 项管理测试上新增
+5 项管理服务测试（未新增测试文件），当前企业全量 Node/Mock 回归合计
+**203 passed, 0 failed**。
 **C4-01** 网关机器协议已通过 Go 单测、CLI 回归和隔离真实二进制
 冒烟；**C4-02** `gateway-control` 受控适配器已通过 15 项 Mock/故障测试；**C4-03a**
 正式只读模型目录、**C4-03b/C4-03c** 用户级策略、幂等签发、issuance journal、自动
@@ -76,9 +79,11 @@ SHA-256 内容寻址、Ed25519 签名、发布/历史回滚、乐观并发、幂
 测试（11 项核心 + 4 项控制面），client-sync 通过 24 项测试（16 项核心 + 8 项传输）。
 M3-C 原有签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、
 路径/符号链接防护、并发锁和状态秘密隔离核心仍保持通过；M3-D 与 M4-M6 仍未实现。
-M3-A/M3-B 尚未接入 admin-service 真实审批、管理台和 OIDC 组织分配；M3-C-1 已接入员工端
-短期同步凭证和 desired-state/report API，但管理台资源/漂移页、本地 helper 产品入口和
-目标 Agent 文件映射尚未完成；M3-B 的审批
+M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，M3-B 的 OIDC 组织分配也未实现；
+M3-C-1/M3-C-2 已接入员工端短期同步凭证、desired-state/report API，以及管理页只读资源目录
+和同步报告/漂移可见性；但资源发布/回滚 UI、发布/回滚审批联动、本地 helper 产品入口、
+目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机验收、
+灰度/自动回滚和生产验收尚未完成。M3-B 的审批
 nonce 仅单进程内存，注册表和审计不是同一事务，Compose 也尚未实机验收。当前仍没有员工
 对话正文审计。本状态只描述仓库中已经存在并有测试证据的能力。
 
@@ -157,10 +162,11 @@ IdP、Docker Compose、浏览器/反向代理、真实 `usage.jsonl` 数据卷�
 | NOTIFY-01c SIEM transport | 已实现并通过 6 项专项及管理回归 | `http-collector`/`otlp-http`/`syslog-tls`；固定 L0 schema；HTTPS:443/TLS:6514；host allowlist、固定 DNS、私网/回环/链路本地/云元数据拒绝；HTTP/OTLP 可选 Bearer `secretRef`，Syslog 禁止 `secretRef`；默认 32 KiB 上限；critical 优先；5 分钟轮询上限；dead-letters API；新增 4 个安全事件类型；真实 SIEM/Collector/Syslog/生产证书未验收 |
 | NOTIFY-01d 通知规则与运营 | 已实现并通过 Mock/集成测试 | 通知规则 CRUD、按事件/严重级别/目标/组织选择渠道；抑制窗口、聚合维度与窗口、阈值和延迟升级、单条升级失败隔离；`aggregates`/`suppressions`/`escalations` 运营查询；dead-letter 受审计幂等重放；管理页提供渠道、规则、投递、死信、聚合、抑制和升级视图；规则/渠道写操作要求会话、CSRF、RBAC、H 级 step-up、理由和 `Idempotency-Key`；真实邮件/IM/Webhook/工单/SIEM 厂商、生产证书和值班闭环未验收 |
 | M2-D 管理运营 | 核心已实现，Mock/集成测试通过；生产验收尚未完成 | 基础管理写页面、审批页面、operation/audit 查询、人工对账、CSV 导出和操作历史已实现；浏览器 E2E、失败恢复入口、完整看板和异步/对象存储导出未完成 |
-| M3-A 资源目录与签名 | 核心后端已实现，11 项测试通过 | `mcp`/`skill`/`instructions`/`subagent`/`template` 目录、`forced`/`recommended`、不可变版本、SHA-256 内容寻址、canonical JSON、manifest digest、Ed25519 签名、发布/历史回滚、乐观并发、幂等、资源审计和损坏存储失败关闭；真实审批、管理台、员工端同步接入和生产验收未完成 |
+| M3-A 资源目录与签名 | 核心后端已实现，11 项测试通过 | `mcp`/`skill`/`instructions`/`subagent`/`template` 目录、`forced`/`recommended`、不可变版本、SHA-256 内容寻址、canonical JSON、manifest digest、Ed25519 签名、发布/历史回滚、乐观并发、幂等、资源审计和损坏存储失败关闭；M3-C-2 已提供管理页只读资源目录；真实审批、发布/回滚 UI、员工端同步接入和生产验收未完成 |
 | M3-B 远程 MCP 治理 | 核心后端已实现，14 项测试通过 | 元数据注册表、企业统一 `/mcp/enterprise` 端点、远程 MCP 代理、user/org/device/server scope、工具级 allow/deny/风险/可见性、short-lived HMAC 审批门禁、健康检查、固定 DNS、HTTPS/host allowlist、拒绝私网/重定向、超时、响应/请求限制、速率和单服务器熔断；管理台、admin-service 真实审批查询/一次性消费、OIDC 组织分配和员工端同步接入未完成 |
 | M3-B 生产阻断项 | 未验收 | 审批 nonce 和限流器仅单进程内存；注册表、审计和幂等不是同一事务，审计失败可能发生在状态提交之后；客户端签发审计失败会留下无法取回明文 token 的孤立记录；未做多副本、共享事务存储、KMS/HSM、mTLS、真实 MCP/IdP、浏览器 E2E、Docker/Compose 实机和生产验收 |
-| M3-C 客户端同步 | 控制面与核心已实现；resource 15 项、client-sync 24 项测试通过 | 设备短期同步凭证、OIDC `groups` 组织范围、desired-state、设备上报、管理员 JSON 查询、HTTP 传输凭证缓存/重签、条件请求、超时和响应上限；固定 Ed25519 公钥/SPKI 指纹、manifest/内容/长度/SHA-256 校验、staging/fsync/复验/rename 原子激活、失败保留上一验签版本、离线缓存、forced/recommended、漂移检测、路径穿越和符号链接拒绝、并发锁、`0600` 状态和秘密隔离；管理台资源/漂移页、本地 helper 产品入口、浏览器 E2E、Windows ACL、MDM、目标 Agent 文件映射和生产验收未完成 |
+| M3-C 客户端同步 | 控制面与核心已实现；resource 15 项、client-sync 24 项测试通过 | 设备短期同步凭证、OIDC `groups` 组织范围、desired-state、设备上报、管理员 JSON 查询、HTTP 传输凭证缓存/重签、条件请求、超时和响应上限；固定 Ed25519 公钥/SPKI 指纹、manifest/内容/长度/SHA-256 校验、staging/fsync/复验/rename 原子激活、失败保留上一验签版本、离线缓存、forced/recommended、漂移检测、路径穿越和符号链接拒绝、并发锁、`0600` 状态和秘密隔离；M3-C-2 已提供管理页只读资源/漂移可见性；资源发布/回滚 UI、发布/回滚审批联动、本地 helper 产品入口、浏览器 E2E、Windows ACL、MDM、目标 Agent 文件映射、灰度/自动回滚和生产验收未完成 |
+| M3-C-2 只读管理可见性 | 已实现，admin-service 新增 5 项测试并通过；企业全量 203 项通过 | `GET /api/v1/admin/resources`、`/resources/{id}`（`resources.read`）、`/resource-sync/reports`、`/resource-sync/reports/{deviceId}`（`devices.read`）；`ADMIN_RESOURCE_SERVICE_URL`/`TOKEN` 成对校验、独立 Bearer、GET-only、不跟随重定向、5 秒超时、4 MiB 响应上限；资源按 `"*"`/组织范围可见，报告要求设备存在且 `userId` 与设备映射一致；严格字段白名单；依赖故障统一 `503 resource_service_unavailable`；管理页只读面板无内联脚本；资源发布/回滚 UI、审批联动、真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收未完成 |
 | M3-D 受控本地 MCP | 未实现 | 签名包、最小权限、沙箱、Secret Broker 和健康上报均未实现 |
 | M4 会话内容审计 | 未实现 | 目前只有请求元数据和用量 |
 | M5 安全运营 | 未实现 | 无 SIEM 告警、阻断和值班闭环 |
@@ -558,7 +564,7 @@ admin-service
 - C5 策略对账测试覆盖 models+limits 原子更新、version 恰好增加一次、每张活跃凭证各
   apply 一次、stale version 冲突、并发对账只成功一次，以及响应和持久化状态不泄露秘密。
 
-### 4.2 管理服务 M2-A/M2-B/M2-C2/M2-C3/M2-C5/M2-E1/APR-01b/01c/01e/NOTIFY-01a/01b/01d/C4-03c
+### 4.2 管理服务 M2-A/M2-B/M2-C2/M2-C3/M2-C5/M2-E1/APR-01b/01c/01e/NOTIFY-01a/01b/01d/C4-03c/M3-C-2
 
 ```powershell
 $node = 'D:\Environment\node-v26.12.1\node.exe'
@@ -569,7 +575,7 @@ Get-ChildItem enterprise\admin-service\src\*.js | ForEach-Object {
 & $node --test enterprise\admin-service\test\*.test.mjs
 ```
 
-结果：`104 passed, 0 failed`（77 项管理服务集成测试 + 7 项目录专项测试 + 7 项通知渠道专项测试 + 7 项通知规则专项测试 + 6 项 SIEM 专项测试）。覆盖：
+结果：`109 passed, 0 failed`（82 项管理服务集成测试 + 7 项目录专项测试 + 7 项通知渠道专项测试 + 7 项通知规则专项测试 + 6 项 SIEM 专项测试）。覆盖：
 
 - 未登录拒绝、管理 OIDC 登录、MFA 拒绝和 `email_verified` 拒绝。
 - 配置 ACR 时向 IdP 发送 `acr_values` 和 essential 的 `acr` claim 请求。
@@ -871,8 +877,8 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 6. M2-C3 已完成 Mock 验证：幂等重放/冲突、`operationId`、intent/result 审计和审计失败阻断
    均已覆盖；下一步把同一流程接入真实存储和真实管理请求链路。
 7. C4-02 受控适配器已通过 15 项 Mock/故障测试；C4-03b/C4-03c 的 auth-service 核心链路
-   已通过 26 项 auth 回归、104 项 admin 测试、15 项 gateway-control 测试、15 项
-   resource-service 测试、14 项 mcp-gateway 测试和 24 项 client-sync 测试，共 198 项。下一步在
+   已通过 26 项 auth 回归、109 项 admin 测试、15 项 gateway-control 测试、15 项
+   resource-service 测试、14 项 mcp-gateway 测试和 24 项 client-sync 测试，共 203 项。下一步在
    Docker 可用环境验证镜像、Compose、
    健康检查和真实共享卷故障恢复；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。
 8. M2-C5 的 `audit-logs`、`operations/{id}`、人工对账和补偿后端已通过 Mock/故障测试；
@@ -931,3 +937,4 @@ C4-03c 真实共享卷验收、C4-03d 页面 E2E、C5 生产验收和 M2-D 生�
 | M3-B 远程 MCP 治理 | `feat/m3-b-remote-mcp` / `enterprise/mcp-gateway/` | 元数据注册表、管理员注册/更新/健康检查、客户端凭据签发/吊销、企业统一 tools-only Streamable HTTP JSON-RPC 端点、user/org/device/server scope、工具命名空间与 allow/deny/风险/可见性、short-lived HMAC 审批门禁、HTTPS/host allowlist、固定 DNS、私网/回环/元数据地址和重定向拒绝、请求/响应/超时/速率限制、每服务器熔断、SHA-256 客户端 token 摘要、环境 Secret Reference 和元数据审计 | `node --test enterprise/mcp-gateway/test/mcp-gateway.test.mjs`；admin、auth、gateway-control、resource 全回归 | mcp-gateway `14 passed, 0 failed`；admin `104 passed, 0 failed`；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；resource `11 passed, 0 failed`；该阶段合计 `169 passed, 0 failed` | 审批 nonce/限流器仅单进程；注册表、审计和幂等非同一事务；审计失败窗口可能留下不可恢复 token 的孤立 client；admin-service 真实审批查询/一次性消费、管理台、OIDC 组织分配、员工端同步接入、M3-D、共享事务存储、KMS/HSM、mTLS、真实 MCP/IdP、浏览器 E2E、Docker/Compose 实机和生产验收未完成 |
 | M3-C 客户端资源同步核心 | `codex/m3-c-client-sync` / `enterprise/client-sync/` | 固定 Ed25519 公钥、`signingKeyId` 和 SPKI SHA-256 指纹；desired-state manifest/内容/长度/SHA-256 校验；staging、fsync、复验、rename 原子激活；失败保留上一验签版本；离线继续使用；forced/recommended；inspect 漂移；路径穿越、符号链接、坏缓存、重复资源/版本/hash、未知 key、低版本客户端和超大 manifest 拒绝；进程锁；状态 `0600` 原子写入；报告不含内容、token、Secret 或私钥；同步周期 1-300 秒 | `node --test enterprise/client-sync/test/*.test.mjs`；企业全量 Node/Mock 回归 | 该阶段 client-sync `16 passed, 0 failed`；admin `104 passed, 0 failed`；auth `25 passed, 0 failed`；gateway-control `15 passed, 0 failed`；resource `11 passed, 0 failed`；mcp-gateway `14 passed, 0 failed`；合计 `185 passed, 0 failed` | 该阶段尚未接入员工端同步凭证 API、管理台资源/漂移页、本地 helper 产品入口、目标 Agent 文件映射和设备端上报；后续 M3-C-1 已补齐控制面 API |
 | M3-C-1 同步控制面 | `codex/m3-c-sync-control-plane` / `enterprise/auth-service/`、`enterprise/resource-service/`、`enterprise/client-sync/` | 设备身份换取 60-900 秒 `mss1` HMAC 同步凭证，绑定 user/device/组织范围和 audience；OIDC `groups` 去重和校验；按组织范围生成 desired-state；设备只上报元数据证据；管理端 JSON 查询；报告按设备保留最新一份并原子 `0600` 写入；`createEnterpriseSyncTransport()` 支持凭证缓存/重签、ETag 条件请求、超时、响应大小上限和报告投影 | `node --test enterprise/auth-service/test/auth-service.test.mjs`；`node --test enterprise/resource-service/test/*.test.mjs`；`node --test enterprise/client-sync/test/*.test.mjs`；企业全量 Node/Mock 回归 | auth `26 passed, 0 failed`；admin `104 passed, 0 failed`；gateway-control `15 passed, 0 failed`；resource `15 passed, 0 failed`（11 核心 + 4 控制面）；mcp-gateway `14 passed, 0 failed`；client-sync `24 passed, 0 failed`（16 核心 + 8 传输）；合计 `198 passed, 0 failed` | 管理台资源/漂移页、本地 helper 产品入口、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机验收、灰度发布、自动回滚和企业生产验收未完成；管理端只有 JSON API，没有同步报告 UI |
+| M3-C-2 只读管理可见性 | `codex/m3-c2-admin-sync-visibility` / `enterprise/admin-service/` | 四条只读资源/同步 API；独立 Bearer 服务令牌、GET-only、禁止重定向、5 秒超时、4 MiB 响应上限；严格字段白名单；资源按 `"*"`/组织范围过滤并裁剪范围外 assignments；同步报告要求设备存在、可见且 `userId` 与设备一致；依赖故障统一 `503 resource_service_unavailable`；管理页只读面板 | `node --test enterprise/admin-service/test/*.test.mjs`；企业全量 Node/Mock 回归 | admin `109 passed, 0 failed`（82 集成 + 7 目录 + 7 渠道 + 7 规则 + 6 SIEM）；企业合计 `203 passed, 0 failed` | 资源发布/回滚 UI、发布/回滚审批联动、M3-B MCP 管理台、本地 helper 产品入口、目标 Agent 文件映射、Windows ACL/MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收未完成 |

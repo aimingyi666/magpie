@@ -41,6 +41,18 @@ const TEST_OIDC_CLIENT_SECRET = ["admin", "test", "oidc", "client", "fixture", "
 const TEST_AUTH_SERVICE_TOKEN = ["admin", "test", "auth", "service", "fixture", "material"].join("-");
 const TEST_STEP_UP_CLIENT_SECRET = ["admin", "test", "step", "up", "fixture", "material"].join("-");
 const TEST_SIEM_COLLECTOR_TOKEN = ["admin", "test", "siem", "collector", "fixture"].join("-");
+const TEST_RESOURCE_SERVICE_TOKEN = [
+  "admin",
+  "test",
+  "resource",
+  "service",
+  "fixture",
+  "material",
+].join("-");
+const RESOURCE_PLATFORM_ID = `res_${"a".repeat(16)}`;
+const RESOURCE_SALES_ID = `res_${"b".repeat(16)}`;
+const RESOURCE_GLOBAL_ID = `res_${"c".repeat(16)}`;
+const RELEASE_PLATFORM_ID = `rel_${"a".repeat(16)}`;
 
 function adminConfigEnv(overrides = {}) {
   return {
@@ -769,10 +781,211 @@ function createMockAuthService(expectedToken) {
   };
 }
 
+// Mock resource catalog / client sync control plane. It deliberately returns
+// fields the admin service must never project, plus plaintext content and the
+// service token, so leak assertions stay meaningful.
+function createMockResourceService(expectedToken) {
+  let failing = false;
+  let slow = false;
+  let malformed = false;
+  let redirecting = false;
+  const calls = [];
+  const resources = [
+    {
+      id: RESOURCE_PLATFORM_ID,
+      kind: "mcp_server",
+      name: "Platform baseline",
+      description: "Engineering baseline",
+      publisher: "platform-team",
+      deliveryMode: "managed",
+      assignments: ["org-platform"],
+      compatibility: { platforms: ["windows", "macos"], minClientVersion: "1.0.0" },
+      status: "published",
+      currentReleaseId: RELEASE_PLATFORM_ID,
+      currentRelease: {
+        id: RELEASE_PLATFORM_ID,
+        resourceId: RESOURCE_PLATFORM_ID,
+        resourceVersion: "2026.12.1",
+        status: "published",
+        hash: `sha256:${"1".repeat(64)}`,
+        contentBytes: 42,
+        mediaType: "application/json",
+        manifestDigest: `sha256:${"2".repeat(64)}`,
+        previousReleaseId: "",
+        createdAt: "2026-10-20T00:00:00.000Z",
+        publishedAt: "2026-10-21T00:00:00.000Z",
+        createdBy: "should-not-leak-actor",
+        publishedBy: "should-not-leak-actor",
+      },
+      createdAt: "2026-10-19T00:00:00.000Z",
+      updatedAt: "2026-10-21T00:00:00.000Z",
+      createdBy: "should-not-leak-actor",
+      updatedBy: "should-not-leak-actor",
+      contentBase64: Buffer.from("must-not-leak-resource-content").toString("base64"),
+      signingKey: "must-not-leak-signing-key",
+      serviceToken: expectedToken,
+    },
+    {
+      id: RESOURCE_SALES_ID,
+      kind: "skill",
+      name: "Sales handbook",
+      description: "Sales only",
+      publisher: "sales-ops",
+      deliveryMode: "managed",
+      assignments: ["org-sales"],
+      compatibility: { platforms: ["windows"] },
+      status: "published",
+      currentReleaseId: "",
+      currentRelease: null,
+      createdAt: "2026-10-18T00:00:00.000Z",
+      updatedAt: "2026-10-22T00:00:00.000Z",
+      signingKey: "must-not-leak-signing-key",
+    },
+    {
+      id: RESOURCE_GLOBAL_ID,
+      kind: "instruction",
+      name: "Enterprise instruction",
+      description: "Everyone",
+      publisher: "it-governance",
+      deliveryMode: "managed",
+      assignments: ["*"],
+      compatibility: {},
+      status: "draft",
+      currentReleaseId: "",
+      currentRelease: null,
+      createdAt: "2026-10-17T00:00:00.000Z",
+      updatedAt: "2026-10-23T00:00:00.000Z",
+    },
+  ];
+  const reports = [
+    {
+      userId: "usr_alice",
+      deviceId: "dev_alice",
+      revision: `sha256:${"3".repeat(64)}`,
+      status: "drift",
+      clientVersion: "1.4.0",
+      installed: [{
+        resourceId: RESOURCE_PLATFORM_ID,
+        releaseId: RELEASE_PLATFORM_ID,
+        manifestDigest: `sha256:${"2".repeat(64)}`,
+      }],
+      drift: [{
+        resourceId: RESOURCE_PLATFORM_ID,
+        state: "version_mismatch",
+        expectedReleaseId: RELEASE_PLATFORM_ID,
+        actualReleaseId: `rel_${"9".repeat(16)}`,
+      }],
+      reportedAt: "2026-10-31T08:10:00.000Z",
+      receivedAt: "2026-10-31T08:11:00.000Z",
+      syncToken: "must-not-leak-sync-token",
+    },
+    {
+      userId: "usr_carol",
+      deviceId: "dev_carol",
+      revision: `sha256:${"4".repeat(64)}`,
+      status: "synced",
+      clientVersion: "1.4.0",
+      installed: [],
+      drift: [],
+      reportedAt: "2026-10-31T10:10:00.000Z",
+      receivedAt: "2026-10-31T10:11:00.000Z",
+    },
+    {
+      userId: "usr_ghost",
+      deviceId: "dev_ghost",
+      revision: `sha256:${"5".repeat(64)}`,
+      status: "offline",
+      clientVersion: "1.4.0",
+      installed: [],
+      drift: [],
+      reportedAt: "2026-10-30T10:10:00.000Z",
+      receivedAt: "2026-10-30T10:11:00.000Z",
+    },
+    {
+      // Known user, unknown device: a report alone must never grant visibility.
+      userId: "usr_alice",
+      deviceId: "dev_unregistered",
+      revision: `sha256:${"6".repeat(64)}`,
+      status: "synced",
+      clientVersion: "1.4.0",
+      installed: [],
+      drift: [],
+      reportedAt: "2026-10-29T10:10:00.000Z",
+      receivedAt: "2026-10-29T10:11:00.000Z",
+    },
+  ];
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    calls.push({ pathname: url.pathname, authorization: String(req.headers.authorization || "") });
+    const send = (status, value) => {
+      res.writeHead(status, { "content-type": "application/json" });
+      res.end(JSON.stringify(value));
+    };
+    if (slow) {
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+    }
+    if (failing) {
+      send(503, { error: { code: "resource_unavailable", token: expectedToken } });
+      return;
+    }
+    if (String(req.headers.authorization || "") !== `Bearer ${expectedToken}`) {
+      send(401, { error: { code: "unauthorized" } });
+      return;
+    }
+    if (url.pathname === "/api/v1/admin/resources") {
+      if (redirecting) {
+        res.writeHead(302, { location: "/api/v1/admin/sync-reports" });
+        res.end();
+        return;
+      }
+      if (malformed) {
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end("{not json");
+        return;
+      }
+      send(200, { schemaVersion: 1, ok: true, resources });
+      return;
+    }
+    const resourceMatch = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})$/.exec(url.pathname);
+    if (resourceMatch) {
+      const resource = resources.find((candidate) => candidate.id === resourceMatch[1]);
+      if (!resource) send(404, { error: { code: "resource_not_found" } });
+      else send(200, {
+        schemaVersion: 1,
+        ok: true,
+        resource,
+        releases: resource.currentRelease ? [resource.currentRelease] : [],
+      });
+      return;
+    }
+    if (url.pathname === "/api/v1/admin/sync-reports") {
+      send(200, { schemaVersion: 1, ok: true, reports });
+      return;
+    }
+    const reportMatch = /^\/api\/v1\/admin\/sync-reports\/([A-Za-z0-9._:-]+)$/.exec(url.pathname);
+    if (reportMatch) {
+      const report = reports.find((candidate) => candidate.deviceId === reportMatch[1]);
+      if (!report) send(404, { error: { code: "sync_report_not_found" } });
+      else send(200, { schemaVersion: 1, ok: true, report });
+      return;
+    }
+    send(404, { error: { code: "not_found" } });
+  });
+  return {
+    server,
+    setFailing(value) { failing = value; },
+    setSlow(value) { slow = value; },
+    setMalformed(value) { malformed = value; },
+    setRedirecting(value) { redirecting = value; },
+    get calls() { return calls; },
+  };
+}
+
 async function fixture(options = {}) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-admin-test-"));
   let oidc = null;
   let auth = null;
+  let resource = null;
   let admin = null;
   try {
     const usagePath = path.join(temp, "usage.jsonl");
@@ -786,6 +999,12 @@ async function fixture(options = {}) {
     const serviceToken = TEST_AUTH_SERVICE_TOKEN;
     auth = createMockAuthService(serviceToken);
     const authBase = await listen(auth.server);
+    const resourceEnabled = options.resourceServiceEnabled !== false;
+    let resourceBase = "";
+    if (resourceEnabled) {
+      resource = createMockResourceService(TEST_RESOURCE_SERVICE_TOKEN);
+      resourceBase = await listen(resource.server);
+    }
     const callbackDisabled = options.callbackEnabled === false;
     const callbackSecret = options.callbackSecret !== undefined
       ? options.callbackSecret
@@ -831,6 +1050,13 @@ async function fixture(options = {}) {
       ADMIN_AUTH_SERVICE_URL: authBase,
       ADMIN_AUTH_SERVICE_TOKEN: serviceToken,
       ADMIN_AUTH_SERVICE_TIMEOUT_MS: "1000",
+      ...(resourceBase
+        ? {
+          ADMIN_RESOURCE_SERVICE_URL: resourceBase,
+          ADMIN_RESOURCE_SERVICE_TOKEN: TEST_RESOURCE_SERVICE_TOKEN,
+          ADMIN_RESOURCE_SERVICE_TIMEOUT_MS: "1000",
+        }
+        : {}),
       ADMIN_APPROVAL_CALLBACK_SECRET: callbackSecret,
       ADMIN_APPROVAL_CALLBACK_ISSUER: callbackIssuer,
       ADMIN_APPROVAL_CALLBACK_AUDIENCE: callbackAudience,
@@ -869,6 +1095,7 @@ async function fixture(options = {}) {
       temp,
       oidc,
       auth,
+      resource,
       config,
       admin,
       base,
@@ -880,6 +1107,7 @@ async function fixture(options = {}) {
         stepUpOidcClientSecret: oidc.stepUpClientSecret,
         accessToken: MOCK_ACCESS_TOKEN,
         serviceToken,
+        resourceServiceToken: TEST_RESOURCE_SERVICE_TOKEN,
         sessionSecret: config.sessionSecret,
         callbackSecret,
       },
@@ -890,6 +1118,7 @@ async function fixture(options = {}) {
         await close(admin.server);
         await close(oidc.server);
         await close(auth.server);
+        if (resource) await close(resource.server);
         await fs.rm(temp, { recursive: true, force: true });
       },
     };
@@ -900,6 +1129,7 @@ async function fixture(options = {}) {
     if (admin?.server?.listening) await close(admin.server);
     if (oidc?.server?.listening) await close(oidc.server);
     if (auth?.server?.listening) await close(auth.server);
+    if (resource?.server?.listening) await close(resource.server);
     await fs.rm(temp, { recursive: true, force: true });
     throw error;
   }
@@ -1389,11 +1619,16 @@ function assertNoWriteSecrets(value, f, jar) {
     "should-not-leak-gateway-key",
     "should-not-leak-device-token",
     "should-not-leak-token-hash",
+    "must-not-leak-sync-token",
+    "must-not-leak-signing-key",
+    "must-not-leak-resource-content",
+    "should-not-leak-actor",
     "BEGIN PUBLIC KEY",
     "sk-magpie-issued-",
     "mdev_",
     "tokenHash",
     f.secrets.serviceToken,
+    ...(f.secrets.resourceServiceToken ? [f.secrets.resourceServiceToken] : []),
     f.secrets.oidcClientSecret,
     f.secrets.accessToken,
     ...(f.secrets.stepUpOidcClientSecret ? [f.secrets.stepUpOidcClientSecret] : []),
@@ -7855,4 +8090,323 @@ test("NOTIFY-01d operations APIs expose scoped timelines and isolate escalation 
     `${f.base}/api/v1/admin/notifications/aggregates`,
   );
   assert.equal(unauthenticated.status, 401);
+});
+
+test("M3-C-2 configuration requires the resource service URL and token together", () => {
+  assert.ok(loadConfig(adminConfigEnv({
+    ADMIN_RESOURCE_SERVICE_URL: "http://127.0.0.1:3460",
+    ADMIN_RESOURCE_SERVICE_TOKEN: TEST_RESOURCE_SERVICE_TOKEN,
+  })).resourceService.enabled);
+
+  const disabled = loadConfig(adminConfigEnv());
+  assert.equal(disabled.resourceService.enabled, false);
+  assert.equal(disabled.resourceService.url, "");
+  assert.equal(disabled.resourceService.token, "");
+  assert.equal(disabled.resourceService.timeoutMs, 5000);
+
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_RESOURCE_SERVICE_URL: "http://127.0.0.1:3460",
+    })),
+    /ADMIN_RESOURCE_SERVICE_URL and ADMIN_RESOURCE_SERVICE_TOKEN are required together/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_RESOURCE_SERVICE_TOKEN: TEST_RESOURCE_SERVICE_TOKEN,
+    })),
+    /ADMIN_RESOURCE_SERVICE_URL and ADMIN_RESOURCE_SERVICE_TOKEN are required together/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_RESOURCE_SERVICE_URL: "http://127.0.0.1:3460",
+      ADMIN_RESOURCE_SERVICE_TOKEN: "short",
+    })),
+    /ADMIN_RESOURCE_SERVICE_TOKEN must be at least 32 characters/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_RESOURCE_SERVICE_URL: "ftp://127.0.0.1:3460",
+      ADMIN_RESOURCE_SERVICE_TOKEN: TEST_RESOURCE_SERVICE_TOKEN,
+    })),
+    /ADMIN_RESOURCE_SERVICE_URL must use http or https/,
+  );
+  assert.throws(
+    () => loadConfig(adminConfigEnv({
+      ADMIN_RESOURCE_SERVICE_URL: "http://127.0.0.1:3460",
+      ADMIN_RESOURCE_SERVICE_TOKEN: TEST_RESOURCE_SERVICE_TOKEN,
+      ADMIN_RESOURCE_SERVICE_TIMEOUT_MS: "10",
+    })),
+    /ADMIN_RESOURCE_SERVICE_TIMEOUT_MS must be an integer from 500 to 30000/,
+  );
+});
+
+test("M3-C-2 resource and sync APIs project only allowlisted scoped metadata", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  assert.ok(current.body.scopeOrgUnitIds.includes("*"));
+
+  const resources = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(resources.response.status, 200);
+  assert.deepEqual(
+    resources.body.resources.map((resource) => resource.id).sort(),
+    [RESOURCE_GLOBAL_ID, RESOURCE_PLATFORM_ID, RESOURCE_SALES_ID].sort(),
+  );
+  const platform = resources.body.resources
+    .find((resource) => resource.id === RESOURCE_PLATFORM_ID);
+  assert.deepEqual(Object.keys(platform).sort(), [
+    "assignments",
+    "compatibility",
+    "createdAt",
+    "currentRelease",
+    "currentReleaseId",
+    "deliveryMode",
+    "description",
+    "id",
+    "kind",
+    "name",
+    "publisher",
+    "status",
+    "updatedAt",
+  ].sort());
+  assert.deepEqual(Object.keys(platform.currentRelease).sort(), [
+    "contentBytes",
+    "createdAt",
+    "hash",
+    "id",
+    "manifestDigest",
+    "mediaType",
+    "previousReleaseId",
+    "publishedAt",
+    "resourceId",
+    "resourceVersion",
+    "status",
+  ].sort());
+  assertNoWriteSecrets(resources.body, f, jar);
+
+  const detail = await adminGet(f, jar, `/api/v1/admin/resources/${RESOURCE_PLATFORM_ID}`);
+  assert.equal(detail.response.status, 200);
+  assert.equal(detail.body.resource.id, RESOURCE_PLATFORM_ID);
+  assert.equal(detail.body.releases.length, 1);
+  assertNoWriteSecrets(detail.body, f, jar);
+
+  const missing = await adminGet(f, jar, `/api/v1/admin/resources/${"res_"}${"d".repeat(16)}`);
+  assert.equal(missing.response.status, 404);
+  assert.equal(missing.body.error.code, "target_not_found");
+
+  const reports = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports");
+  assert.equal(reports.response.status, 200);
+  // usr_ghost has no identity and dev_unregistered is not a known device, so
+  // both reports stay hidden instead of being attributed through the report.
+  assert.deepEqual(
+    reports.body.reports.map((report) => report.deviceId).sort(),
+    ["dev_alice", "dev_carol"],
+  );
+  assert.deepEqual(Object.keys(reports.body.reports[0]).sort(), [
+    "clientVersion",
+    "deviceId",
+    "drift",
+    "driftCount",
+    "installed",
+    "receivedAt",
+    "reportedAt",
+    "revision",
+    "status",
+    "userId",
+  ].sort());
+  assertNoWriteSecrets(reports.body, f, jar);
+
+  const reportDetail = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports/dev_alice");
+  assert.equal(reportDetail.response.status, 200);
+  assert.equal(reportDetail.body.report.driftCount, 1);
+  assert.deepEqual(reportDetail.body.report.drift[0], {
+    resourceId: RESOURCE_PLATFORM_ID,
+    state: "version_mismatch",
+    expectedReleaseId: RELEASE_PLATFORM_ID,
+    actualReleaseId: `rel_${"9".repeat(16)}`,
+  });
+  assertNoWriteSecrets(reportDetail.body, f, jar);
+
+  const unauthenticated = await fetch(`${f.base}/api/v1/admin/resources`);
+  assert.equal(unauthenticated.status, 401);
+  const unauthenticatedReports = await fetch(
+    `${f.base}/api/v1/admin/resource-sync/reports`,
+  );
+  assert.equal(unauthenticatedReports.status, 401);
+
+  // The admin service must present its own service token, never a browser one.
+  assert.ok(f.resource.calls.length > 0);
+  assert.ok(f.resource.calls.every((call) =>
+    call.authorization === `Bearer ${TEST_RESOURCE_SERVICE_TOKEN}`));
+});
+
+test("M3-C-2 organization scope filters reports and resources and fails closed", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  await bindRole(f, current.body.user.id, "department_admin", "org-root");
+
+  const scoped = await me(f, jar);
+  assert.ok(!scoped.body.scopeOrgUnitIds.includes("*"));
+  assert.deepEqual(scoped.body.scopeOrgUnitIds, ["org-platform", "org-root"]);
+
+  const resources = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(resources.response.status, 200);
+  assert.deepEqual(
+    resources.body.resources.map((resource) => resource.id).sort(),
+    [RESOURCE_GLOBAL_ID, RESOURCE_PLATFORM_ID].sort(),
+  );
+
+  // A sibling resource is refused without confirming it exists.
+  const crossScope = await adminGet(f, jar, `/api/v1/admin/resources/${RESOURCE_SALES_ID}`);
+  assert.equal(crossScope.response.status, 403);
+  assert.equal(crossScope.body.error.code, "forbidden_scope");
+
+  const reports = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports");
+  assert.equal(reports.response.status, 200);
+  assert.deepEqual(reports.body.reports.map((report) => report.deviceId), ["dev_alice"]);
+
+  const crossReport = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports/dev_carol");
+  assert.equal(crossReport.response.status, 403);
+  assert.equal(crossReport.body.error.code, "forbidden_scope");
+
+  const ghostReport = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports/dev_ghost");
+  assert.equal(ghostReport.response.status, 403);
+
+  const unknownReport = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports/dev_missing");
+  assert.equal(unknownReport.response.status, 404);
+  assert.equal(unknownReport.body.error.code, "target_not_found");
+
+  const malformedId = await adminGet(f, jar, "/api/v1/admin/resources/not-a-resource");
+  assert.equal(malformedId.response.status, 404);
+
+  // A role without resources.read keeps sync visibility and loses the catalog.
+  await bindRole(f, current.body.user.id, "ops_admin", "*");
+  const deniedResources = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(deniedResources.response.status, 403);
+  assert.equal(deniedResources.body.error.code, "forbidden_role");
+  const allowedReports = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports");
+  assert.equal(allowedReports.response.status, 200);
+
+  // A role without either permission is refused before the dependency call.
+  const beforeCalls = f.resource.calls.length;
+  await bindRole(f, current.body.user.id, "employee", "*");
+  assert.equal((await adminGet(f, jar, "/api/v1/admin/resources")).response.status, 403);
+  assert.equal(
+    (await adminGet(f, jar, "/api/v1/admin/resource-sync/reports")).response.status,
+    403,
+  );
+  assert.equal(f.resource.calls.length, beforeCalls);
+});
+
+test("M3-C-2 resource service failures are reported, never rendered as empty", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const jar = await adminLogin(f);
+
+  f.resource.setFailing(true);
+  const failing = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(failing.response.status, 503);
+  assert.equal(failing.body.error.code, "resource_service_unavailable");
+  assertNoWriteSecrets(failing.body, f, jar);
+  const failingReports = await adminGet(f, jar, "/api/v1/admin/resource-sync/reports");
+  assert.equal(failingReports.response.status, 503);
+  assert.equal(failingReports.body.error.code, "resource_service_unavailable");
+  f.resource.setFailing(false);
+
+  f.resource.setSlow(true);
+  const timedOut = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(timedOut.response.status, 503);
+  assert.equal(timedOut.body.error.code, "resource_service_unavailable");
+  f.resource.setSlow(false);
+
+  f.resource.setMalformed(true);
+  const malformed = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(malformed.response.status, 503);
+  assert.equal(malformed.body.error.code, "resource_service_unavailable");
+  f.resource.setMalformed(false);
+
+  // The service token must never be forwarded through an upstream redirect.
+  f.resource.setRedirecting(true);
+  const redirected = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(redirected.response.status, 503);
+  assert.equal(redirected.body.error.code, "resource_service_unavailable");
+  f.resource.setRedirecting(false);
+
+  const recovered = await adminGet(f, jar, "/api/v1/admin/resources");
+  assert.equal(recovered.response.status, 200);
+  assert.equal(recovered.body.resources.length, 3);
+
+  // An unconfigured dependency stays unavailable rather than pretending empty.
+  const bare = await fixture({ resourceServiceEnabled: false });
+  t.after(() => bare.close());
+  await seedOrganizations(bare);
+  const bareJar = await adminLogin(bare);
+  const unavailable = await adminGet(bare, bareJar, "/api/v1/admin/resources");
+  assert.equal(unavailable.response.status, 503);
+  assert.equal(unavailable.body.error.code, "resource_service_unavailable");
+  const unavailableReports = await adminGet(
+    bare,
+    bareJar,
+    "/api/v1/admin/resource-sync/reports",
+  );
+  assert.equal(unavailableReports.response.status, 503);
+  assert.equal(unavailableReports.body.error.code, "resource_service_unavailable");
+});
+
+test("M3-C-2 admin UI exposes scoped resource and sync panels without inline scripts", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  for (const expected of [
+    "Resources and client sync",
+    'id="resource-sync-filter"',
+    'id="resource-list"',
+    'id="resource-sync-report-list"',
+    'id="resource-sync-report-detail"',
+    "Refresh resources and sync",
+    'src="/admin/app.js"',
+  ]) {
+    assert.ok(html.includes(expected), `admin page should include ${expected}`);
+  }
+  assert.ok(!/<script(?![^>]*\bsrc=)/i.test(html));
+  assert.ok(!/\son[a-z]+\s*=/i.test(html));
+  assert.ok(!html.includes("must-not-leak-resource-content"));
+  assert.ok(!html.includes(TEST_RESOURCE_SERVICE_TOKEN));
+
+  const appScript = await fs.readFile(new URL("../src/admin-app.js", import.meta.url), "utf8");
+  assert.match(appScript, /loadResourceSyncVisibility/);
+  assert.match(appScript, /renderResources/);
+  assert.match(appScript, /renderSyncReports/);
+  assert.match(appScript, /#resource-sync-filter/);
+
+  // A role without either read permission gets an explanation, not a panel.
+  await bindRole(f, current.body.user.id, "employee", "*");
+  const denied = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
+  assert.equal(denied.status, 200);
+  const deniedHtml = await denied.text();
+  assert.ok(deniedHtml.includes("Resources and client sync"));
+  assert.ok(!deniedHtml.includes('id="resource-sync-filter"'));
+  assert.ok(!deniedHtml.includes('id="resource-list"'));
+  assert.ok(!/<script(?![^>]*\bsrc=)/i.test(deniedHtml));
 });
