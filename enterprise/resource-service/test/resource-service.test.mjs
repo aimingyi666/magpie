@@ -13,6 +13,7 @@ import { ResourceStore } from "../src/store.js";
 import { createResourceServer } from "../src/service.js";
 
 const TOKEN = ["resource", "service", "test", "token", "not", "real"].join("-");
+const SYNC_TOKEN_SECRET = ["resource", "sync", "test", "secret", "not", "real"].join("-");
 
 function tempDirectory() {
   return fs.mkdtempSync(path.join(os.tmpdir(), "magpie-resource-service-"));
@@ -30,6 +31,9 @@ function baseConfig(root, overrides = {}) {
     bind: "127.0.0.1",
     port: 0,
     serviceToken: TOKEN,
+    syncTokenSecret: SYNC_TOKEN_SECRET,
+    syncTokenAudience: "magpie-enterprise-resource",
+    syncReportPath: path.join(root, "sync-reports.json"),
     storePath: path.join(root, "resource-store.json"),
     contentPath: path.join(root, "objects"),
     signingPrivateKeyPath: writeSigningKey(root),
@@ -38,6 +42,9 @@ function baseConfig(root, overrides = {}) {
     maxBodyBytes: 2 * 1024 * 1024 + 64 * 1024,
     maxResources: 20,
     maxReleasesPerResource: 20,
+    maxSnapshotBytes: 8 * 1024 * 1024,
+    maxSnapshotResources: 200,
+    maxSyncReportBytes: 256 * 1024,
     rateLimitPerMinute: 1000,
     ...overrides,
   };

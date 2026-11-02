@@ -72,6 +72,7 @@ export function loadConfig(env = process.env) {
   const issuerKey = required(env, "MAGPIE_ISSUER_KEY");
   const gatewayControlToken = required(env, "GATEWAY_CONTROL_TOKEN");
   const clientSecret = required(env, "OIDC_CLIENT_SECRET");
+  const syncTokenSecret = required(env, "SYNC_TOKEN_SECRET");
 
   for (const [name, value] of [
     ["AUTH_COOKIE_SECRET", cookieSecret],
@@ -80,6 +81,7 @@ export function loadConfig(env = process.env) {
     ["MAGPIE_ISSUER_KEY", issuerKey],
     ["GATEWAY_CONTROL_TOKEN", gatewayControlToken],
     ["OIDC_CLIENT_SECRET", clientSecret],
+    ["SYNC_TOKEN_SECRET", syncTokenSecret],
   ]) {
     if (value.length < MIN_SECRET_LENGTH) {
       throw new Error(`${name} must be at least ${MIN_SECRET_LENGTH} characters`);
@@ -110,6 +112,7 @@ export function loadConfig(env = process.env) {
       allowedEmailDomains: list(env, "OIDC_ALLOWED_EMAIL_DOMAINS").map((value) => value.toLowerCase()),
       emailClaim: String(env.OIDC_EMAIL_CLAIM || "email").trim(),
       nameClaim: String(env.OIDC_NAME_CLAIM || "name").trim(),
+      groupsClaim: String(env.OIDC_GROUPS_CLAIM || "groups").trim(),
     },
     magpie: {
       gatewayUrl: url(env, "MAGPIE_GATEWAY_URL"),
@@ -125,6 +128,11 @@ export function loadConfig(env = process.env) {
       token: gatewayControlToken,
       timeoutMs: integer(env, "GATEWAY_CONTROL_TIMEOUT_MS", 10000, 500, 30000),
     },
+    sync: {
+      tokenSecret: syncTokenSecret,
+      tokenTtlSeconds: integer(env, "SYNC_TOKEN_TTL_SECONDS", 300, 60, 900),
+      tokenAudience: String(env.SYNC_TOKEN_AUDIENCE || "magpie-enterprise-resource").trim(),
+    },
   };
 
   if (config.oidc.tokenAuthMethod !== "client_secret_basic" && config.oidc.tokenAuthMethod !== "client_secret_post") {
@@ -135,6 +143,20 @@ export function loadConfig(env = process.env) {
   }
   if (config.gatewayControl.token === config.magpie.issuerKey) {
     throw new Error("GATEWAY_CONTROL_TOKEN must not reuse MAGPIE_ISSUER_KEY");
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(config.sync.tokenAudience)) {
+    throw new Error("SYNC_TOKEN_AUDIENCE is invalid");
+  }
+  const distinctSecrets = new Set([
+    config.cookieSecret,
+    config.adminToken,
+    config.internalAdminToken,
+    config.magpie.issuerKey,
+    config.gatewayControl.token,
+    config.sync.tokenSecret,
+  ]);
+  if (distinctSecrets.size !== 6) {
+    throw new Error("authentication and service secrets must not reuse the same value");
   }
   return config;
 }

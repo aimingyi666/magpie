@@ -12,10 +12,10 @@
 逐项生产验收证据和签字表见
 [`enterprise-acceptance-checklist.md`](enterprise-acceptance-checklist.md)。
 
-当前进度（2026-11-02，完整实施方案 v3.22）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
+当前进度（2026-11-02，完整实施方案 v3.23）：M0 的客户端/服务端分离已经落地在 `enterprise/`，包括部署模板、
 员工密钥开通、客户端加入、验收脚本和可重复的端到端测试；没有修改任何上游跟踪文件。
 M1 的 `enterprise-auth`、OIDC+PKCE、设备注册、短期 Key 刷新、同设备并发刷新串行化和
-加入脚本已经实现，并通过 Node 单元/Mock 集成测试（25/25）。真实 Magpie issuer E2E 已全部
+加入脚本已经实现，并通过 Node 单元/Mock 集成测试（26/26）。真实 Magpie issuer E2E 已全部
 通过：签发、调用、用量归属、刷新撤销、停用吊销和重启恢复均已验证。
 M2-A 管理身份底座、M2-B 只读治理、M2-C2 管理写接口和 M2-C3 幂等/管理审计已实现：`enterprise/admin-service` 提供独立管理 OIDC、
 MFA/ACR、已验证邮箱、管理会话、CSRF、IP 限制、RBAC、组织范围、内部服务令牌、最小管理页，
@@ -23,7 +23,7 @@ MFA/ACR、已验证邮箱、管理会话、CSRF、IP 限制、RBAC、组织范�
 组织子树过滤。M2-C2 已提供停用/启用用户、吊销设备和轮换当前凭证四个受控写 API，
 接入管理会话、CSRF、RBAC、组织子树、必填理由和响应脱敏；M2-C3 已接入持久化
 `Idempotency-Key`、同键重放/冲突、执行中保护、`operationId` 和 intent/result 管理审计。
-管理端测试为 104/104（77 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），auth-service 为 25/25，gateway-control 为 15/15，resource-service 为 11/11，mcp-gateway 为 14/14，client-sync 为 16/16；合计 185/185。M2-C1 的 auth-service
+管理端测试为 104/104（77 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项），auth-service 为 26/26，gateway-control 为 15/15，resource-service 为 15/15，mcp-gateway 为 14/14，client-sync 为 24/24；合计 198/198。M2-C1 的 auth-service
 内部写接口也已实现并通过 Mock 测试。C4-01 的 schema v1 机器协议已经实现并通过 Go 单测、
 gateway-key CLI 回归和隔离真实二进制冒烟：`gateway-key describe <id> --json` 可安全回读，
 `gateway-key policy apply <id> --json` 可在文件锁内原子替换模型和额度。C4-02
@@ -61,11 +61,14 @@ APR-01d 审批箱核心已实现并通过 Mock/集成测试，break-glass（`APR
 M3-A 的资源目录、不可变版本、SHA-256 内容寻址、canonical JSON、manifest digest、
 Ed25519 签名、发布/历史回滚、乐观并发、幂等和资源审计核心已实现，并通过 11 项
 resource-service 测试；M3-B 远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据
-隔离和元数据审计核心已实现，并通过 14 项 mcp-gateway 测试；M3-C 客户端同步核心已实现，
-覆盖签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、
-路径/符号链接防护、并发锁和状态秘密隔离，并通过 16 项 client-sync 测试；M3-D 受控本地
-MCP 未实现。M3-A/M3-B 尚未接入 admin-service 真实审批、管理台和 OIDC 组织分配，M3-C
-尚未接入员工端 OIDC/设备短期同步凭证 API、管理台、本地 helper 产品入口和生产环境；
+隔离和元数据审计核心已实现，并通过 14 项 mcp-gateway 测试；M3-C-1 同步凭证、desired-state、
+设备上报和管理员 JSON 查询 API 已实现，客户端 HTTP 传输适配器已接入，并通过 8 项专项测试。
+叠加原有签名同步、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移检测、
+路径/符号链接防护、并发锁和状态秘密隔离核心，client-sync 当前 24 项测试通过；
+resource-service 15 项测试通过（11 项核心 + 4 项控制面）。M3-D 受控本地
+MCP 未实现。M3-A/M3-B 尚未接入 admin-service 真实审批、管理台和 OIDC 组织分配；M3-C-1
+已有控制面 API，但管理台资源/漂移页、本地 helper 产品入口、目标 Agent 文件映射、Windows ACL、
+MDM、真实 IdP、浏览器 E2E 和 Docker/Compose 实机验收未完成；
 M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
 逐项真实状态见 [`enterprise-implementation-status.md`](enterprise-implementation-status.md)。
 完整需求 ID、交付包、端到端场景和每项完成定义见
@@ -120,7 +123,7 @@ M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
   设备令牌和网关 Key 不进入日志；刷新失败会撤销未持久化的新 Key。
 - 已测试：OIDC/JWT 验签、PKCE、加入码换取、设备心跳、刷新、停用吊销、过期令牌、
   公钥格式校验、持久化失败回滚、同设备并发刷新、“刷新签发中停用”、内部管理状态接口、
-   真实 issuer join → 调用 → 用量 → 刷新撤销 → 停用 → 重启；auth-service 当前 `25/25` 通过。
+   真实 issuer join → 调用 → 用量 → 刷新撤销 → 停用 → 重启；auth-service 当前 `26/26` 通过。
 - 待验收：真实企业 IdP、Docker 镜像/健康检查、Windows 计划任务实机刷新、
   SCIM/离职自动同步。
 - 预期效果：员工用公司账号一键登录，不再手工贴 key；密钥短命，离职 <1 小时失效；IT 不用逐台发密钥。
@@ -139,7 +142,7 @@ M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
   过期、IP fail-closed、角色撤销、部门子树、兄弟部门拒绝、用户/设备/凭证/模型/用量只读
   接口、用量归属、依赖故障、损坏用量和凭据不落盘；M2-C2 覆盖四个写接口、写组织范围、
   必填理由、坏 JSON 和响应/存储脱敏；M2-C3 覆盖同键重放/冲突、执行中保护、失败重放、
-  intent/result 审计和审计失败阻断；auth-service 当前 `25/25`。
+  intent/result 审计和审计失败阻断；auth-service 当前 `26/26`。
 - 已实现 M2-B：用户、部门、设备、凭证、模型和用量只读 API、服务端范围过滤、显式用户-
   部门映射、只读 `usage.jsonl` 读取和管理页摘要。
 - 已实现 M2-C1：auth-service 内部停用/启用、设备吊销、当前凭证轮换；只有独立服务令牌，
@@ -166,7 +169,7 @@ M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
   auth-service 不加载目录，只接收展开后的稳定模型 ID，真实 Compose/只读挂载/digest 重启仍待验收。
 - C4-03b 核心已实现：auth-service 已有版本化用户级 `gatewayPolicy`、旧 M1 `unknown` 迁移、
   quota/models 任意顺序首次提交、`policy_setup_required`、版本冲突、失败关闭和逐凭证回读确认；
-  当前 25/25 测试通过。C4-03c 已由 admin-service 调用 auth-service 编排额度/模型策略，
+  当前 26/26 测试通过。C4-03c 已由 admin-service 调用 auth-service 编排额度/模型策略，
   但真实 Compose/共享卷/真实 IdP 尚未验收。
 - C4-03c 核心已实现：额度修改、模型授权、规范化 payload 指纹、issuance journal、apply、
   独立回读、原子持久化和同步后才交付。管理服务禁止直接读写 `caller-keys.json`；由专用
@@ -289,7 +292,7 @@ M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
 - 预期效果：故障 5 分钟内定位；容量和成本可预测。
 - 工作量：小（S）。
 
-### P1-3 客户端企业预置（对应 M3-C/M5，2-3 周）
+### P1-3 客户端企业预置（对应 M3-C-1/M5，2-3 周）
 
 - 内容：组织配置包（JSON 或 `magpie://join?...`）：网关地址、Provider 模板、模型目录、策略版本；客户端"加入组织"后自动完成 Provider + Agent 一键配置；MDM 静默安装 + 版本锁定 + 更新源。
 - 预期效果：新员工 5 分钟内可用，零手工配置；版本统一、可回滚。
@@ -324,7 +327,7 @@ M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
 | M2-C4-01 网关机器协议 | 已完成，本地测试通过 | `describe --json`、原子 `policy apply --json`、版本冲突、无秘密输出 | Go 单测、CLI 回归和隔离真实二进制冒烟通过 |
 | M2-C4-02 受控网关适配器 | 已完成，Mock/故障测试通过 | 固定路由、独立服务令牌、固定 argv、超时/64 KiB 上限、独立回读和 `pending` | Node `15/15`；Docker/Compose、真实共享卷和 mTLS 待验收 |
 | C4-03a 正式只读模型目录 | 已完成，待部署验收 | 严格 JSON、schema v1、稳定模型 ID、Provider 通配符、group、2 MiB、digest 和安全投影；管理 `104/104` | 真实只读挂载、digest 重启和失败关闭通过；admin-service 已把选择器展开为稳定模型 ID |
-| C4-03b 用户级策略核心 | 已完成本地测试 | 版本化 `gatewayPolicy`、旧 M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | auth-service `25/25`；真实部署待验收 |
+| C4-03b 用户级策略核心 | 已完成本地测试 | 版本化 `gatewayPolicy`、旧 M1 `unknown`、分步初始化、版本冲突、失败关闭和回读确认 | auth-service `26/26`；真实部署待验收 |
 | C4-03c 管理 API、签发同步与交付 | 核心已实现，Mock/故障测试通过 | 额度/模型 API、幂等签发、issuance journal、apply/readback、同步后交付、失败补偿和启动恢复 | 真实共享卷/Magpie/IdP 验收待完成 |
 | C4-04 完整管理到真实 Magpie 策略流 E2E | 已完成 | 管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、真实模型拒绝/限额、部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描 | 完整链路 `PASS`；不接触真实用户目录或 `127.0.0.1:3425` |
 | C4-03d 页面与剩余运营能力 | 1-2 周 | C4-03d 部分实现；基础审批、operation、查询/对账和导出页面已接入，剩余失败恢复入口和浏览器 E2E | 管理 API 失败关闭；页面只显示真实状态；失败可经 C5 对账 |
@@ -334,7 +337,7 @@ M3-B 审批 nonce 仅单进程内存，注册表/审计不是同一事务。
 | M2-E2 内置审批与通知运营页 | 核心已实现，真实环境验收未完成 | 渠道/规则/投递/死信/聚合/抑制/升级页面已完成；补充真实审批、真实渠道、浏览器 E2E、break-glass 生产告警/工单与 24 小时复核演练 | 双人审批可证明；break-glass 15 分钟过期并 24 小时内复核；死信可受审计幂等重放 |
 | M3-A 资源目录与签名 | 核心已实现，11/11 测试通过 | 五类资源目录、不可变版本、SHA-256 内容寻址、Ed25519 签名、发布/历史回滚、幂等和资源审计 | 内容与签名可验证；坏存储失败关闭；真实审批、管理台和客户端尚未接入 |
 | M3-B 远程 MCP 治理 | 核心后端已实现，14/14 测试通过 | 注册表、企业统一端点、工具级权限、健康检查、凭据隔离和审计 | 未授权 MCP/工具不可见/不可调用；SSRF、凭据泄露、健康和审计边界通过单元/Mock 测试；管理台、真实审批联动、OIDC 组织分配、客户端同步、共享事务存储和生产验收未完成 |
-| M3-C 客户端同步 | 核心已实现，16/16 测试通过；产品接入待完成 | 签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移、路径/符号链接防护、并发锁和状态秘密隔离 | 核心可验证；员工端短期同步凭证 API、管理台资源/漂移页、本地 helper 入口、Windows ACL、MDM、目标 Agent 文件映射、5 分钟可见和生产验收未完成 |
+| M3-C-1 客户端同步 | 控制面与核心已实现，client-sync 24/24、resource 15/15；产品页和本机落盘待完成 | 短期同步凭证、desired-state、设备上报、管理员 JSON 查询、HTTP 传输、签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐策略、漂移、路径/符号链接防护、并发锁和状态秘密隔离 | 控制面 API 和 Mock/单元证据可验证；管理台资源/漂移页、本地 helper 产品入口、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机、5 分钟可见和生产验收未完成 |
 | M3-D 受控本地 MCP | 4-6 周 | 签名包、最小权限、沙箱、Secret Broker 和健康上报 | 未签名包不能运行；本地访问范围可证明 |
 | M4 会话与工具审计 | 4-6 周 | 事件管道、流式拼接、脱敏、检索、留存和导出 | L0 完整；正文按授权可见；删除和留存可验证 |
 | M5 安全运营与可观测性 | 3-4 周 | 规则、告警、阻断、吊销、OTel、SIEM 和值班闭环 | 典型违规/故障 5 分钟可见并可处置 |

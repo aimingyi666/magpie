@@ -1,6 +1,6 @@
 # Magpie 企业版项目实施与运营手册
 
-状态：完整实施方案 v3.20（项目治理附件）
+状态：完整实施方案 v3.23（项目治理附件）
 
 日期：2026-11-02
 
@@ -59,14 +59,16 @@ break-glass 的 15 分钟单次授权、24 小时复核、提醒、通知、审�
 Mock/集成核心；NOTIFY-01d 的规则、抑制、聚合、升级、受审计重放和运营页也已完成
 Mock/集成核心；M2-D 核心已实现，生产验收尚未完成。M3-A 的 `resource-service` 已实现
 资源目录、不可变版本、SHA-256 内容寻址、Ed25519 签名、发布/历史回滚、幂等和资源审计，
-并通过 11 项测试；M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据隔离
-和元数据审计核心已实现，并通过 14 项测试；M3-C 的签名资源同步、原子安装、失败保留旧
-版本、离线缓存、强制/推荐策略和漂移检测核心已实现，并通过 16 项测试；当前本地/Mock
-回归合计 185 项。M3-A/M3-B/M3-C 尚未接入 admin-service 真实审批、管理台、OIDC 组织
-分配和员工产品流，M3-D 与 M4-M6 未实现。M3-B 的审批 nonce/限流器仅单进程，注册表、
+并通过 11 项核心测试；M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据隔离
+和元数据审计核心已实现，并通过 14 项测试；M3-C-1 的设备短期同步凭证、desired-state、
+设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器已实现，resource-service 15 项
+（11 核心 + 4 控制面）和 client-sync 24 项（16 核心 + 8 传输）测试通过；当前本地/Mock
+回归合计 198 项。M3-A/M3-B 尚未接入 admin-service 真实审批、管理台和 OIDC 组织
+分配；M3-C-1 已接入员工端同步 API，但管理台资源/漂移页、本地 helper 和目标 Agent
+文件映射未完成，M3-D 与 M4-M6 未实现。M3-B 的审批 nonce/限流器仅单进程，注册表、
 审计和幂等不是同一事务。
 真实企业 IdP、Docker Compose、真实共享卷、Windows 计划任务、反向代理、
-生产部署中的操作审计查询、M3-B 远程 MCP 验收、M3-C 员工产品流、会话正文审计、安全运营和 HA
+生产部署中的操作审计查询、M3-B 远程 MCP 验收、M3-C-1 本地 helper 产品流、会话正文审计、安全运营和 HA
 尚未完成生产验收。当前只能定位为“可演示、可受控技术试点”，不能称为“企业生产版完成”。
 
 ## 1. 项目目标和范围冻结
@@ -390,7 +392,7 @@ C4-04 已通过隔离真实链路，仍需 Docker/共享卷、真实企业 IdP�
 | C4-01 | 已完成，本地测试通过 | `feat/m2-c4-gateway-contract` | `magpie gateway-key describe <id> --json` 和原子 `magpie gateway-key policy apply <id> --json` | schema v1、无秘密输出、文件锁内原子替换、`expectedPolicyRevision` 冲突不写文件、64 KiB 输入输出上限；Go 单测、CLI 回归和隔离真实二进制冒烟通过 |
 | C4-02 | 已完成 Mock/故障测试，待 Docker/真实卷验收 | `feat/m2-c4-gateway-control` | 独立的 `enterprise/gateway-control/` 服务 | 仅 describe/apply/健康检查；专用非 root 账号、固定 `GATEWAY_CONTROL_CONFIG_HOME`、独立 Bearer 服务令牌、无公网端口、无 Docker socket、写后独立回读、默认 10 秒超时并终止子进程；Docker/Compose、真实共享卷、mTLS 和生产环境未验收 |
 | C4-03a | 已实现，待真实部署验收 | `feat/m2-c4-gateway-policy` | admin-service 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、SHA-256 digest 和安全投影 | 7 项专项 + 77 项管理集成测试通过；坏文件、未知字段、重复 ID/group、空目录、未知引用和超 2 MiB 失败关闭；真实只读挂载/digest 重启待完成 |
-| C4-03b | 核心已实现，管理链路已接通 | `feat/m2-c4-gateway-policy` | auth-service 的 `gatewayPolicy`、旧 M1 `unknown` 迁移和首次初始化 | 25/25 测试已验证 quota/models 分步提交不伪造另一项、缺项 `policy_setup_required`、版本冲突、回读确认和员工门户脱敏；真实部署待验收 |
+| C4-03b | 核心已实现，管理链路已接通 | `feat/m2-c4-gateway-policy` | auth-service 的 `gatewayPolicy`、旧 M1 `unknown` 迁移和首次初始化 | 26/26 测试已验证 quota/models 分步提交不伪造另一项、缺项 `policy_setup_required`、版本冲突、回读确认和员工门户脱敏；真实部署待验收 |
 | C4-03c | 核心已实现，Mock/故障测试通过 | `feat/m2-c4-gateway-policy` | 额度/模型管理 API、issuance journal、apply/readback 和同步后交付 | 版本与 `If-Match`、payload 指纹、apply/独立回读/原子持久化后才交付；失败补偿和启动恢复已有测试；真实环境待验收 |
 | C4-03d | 部分实现，基础页面已接入 | `feat/m2-c4-gateway-policy-ui` | 管理页额度/模型写表单、完整证据链状态、停用/吊销/轮换、审批、operation/audit 查询、人工对账、CSV 导出和员工只读状态门户 | 管理页自动携带 CSRF/幂等键/理由/版本并区分 pending/partial/unknown；员工页展示本人额度、模型、凭证、设备和同步；浏览器 E2E、失败恢复入口、完整运营体验和生产验收待完成 |
 | C4-04 | 完整管理链路 E2E 已通过，待部署验收 | `feat/m2-c4-gateway-policy-e2e` | 真实 Magpie E2E、故障注入和恢复证据 | 18 阶段覆盖管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、真实限额/模型拒绝、`partial_success`、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描；Docker/共享卷、真实 IdP、反向代理和浏览器 E2E 待验收 |

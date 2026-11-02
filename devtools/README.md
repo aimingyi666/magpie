@@ -36,7 +36,7 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 Compose/只读挂载/digest 验收；
 auth-service 不加载目录，只接收展开后的稳定模型 ID。**C4-03b** 的用户级策略核心已实现：版本化 `gatewayPolicy`、
 旧 M1 `unknown` 迁移、quota/models 分步首次设置、缺项失败关闭、版本冲突和逐凭证回读确认
-均通过 auth-service `25/25`。C4-03c 的额度/模型管理 API、幂等签发、issuance journal、
+均通过 auth-service `26/26`。C4-03c 的额度/模型管理 API、幂等签发、issuance journal、
 apply/独立回读、同步后交付、失败补偿和启动恢复核心已实现并通过 Mock/故障测试；
 C4-03d 部分实现：管理页已有额度/模型写表单和完整证据链状态，员工页已有本人额度/模型/
 凭证/设备只读门户；M2-D 已补基础停用/吊销/轮换、审批、operation/audit 查询、人工对账
@@ -46,12 +46,14 @@ refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复�
 Mock/集成测试通过；生产验收尚未完成。M3-A 的资源目录、不可变版本、内容哈希、Ed25519
 签名、发布/回滚、幂等和资源审计核心已实现，并通过 11 项测试；M3-B 的远程 MCP 注册、
 企业统一端点、工具级授权、健康检查、上游凭据隔离和元数据审计核心已实现，并通过 14 项
-测试；M3-C 的签名资源同步、原子安装、失败保留旧版本、离线缓存、强制/推荐策略和漂移
-检测核心已实现，并通过 16 项测试；M3-D 与 M4-M6 仍未实现。M3-A/M3-B/M3-C 尚未接入
-admin-service 真实审批、管理台、OIDC 组织分配和员工产品流，M3-B 的审批 nonce 仅单进程
-内存、注册表与审计不是同一事务，且 Compose 尚未实机验收。当前本地/Mock 回归为 admin
-104 项、auth 25 项、gateway-control 15 项、resource 11 项、mcp-gateway 14 项、
-client-sync 16 项，合计 185 项通过。
+测试；M3-C-1 的设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP
+传输适配器已实现，resource-service 15 项（11 核心 + 4 控制面）、client-sync 24 项
+（16 核心 + 8 传输）测试通过；M3-D 与 M4-M6 仍未实现。M3-A/M3-B 尚未接入 admin-service
+真实审批、管理台和 OIDC 组织分配；M3-C-1 已接入员工端同步 API，但管理台资源/漂移页、
+本地 helper、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E 和
+Docker/Compose 实机验收未完成。M3-B 的审批 nonce 仅单进程内存、注册表与审计不是同一事务，
+且 Compose 尚未实机验收。当前本地/Mock 回归为 admin 104 项、auth 26 项、gateway-control
+15 项、resource 15 项、mcp-gateway 14 项、client-sync 24 项，合计 198 项通过。
 C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
 宣称管理员已经可以在生产自助调额或授予模型。
 `APR-01a/b` 的服务端审批、职责分离、一次性消费和 HMAC/Mock 外部审批回调，
@@ -89,7 +91,7 @@ Mock/集成测试，`APR-01e` 的 break-glass、真实 OA/IdP 连接器、真实
   -> APR-01e + NOTIFY-01d [core done]：break-glass、通知运营页
   -> M3-A [core done]：资源目录、不可变版本、哈希、Ed25519 签名、发布/回滚和资源审计
   -> M3-B [core done]：远程 MCP 注册、企业端点、工具级授权、健康检查和凭据隔离
-  -> M3-C [core done]：签名资源同步、原子安装、强制/推荐与漂移核心
+  -> M3-C-1 [control plane + core done]：同步凭证、desired-state、报告 API、HTTP 传输与同步核心
   -> M3-D：受控本地 MCP
   -> M4-M6
 ```

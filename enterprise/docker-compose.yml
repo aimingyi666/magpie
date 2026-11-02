@@ -70,8 +70,9 @@ services:
       retries: 3
       start_period: 10s
 
-  # M3-A resource catalog. This service is internal-only and is not yet wired
-  # into the admin console or client sync. Start it explicitly with:
+  # M3-A resource catalog plus the M3-C client sync control plane. This
+  # service is internal-only and is not yet wired into the admin console.
+  # Start it explicitly with:
   #   docker compose --profile resource up -d resource
   resource:
     profiles: ["resource"]
@@ -96,6 +97,12 @@ services:
       RESOURCE_MAX_CONTENT_BYTES: ${RESOURCE_MAX_CONTENT_BYTES:-1048576}
       RESOURCE_MAX_RESOURCES: ${RESOURCE_MAX_RESOURCES:-1000}
       RESOURCE_MAX_RELEASES_PER_RESOURCE: ${RESOURCE_MAX_RELEASES_PER_RESOURCE:-200}
+      RESOURCE_SYNC_TOKEN_SECRET: ${RESOURCE_SYNC_TOKEN_SECRET:-}
+      RESOURCE_SYNC_TOKEN_AUDIENCE: ${RESOURCE_SYNC_TOKEN_AUDIENCE:-magpie-enterprise-resource}
+      RESOURCE_SYNC_REPORT_PATH: ${RESOURCE_SYNC_REPORT_PATH:-/data/sync-reports.json}
+      RESOURCE_MAX_SNAPSHOT_BYTES: ${RESOURCE_MAX_SNAPSHOT_BYTES:-8388608}
+      RESOURCE_MAX_SNAPSHOT_RESOURCES: ${RESOURCE_MAX_SNAPSHOT_RESOURCES:-200}
+      RESOURCE_MAX_SYNC_REPORT_BYTES: ${RESOURCE_MAX_SYNC_REPORT_BYTES:-262144}
       RESOURCE_RATE_LIMIT_PER_MINUTE: ${RESOURCE_RATE_LIMIT_PER_MINUTE:-600}
     volumes:
       - resource-data:/data
@@ -207,6 +214,11 @@ services:
       AUTH_DEVICE_TOKEN_TTL_DAYS: ${AUTH_DEVICE_TOKEN_TTL_DAYS:-30}
       AUTH_RATE_LIMIT_PER_MINUTE: ${AUTH_RATE_LIMIT_PER_MINUTE:-120}
       AUTH_ALLOWED_RETURN_ORIGINS: ${AUTH_ALLOWED_RETURN_ORIGINS:-}
+      # M3-C device sync credential. The secret must be the same value as
+      # RESOURCE_SYNC_TOKEN_SECRET and must differ from every other secret.
+      SYNC_TOKEN_SECRET: ${SYNC_TOKEN_SECRET:-}
+      SYNC_TOKEN_TTL_SECONDS: ${SYNC_TOKEN_TTL_SECONDS:-300}
+      SYNC_TOKEN_AUDIENCE: ${SYNC_TOKEN_AUDIENCE:-magpie-enterprise-resource}
       OIDC_ISSUER: ${OIDC_ISSUER:-}
       OIDC_CLIENT_ID: ${OIDC_CLIENT_ID:-}
       OIDC_CLIENT_SECRET: ${OIDC_CLIENT_SECRET:-}

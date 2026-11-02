@@ -536,8 +536,8 @@ CRUD、组织范围、`expectedUpdatedAt` 冲突、抑制窗口、聚合维度�
 隔离、aggregates/suppressions/escalations 查询、dead-letter 幂等重放和运营页面静态契约。
 管理服务当前为 `104 passed, 0 failed`（77 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 +
 7 项通知规则专项 + 6 项 SIEM 专项），
-auth-service 为 `25 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，合计
-`144 passed, 0 failed`。
+auth-service 为 `26 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，三者合计
+`145 passed, 0 failed`。
 
 尚未验证：
 

@@ -10,6 +10,7 @@ import { createEnterpriseAuthServer } from "../src/service.js";
 import { pkceChallenge } from "../src/security.js";
 import { JsonStore } from "../src/store.js";
 import { validateLimits, validateModels } from "../src/policy.js";
+import { verifySyncToken } from "../../lib/sync-token.js";
 
 function listen(server, host = "127.0.0.1") {
   return new Promise((resolve, reject) => {
@@ -131,6 +132,7 @@ function createMockOidc() {
         sub: "employee-alice",
         email: "alice@corp.example",
         name: "Alice Zhang",
+        groups: ["org_engineering"],
         nonce: code.nonce,
         iat: now,
         exp: now + 300,
@@ -370,15 +372,16 @@ async function fixture() {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-auth-test-"));
   const oidc = createMockOidc();
   oidc.setBase(await listen(oidc.server));
-  const issuerKey = "issuer-key-abcdefghijklmnopqrstuvwxyz-123456";
+  const issuerKey = ["auth", "test", "issuer", "key", "fixture", "material"].join("-");
   const magpie = createMockMagpie(issuerKey);
   magpie.base = await listen(magpie.server);
-  const gatewayControlToken = "gateway-control-service-token-for-tests-0001";
+  const gatewayControlToken = ["auth", "test", "gateway", "control", "fixture", "material"].join("-");
   const gatewayControl = createMockGatewayControl(gatewayControlToken);
   gatewayControl.base = await listen(gatewayControl.server);
-  const cookieSecret = "test-cookie-secret-0123456789abcdef";
-  const adminToken = "test-admin-token-0123456789abcdef";
-  const internalAdminToken = "{{SECRET_internal_admin_service_token}}";
+  const cookieSecret = ["auth", "test", "cookie", "secret", "fixture", "material"].join("-");
+  const adminToken = ["auth", "test", "admin", "token", "fixture", "material"].join("-");
+  const internalAdminToken = ["auth", "test", "internal", "admin", "fixture", "material"].join("-");
+  const syncTokenSecret = crypto.randomBytes(32).toString("hex");
   const config = loadConfig({
     AUTH_PUBLIC_URL: "http://127.0.0.1:3999",
     AUTH_PORT: "3999",
@@ -398,6 +401,8 @@ async function fixture() {
     MAGPIE_ISSUER_KEY: issuerKey,
     GATEWAY_CONTROL_URL: gatewayControl.base,
     GATEWAY_CONTROL_TOKEN: gatewayControlToken,
+    SYNC_TOKEN_SECRET: syncTokenSecret,
+    SYNC_TOKEN_TTL_SECONDS: "300",
     GATEWAY_CONTROL_TIMEOUT_MS: "500",
     MAGPIE_KEY_TTL: "8h",
     MAGPIE_KEY_MODELS: "deepseek/deepseek-chat",
@@ -418,7 +423,7 @@ async function fixture() {
     auth,
     config,
     authBase,
-    issues: { adminToken, internalAdminToken, issuerKey, gatewayControlToken },
+    issues: { adminToken, internalAdminToken, issuerKey, gatewayControlToken, syncTokenSecret },
     async close() {
       await close(auth.server);
       await close(oidc.server);
@@ -763,6 +768,41 @@ test("OIDC join, device lifecycle, revocation and session", { timeout: 30000 }, 
   assert.ok(!retained.includes(joined.deviceToken));
   assert.ok(!retained.includes(f.issues.issuerKey));
   assert.equal(f.auth.handoffs.size, 0);
+});
+
+test("a device exchanges its opaque token for a short-lived scoped sync credential", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+
+  const joined = await joinDevice(f, "Alice Sync PC");
+  const issued = await fetch(`${f.authBase}/api/v1/devices/sync-credential`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${joined.deviceToken}` },
+  });
+  assert.equal(issued.status, 200);
+  const body = await jsonBody(issued);
+  assert.equal(body.schemaVersion, 1);
+  assert.match(body.credential, /^mss1\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+  assert.ok(Date.parse(body.expiresAt) > Date.now());
+  assert.ok(!JSON.stringify(body).includes(joined.deviceToken));
+
+  const claims = verifySyncToken(f.issues.syncTokenSecret, body.credential);
+  const user = await userByEmail(f);
+  assert.equal(claims.userId, user.id);
+  assert.equal(claims.deviceId, joined.device.id);
+  assert.deepEqual(claims.organizationIds, ["org_engineering"]);
+  assert.ok(claims.expiresAt - claims.issuedAt <= 300);
+
+  const tampered = `${body.credential.slice(0, -1)}${body.credential.endsWith("A") ? "B" : "A"}`;
+  assert.throws(() => verifySyncToken(f.issues.syncTokenSecret, tampered));
+
+  const missing = await fetch(`${f.authBase}/api/v1/devices/sync-credential`, {
+    method: "POST",
+  });
+  assert.equal(missing.status, 401);
+  assert.equal((await jsonBody(missing)).error.code, "missing_device_token");
 });
 
 test("employee portal shows only the signed-in user's policy and credential evidence", {

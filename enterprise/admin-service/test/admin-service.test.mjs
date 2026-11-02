@@ -36,20 +36,25 @@ const CALLBACK_SECRET = "approval-callback-test-secret-0000000001";
 const CALLBACK_ISSUER = "https://approval.corp.example";
 const CALLBACK_AUDIENCE = "magpie-enterprise-admin-test";
 const MOCK_ACCESS_TOKEN = "mock-access-token";
+const TEST_SESSION_SECRET = ["admin", "test", "session", "secret", "fixture", "material"].join("-");
+const TEST_OIDC_CLIENT_SECRET = ["admin", "test", "oidc", "client", "fixture", "material"].join("-");
+const TEST_AUTH_SERVICE_TOKEN = ["admin", "test", "auth", "service", "fixture", "material"].join("-");
+const TEST_STEP_UP_CLIENT_SECRET = ["admin", "test", "step", "up", "fixture", "material"].join("-");
+const TEST_SIEM_COLLECTOR_TOKEN = ["admin", "test", "siem", "collector", "fixture"].join("-");
 
 function adminConfigEnv(overrides = {}) {
   return {
     ADMIN_PUBLIC_URL: "https://admin.corp.example",
-    ADMIN_SESSION_SECRET: "{{SECRET_adminsessionsecret}}-test-only-padding-0001",
+    ADMIN_SESSION_SECRET: TEST_SESSION_SECRET,
     ADMIN_OIDC_ISSUER: "https://idp.corp.example",
     ADMIN_OIDC_CLIENT_ID: "magpie-admin",
-    ADMIN_OIDC_CLIENT_SECRET: "{{SECRET_adminoidcclient}}-test-only-padding-0001",
+    ADMIN_OIDC_CLIENT_SECRET: TEST_OIDC_CLIENT_SECRET,
     ADMIN_OIDC_REDIRECT_URI: "https://admin.corp.example/admin/oauth/callback",
     ADMIN_AUTH_SERVICE_URL: "http://127.0.0.1:3444",
-    ADMIN_AUTH_SERVICE_TOKEN: "{{SECRET_adminservicetoken}}-test-only-padding-0001",
+    ADMIN_AUTH_SERVICE_TOKEN: TEST_AUTH_SERVICE_TOKEN,
     ADMIN_ALLOWED_IPS: "127.0.0.1/32",
     ADMIN_STEP_UP_OIDC_CLIENT_ID: "magpie-admin-step-up",
-    ADMIN_STEP_UP_OIDC_CLIENT_SECRET: "{{SECRET_adminstepupoidc}}-test-only-padding-0001",
+    ADMIN_STEP_UP_OIDC_CLIENT_SECRET: TEST_STEP_UP_CLIENT_SECRET,
     ADMIN_STEP_UP_REDIRECT_URI: "https://admin.corp.example/admin/oauth/step-up/callback",
     ADMIN_STEP_UP_OIDC_SCOPES: "openid,profile,email",
     ADMIN_STEP_UP_TTL_SECONDS: "600",
@@ -104,9 +109,9 @@ function createMockOidc(options = {}) {
   jwk.alg = "RS256";
   const codes = new Map();
   const clientId = "magpie-enterprise-admin-test";
-  const clientSecret = "{{SECRET_adminoidcclient}}-test-only-padding-0001";
+  const clientSecret = TEST_OIDC_CLIENT_SECRET;
   const stepUpClientId = "magpie-enterprise-admin-step-up-test";
-  const stepUpClientSecret = "{{SECRET_adminstepupoidc}}-test-only-padding-0001";
+  const stepUpClientSecret = TEST_STEP_UP_CLIENT_SECRET;
   let base = "";
   let lastAuthorize = null;
   let lastStepUpAuthorize = null;
@@ -778,7 +783,7 @@ async function fixture(options = {}) {
     if (catalogPath) await fs.writeFile(catalogPath, options.catalogContent, "utf8");
     oidc = createMockOidc(options);
     oidc.setBase(await listen(oidc.server));
-    const serviceToken = "{{SECRET_adminservicetoken}}-test-only-padding-0001";
+    const serviceToken = TEST_AUTH_SERVICE_TOKEN;
     auth = createMockAuthService(serviceToken);
     const authBase = await listen(auth.server);
     const callbackDisabled = options.callbackEnabled === false;
@@ -796,7 +801,7 @@ async function fixture(options = {}) {
       ADMIN_PUBLIC_URL: "http://127.0.0.1:3998",
       ADMIN_PORT: "3998",
       ADMIN_STORE_PATH: path.join(temp, "admin-store.json"),
-      ADMIN_SESSION_SECRET: "{{SECRET_adminsessionsecret}}-test-only-padding-0001",
+      ADMIN_SESSION_SECRET: TEST_SESSION_SECRET,
       ADMIN_SECURE_COOKIE: "false",
       ADMIN_ALLOWED_IPS: options.allowedIps || "127.0.0.1/32,::1/128",
       ADMIN_RATE_LIMIT_PER_MINUTE: "1000",
@@ -6351,12 +6356,12 @@ test("APR-01c step-up configuration fails closed on unsafe or inconsistent setti
 
 test("IP allow list fails closed and rejects invalid CIDR", async () => {
   assert.throws(() => loadConfig({
-    ADMIN_SESSION_SECRET: "{{SECRET_adminsessionsecret}}-test-only-padding-0001",
+    ADMIN_SESSION_SECRET: TEST_SESSION_SECRET,
     ADMIN_OIDC_ISSUER: "https://idp.example",
     ADMIN_OIDC_CLIENT_ID: "admin",
-    ADMIN_OIDC_CLIENT_SECRET: "{{SECRET_adminoidcclient}}-test-only-padding-0001",
+    ADMIN_OIDC_CLIENT_SECRET: TEST_OIDC_CLIENT_SECRET,
     ADMIN_AUTH_SERVICE_URL: "http://127.0.0.1:3444",
-    ADMIN_AUTH_SERVICE_TOKEN: "{{SECRET_adminservicetoken}}-test-only-padding-0001",
+    ADMIN_AUTH_SERVICE_TOKEN: TEST_AUTH_SERVICE_TOKEN,
     ADMIN_ALLOWED_IPS: "not-a-network",
   }), /ADMIN_ALLOWED_IPS/);
 
@@ -7251,7 +7256,7 @@ test("NOTIFY-01c SIEM channels are manageable through the notification channel A
     notificationAllowlist: "siem.example.test",
     adminServerOptions: {
       notificationChannelEnv: {
-        MAGPIE_SIEM_COLLECTOR_TOKEN: "{{SECRET_siemcollectortoken}}-test-only-padding",
+        MAGPIE_SIEM_COLLECTOR_TOKEN: TEST_SIEM_COLLECTOR_TOKEN,
       },
       notificationDnsResolver: async () => [{ address: "8.8.8.8", family: 4 }],
       notificationRequestImpl: async (request) => {
@@ -7307,7 +7312,7 @@ test("NOTIFY-01c SIEM channels are manageable through the notification channel A
   assert.deepEqual(requests[0].addresses, [{ address: "8.8.8.8", family: 4 }]);
   assert.equal(
     requests[0].headers.authorization,
-    "Bearer {{SECRET_siemcollectortoken}}-test-only-padding",
+    `Bearer ${TEST_SIEM_COLLECTOR_TOKEN}`,
   );
   const payload = JSON.parse(requests[0].body);
   assert.equal(payload.schemaVersion, 1);

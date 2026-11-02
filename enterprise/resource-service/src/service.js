@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import http from "node:http";
 
+import { verifySyncToken } from "../../lib/sync-token.js";
 import {
   RESOURCE_DELIVERY_MODES,
   RESOURCE_KINDS,
@@ -12,6 +13,7 @@ import {
 } from "./manifest.js";
 import { FileObjectStore } from "./object-store.js";
 import { ResourceStore } from "./store.js";
+import { SyncReportStore } from "./sync-report-store.js";
 
 const SCHEMA_VERSION = 1;
 const RESOURCE_ID_PATTERN = /^res_[a-z0-9]{16,64}$/;
@@ -19,6 +21,18 @@ const RELEASE_ID_PATTERN = /^rel_[a-z0-9]{16,64}$/;
 const IDEMPOTENCY_KEY_PATTERN = /^[\u0021-\u007e]{1,128}$/;
 const OPERATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SAFE_TEXT_PATTERN = /^[^\u0000-\u001f\u007f]*$/;
+const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const REVISION_PATTERN = /^sha256:[a-f0-9]{64}$/;
+const CLIENT_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+const SYNC_REPORT_STATUSES = new Set(["synced", "up_to_date", "failed", "offline", "drift", "busy"]);
+const SYNC_DRIFT_STATES = new Set([
+  "missing",
+  "version_mismatch",
+  "not_in_desired_state",
+  "content_invalid",
+  "metadata_mismatch",
+  "path_symlink",
+]);
 const KIND_SET = new Set(RESOURCE_KINDS);
 const DELIVERY_MODE_SET = new Set(RESOURCE_DELIVERY_MODES);
 const DANGEROUS_JSON_KEYS = new Set([
@@ -392,8 +406,138 @@ function errorResponse(res, requestIdValue, error, logger) {
 }
 
 function bearerMatches(req, expected) {
-  const match = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || ""));
-  return Boolean(match) && safeEqual(match[1], expected);
+  const token = bearerToken(req);
+  return Boolean(token) && safeEqual(token, expected);
+}
+
+function bearerToken(req) {
+  const match = /^Bearer\s+(\S+)$/i.exec(String(req.headers.authorization || "").trim());
+  return match ? match[1] : "";
+}
+
+function requireSyncClaims(req, config) {
+  const token = bearerToken(req);
+  if (!token) {
+    throw new ApiError(401, "missing_sync_credential", "A sync credential is required");
+  }
+  try {
+    return verifySyncToken(config.syncTokenSecret, token, {
+      audience: config.syncTokenAudience,
+    });
+  } catch (error) {
+    if (typeof error?.statusCode === "number" && typeof error?.code === "string") {
+      throw new ApiError(error.statusCode, error.code, error.message);
+    }
+    throw new ApiError(401, "invalid_sync_token", "Sync credential is not valid");
+  }
+}
+
+function ifNoneMatchMatches(value, revision) {
+  const header = String(value || "").trim();
+  if (!header) return false;
+  const target = `"${revision}"`;
+  return header.split(",").some((entry) => {
+    const candidate = entry.trim();
+    return candidate === "*"
+      || candidate === target
+      || candidate === `W/${target}`;
+  });
+}
+
+function cleanSyncReport(body) {
+  assertExactFields(body, [
+    "schemaVersion",
+    "revision",
+    "clientVersion",
+    "status",
+    "installed",
+    "drift",
+    "reportedAt",
+  ]);
+  if (body.schemaVersion !== SCHEMA_VERSION) {
+    throw new ApiError(400, "invalid_sync_report", "schemaVersion is unsupported");
+  }
+  if (typeof body.revision !== "string" || !REVISION_PATTERN.test(body.revision)) {
+    throw new ApiError(400, "invalid_sync_report", "revision is invalid");
+  }
+  if (typeof body.clientVersion !== "string" || !CLIENT_VERSION_PATTERN.test(body.clientVersion)) {
+    throw new ApiError(400, "invalid_sync_report", "clientVersion is invalid");
+  }
+  if (!SYNC_REPORT_STATUSES.has(body.status)) {
+    throw new ApiError(400, "invalid_sync_report", "status is invalid");
+  }
+  if (!Array.isArray(body.installed) || body.installed.length > 500) {
+    throw new ApiError(400, "invalid_sync_report", "installed must contain at most 500 entries");
+  }
+  if (!Array.isArray(body.drift) || body.drift.length > 500) {
+    throw new ApiError(400, "invalid_sync_report", "drift must contain at most 500 entries");
+  }
+  if (typeof body.reportedAt !== "string"
+      || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(body.reportedAt)
+      || !Number.isFinite(Date.parse(body.reportedAt))) {
+    throw new ApiError(400, "invalid_sync_report", "reportedAt is invalid");
+  }
+
+  const installedIds = new Set();
+  const installed = body.installed.map((item) => {
+    assertExactFields(item, ["resourceId", "releaseId", "manifestDigest"]);
+    if (typeof item.resourceId !== "string"
+        || !RESOURCE_ID_PATTERN.test(item.resourceId)
+        || installedIds.has(item.resourceId)
+        || typeof item.releaseId !== "string"
+        || !RELEASE_ID_PATTERN.test(item.releaseId)
+        || typeof item.manifestDigest !== "string"
+        || !REVISION_PATTERN.test(item.manifestDigest)) {
+      throw new ApiError(400, "invalid_sync_report", "installed evidence is invalid");
+    }
+    installedIds.add(item.resourceId);
+    return {
+      resourceId: item.resourceId,
+      releaseId: item.releaseId,
+      manifestDigest: item.manifestDigest,
+    };
+  });
+
+  const driftIds = new Set();
+  const drift = body.drift.map((item) => {
+    assertExactFields(item, [
+      "resourceId",
+      "state",
+      "expectedReleaseId",
+      "actualReleaseId",
+    ]);
+    if (typeof item.resourceId !== "string"
+        || !RESOURCE_ID_PATTERN.test(item.resourceId)
+        || driftIds.has(item.resourceId)
+        || !SYNC_DRIFT_STATES.has(item.state)) {
+      throw new ApiError(400, "invalid_sync_report", "drift evidence is invalid");
+    }
+    const expectedReleaseId = item.expectedReleaseId == null ? "" : item.expectedReleaseId;
+    const actualReleaseId = item.actualReleaseId == null ? "" : item.actualReleaseId;
+    if ((expectedReleaseId
+        && (typeof expectedReleaseId !== "string" || !RELEASE_ID_PATTERN.test(expectedReleaseId)))
+        || (actualReleaseId
+          && (typeof actualReleaseId !== "string" || !RELEASE_ID_PATTERN.test(actualReleaseId)))) {
+      throw new ApiError(400, "invalid_sync_report", "drift release ids are invalid");
+    }
+    driftIds.add(item.resourceId);
+    return {
+      resourceId: item.resourceId,
+      state: item.state,
+      expectedReleaseId,
+      actualReleaseId,
+    };
+  });
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    revision: body.revision,
+    clientVersion: body.clientVersion,
+    status: body.status,
+    installed,
+    drift,
+    reportedAt: body.reportedAt,
+  };
 }
 
 function readBody(req, limit) {
@@ -450,10 +594,15 @@ async function readJsonBody(req, limit) {
 
 function routeOf(pathname) {
   if (pathname === "/healthz") return { name: "health" };
+  if (pathname === "/api/v1/client/sync/desired-state") return { name: "desired-state" };
+  if (pathname === "/api/v1/client/sync/report") return { name: "sync-report" };
   if (pathname === "/api/v1/admin/resources") return { name: "resources" };
   if (pathname === "/api/v1/admin/signing-key") return { name: "signing-key" };
   if (pathname === "/api/v1/admin/audit-logs") return { name: "audit-logs" };
-  let match = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})$/.exec(pathname);
+  if (pathname === "/api/v1/admin/sync-reports") return { name: "sync-reports" };
+  let match = /^\/api\/v1\/admin\/sync-reports\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})$/.exec(pathname);
+  if (match) return { name: "sync-report-admin", deviceId: match[1] };
+  match = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})$/.exec(pathname);
   if (match) return { name: "resource", resourceId: match[1] };
   match = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})\/releases$/.exec(pathname);
   if (match) return { name: "releases", resourceId: match[1] };
@@ -575,6 +724,55 @@ export class ResourceCatalogService {
       throw new ApiError(409, "release_integrity_failed", "Release signature or hash verification failed");
     }
     return { release, content };
+  }
+
+  async desiredState(claims) {
+    if (!plainObject(claims) || !Array.isArray(claims.organizationIds)) {
+      throw new ApiError(401, "invalid_sync_token", "Sync credential is not valid");
+    }
+    const organizations = new Set(claims.organizationIds);
+    const selected = await this.store.read((data) => Object.values(data.resources)
+      .filter((resource) => resource.status === "published"
+        && resource.currentReleaseId
+        && resource.assignments.some((assignment) => organizations.has(assignment)))
+      .sort((left, right) => left.id.localeCompare(right.id))
+      .map((resource) => ({
+        resource,
+        release: data.releases[resource.currentReleaseId],
+      })));
+    if (selected.length > this.config.maxSnapshotResources) {
+      throw new ApiError(409, "sync_snapshot_limit_reached", "The desired-state resource limit was reached");
+    }
+
+    const resources = [];
+    for (const { resource, release } of selected) {
+      if (!release
+          || release.resourceId !== resource.id
+          || release.status !== "published"
+          || release.id !== resource.currentReleaseId) {
+        throw new ApiError(409, "release_integrity_failed", "Published resource state is inconsistent");
+      }
+      const verified = await this.readVerifiedRelease(release);
+      resources.push({
+        manifest: verified.release.manifest,
+        contentBase64: verified.content.toString("base64"),
+      });
+    }
+
+    const revision = sha256Digest(Buffer.from(canonicalJson({
+      schemaVersion: SCHEMA_VERSION,
+      resources,
+    }), "utf8"));
+    const desiredState = {
+      schemaVersion: SCHEMA_VERSION,
+      revision,
+      generatedAt: this.now().toISOString(),
+      resources,
+    };
+    if (Buffer.byteLength(JSON.stringify(desiredState), "utf8") > this.config.maxSnapshotBytes) {
+      throw new ApiError(409, "sync_snapshot_too_large", "The desired-state snapshot is too large");
+    }
+    return desiredState;
   }
 
   async createResource(body, actorValue, keyHash, fingerprint, path) {
@@ -924,6 +1122,8 @@ function sendMutationOutcome(res, outcome, requestIdValue) {
 
 export async function createResourceServer(config, options = {}) {
   const service = await new ResourceCatalogService(config, options).initialize();
+  const reportStore = options.reportStore || new SyncReportStore(config.syncReportPath);
+  await reportStore.load();
   const limiter = new FixedWindowRateLimiter(config.rateLimitPerMinute);
   const logger = options.logger || (() => {});
 
@@ -947,6 +1147,58 @@ export async function createResourceServer(config, options = {}) {
       if (!limiter.allow(req.socket.remoteAddress || "unknown")) {
         throw new ApiError(429, "rate_limited", "Too many requests", true);
       }
+
+      if (route.name === "desired-state" || route.name === "sync-report") {
+        const claims = requireSyncClaims(req, config);
+        if (route.name === "desired-state") {
+          if (req.method !== "GET") {
+            throw new ApiError(405, "method_not_allowed", "Method not allowed");
+          }
+          const desiredState = await service.desiredState(claims);
+          const etag = `"${desiredState.revision}"`;
+          if (ifNoneMatchMatches(req.headers["if-none-match"], desiredState.revision)) {
+            res.writeHead(304, {
+              "cache-control": "no-store",
+              etag,
+              "x-request-id": reqId,
+            });
+            res.end();
+            return;
+          }
+          jsonResponse(res, 200, desiredState, reqId, {
+            etag,
+            "x-sync-revision": desiredState.revision,
+          });
+          return;
+        }
+
+        if (req.method !== "POST") {
+          throw new ApiError(405, "method_not_allowed", "Method not allowed");
+        }
+        const body = await readJsonBody(req, config.maxSyncReportBytes);
+        const report = cleanSyncReport(body);
+        try {
+          await reportStore.record({
+            userId: claims.userId,
+            deviceId: claims.deviceId,
+            ...report,
+            receivedAt: service.now().toISOString(),
+          });
+        } catch (error) {
+          if (String(error?.message || "").includes("device limit")) {
+            throw new ApiError(409, "sync_report_limit_reached", "The sync report device limit was reached");
+          }
+          throw error;
+        }
+        jsonResponse(res, 202, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          accepted: true,
+          revision: report.revision,
+        }, reqId);
+        return;
+      }
+
       if (!bearerMatches(req, config.serviceToken)) {
         throw new ApiError(401, "unauthorized", "A valid service token is required");
       }
@@ -1001,6 +1253,32 @@ export async function createResourceServer(config, options = {}) {
           schemaVersion: SCHEMA_VERSION,
           ok: true,
           ...result,
+        }, reqId);
+        return;
+      }
+
+      if (route.name === "sync-reports") {
+        if (req.method !== "GET") throw new ApiError(405, "method_not_allowed", "Method not allowed");
+        const reports = await reportStore.read((data) => Object.values(data.reports)
+          .slice()
+          .sort((left, right) => right.receivedAt.localeCompare(left.receivedAt))
+          .slice(0, 1000));
+        jsonResponse(res, 200, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          reports,
+        }, reqId);
+        return;
+      }
+
+      if (route.name === "sync-report-admin") {
+        if (req.method !== "GET") throw new ApiError(405, "method_not_allowed", "Method not allowed");
+        const report = await reportStore.read((data) => data.reports[route.deviceId] || null);
+        if (!report) throw new ApiError(404, "sync_report_not_found", "Sync report not found");
+        jsonResponse(res, 200, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          report,
         }, reqId);
         return;
       }
@@ -1143,5 +1421,5 @@ export async function createResourceServer(config, options = {}) {
   server.on("clientError", (_error, socket) => {
     if (socket.writable) socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
   });
-  return { server, service };
+  return { server, service, reportStore };
 }

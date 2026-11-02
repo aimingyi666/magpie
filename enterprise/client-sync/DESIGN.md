@@ -1,8 +1,9 @@
 # Magpie Enterprise client sync design
 
-状态：**M3-C 客户端同步核心，16 项单元/Mock 测试通过；尚未接入员工端
-OIDC/设备短期同步凭证 API、管理台资源/漂移页、浏览器/helper 产品入口、Windows ACL、
-MDM、目标 Agent 文件映射或企业生产环境验收。M3-D 与 M4-M6 仍未实现。**
+状态：**M3-C-1 客户端同步控制面，24 项单元/Mock 测试通过。同步引擎、短期同步凭证、
+desired-state、设备上报、管理员 JSON 查询 API 和客户端 HTTP 传输适配器已实现；管理台
+资源/漂移页、本地 helper 产品入口、Windows ACL、MDM、目标 Agent 文件映射和企业生产
+环境验收仍未完成。M3-D 与 M4-M6 仍未实现。**
 
 ## 1. 目标与信任边界
 
@@ -15,7 +16,7 @@ Magpie/helper 拉取这些资源，验证企业签名，原子安装，并把期
   |  不能直接写本机 Agent 文件
   v
 本机 Magpie / enterprise helper
-  |  HTTPS + 设备身份或短期同步凭证（后续 M3-C 接入）
+  |  设备令牌 -> auth-service；短期同步凭证 -> resource-service
   v
 受信控制面 desired-state adapter
   |
@@ -24,9 +25,9 @@ Magpie/helper 拉取这些资源，验证企业签名，原子安装，并把期
 ClientSyncEngine
 ```
 
-本包只实现第四段。它不持有 `RESOURCE_SERVICE_TOKEN`，也不直接调用当前仅供管理
-控制面使用的 `/api/v1/admin/*` API。生产接入必须先提供员工设备可用的租户、用户、
-设备范围鉴权和短期同步凭证，不能把管理服务令牌放进浏览器或员工机。
+本包实现同步引擎和客户端传输适配器。传输适配器只把设备令牌发给 auth-service，把
+`mss1` 短期同步凭证发给 resource-service；它不持有 `RESOURCE_SERVICE_TOKEN`，也不调用
+仅供管理控制面使用的 `/api/v1/admin/*` API。不能把管理服务令牌放进浏览器或员工机。
 
 ## 2. Desired state 契约
 
@@ -56,6 +57,30 @@ ClientSyncEngine
 - `compatibility.minClientVersion` 必须不高于当前客户端版本。
 - `fetchDesiredState` 的 `context` 包含 `revision`、`clientVersion` 和 `AbortSignal`，
   传输层可据此做条件请求和取消。
+
+## 2.1 已接入的控制面
+
+```text
+auth-service
+  POST /api/v1/devices/sync-credential
+    Authorization: Bearer <opaque device token>
+
+resource-service
+  GET  /api/v1/client/sync/desired-state
+  POST /api/v1/client/sync/report
+
+resource-service admin JSON
+  GET  /api/v1/admin/sync-reports
+  GET  /api/v1/admin/sync-reports/{deviceId}
+```
+
+同步凭证使用 `mss1.<claims>.<hmac>` 格式，绑定 `userId`、`deviceId`、OIDC `groups`
+派生的 `organizationIds`、签发/过期时间和随机 `nonce`。auth-service 与 resource-service
+必须配置相同的 HMAC 密钥，但该密钥必须与 `RESOURCE_SERVICE_TOKEN` 不同。
+
+`createEnterpriseSyncTransport()` 负责凭证缓存、到期前重签、条件请求、401 单次重签、
+超时、响应体上限和错误归并。资源服务只返回与凭证组织范围匹配的已发布资源；报告只
+保留资源 ID、release ID、digest、状态和漂移证据，不接收正文、Secret、token 或自由文本。
 
 desired state 是完整快照。成功同步后，不在快照中的资源不再处于 active 状态；旧版本
 目录仍保留用于回滚和缓存。管理员明确把 desired release 回退到旧 ID 时，客户端接受该
@@ -220,7 +245,8 @@ rootDir/
 - HTTP 下载、证书固定、代理、重试和条件请求；这些属于传输适配器。
 - Skills/Subagents 的目标 Agent 文件映射与一键配置。
 - MCP 本地进程启动、沙箱、Secret Reference 和健康检查；这些属于 M3-D。
-- 管理台设备版本/漂移列表、灰度发布和设备端上报接口；需要 M3-C 控制面 API。
+- 管理台设备版本/漂移列表和灰度发布；控制面 desired-state 与设备上报 API 已实现，
+  但目前只有管理员 JSON 查询 API，没有对应管理 UI。
 - 删除策略、磁盘配额、内容压缩、增量 patch 和多副本共享状态。
 
 浏览器仍只能发起“请求本机 helper 同步”的受控动作；真正写本机 Agent 文件和

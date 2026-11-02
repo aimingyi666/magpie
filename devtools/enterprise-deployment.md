@@ -22,7 +22,7 @@
 服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项），`GET /api/v1/admin/models` 已使用正式目录，
 `ADMIN_MODELS` 仅保留
 无正式目录时的兼容显示。C4-03b 用户级 `gatewayPolicy` 核心已在 auth-service 实现，
-覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 25 项测试通过；
+覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 26 项测试通过；
 C4-03c 的管理 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿
 和启动恢复核心已实现，并通过 Mock/故障测试；C4-03d 部分实现：管理页已有额度/模型写
 表单、停用/吊销/轮换基础操作、审批、operation/audit 查询、人工对账和 CSV 导出入口，
@@ -44,10 +44,12 @@ SIEM/Collector/Syslog/生产证书未验收。NOTIFY-01d 的规则/抑制、聚�
 运营页已实现并通过 Mock/集成测试。真实 OA
 连接器、真实 IdP/MFA/反向代理、浏览器流程、break-glass 告警/工单与 24 小时生产复核也未验证。
 M3-A 的 `enterprise/resource-service/` 已实现资源目录、不可变版本、SHA-256 内容寻址、
-Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项测试；M3-B 远程 MCP 治理
-核心已通过 14 项测试；M3-C 客户端同步核心已通过 16 项测试；当前本地/Mock 回归合计
-185 项。M3-A/M3-B 只有核心服务 API，M3-C 只有客户端同步核心包，尚未接入 admin-service
-真实审批、管理台、OIDC 组织分配、员工设备短期同步凭证 API 和本地 helper 产品入口；
+Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项核心测试；M3-B 远程 MCP 治理
+核心已通过 14 项测试；M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员
+JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
+client-sync 24 项（16 核心 + 8 传输）测试通过；当前本地/Mock 回归合计 198 项。
+M3-A/M3-B 只有核心服务 API；M3-C-1 已有控制面 API，但尚未接入 admin-service 真实审批、
+管理台资源/漂移页、OIDC 组织分配和本地 helper 产品入口；
 M3-B 的审批 nonce/限流器仅单进程，注册表/审计/幂等不是同一事务，存在提交后审计失败窗口。
 M3-D、S3/MinIO、KMS/HSM、多副本和 Docker/Compose 实机仍未验收。
 Docker/Compose、真实共享卷、真实企业 IdP、公司
@@ -341,12 +343,13 @@ docker compose exec resource node -e \
 都还没有实机证据。该 profile 成功启动也只说明目录服务可用，不代表真实审批、管理台、
 员工端同步接入、S3/MinIO、KMS/HSM、多副本或生产验收完成。
 
-### 9.1.2 M3-C 客户端同步核心
+### 9.1.2 M3-C-1 同步控制面与客户端同步核心
 
 `enterprise/client-sync/` 是安装在员工设备上的 Node 核心包，不是新增的常驻服务，也没有
-Compose profile。它只冻结签名 desired-state 的同步、验签、原子激活、离线缓存、策略和
-漂移行为；`fetchDesiredState()` 由后续本地 helper 的传输层注入。生产接入前仍需要员工
-OIDC/设备短期同步凭证 API、资源下载适配器和目标 Agent 文件映射。浏览器不能直接写
+Compose profile。M3-C-1 新增 `createEnterpriseSyncTransport()`，从 auth-service 的设备身份
+换取短期同步凭证，并向 resource-service 拉取 desired-state、提交元数据同步报告；传输层
+支持凭证缓存/重签、ETag 条件请求、超时、响应大小上限和报告投影。同步核心仍负责签名
+desired-state 的验签、原子激活、离线缓存、策略和漂移行为。浏览器不能直接写
 `~/.codex`、`~/.claude` 或 `~/.config/magpie`，也不能使用 `RESOURCE_SERVICE_TOKEN`。
 
 ```powershell
@@ -354,8 +357,9 @@ Set-Location enterprise/client-sync
 & 'D:\Environment\node-v26.12.1\node.exe' --test test/*.test.mjs
 ```
 
-当前 16 项测试通过。Windows ACL、MDM、设备端上报、管理台资源/漂移页、浏览器 E2E 和
-真实企业 IdP 均未验收。
+当前 client-sync 24 项测试通过（16 核心 + 8 传输），resource-service 15 项测试通过
+（11 核心 + 4 控制面）。管理台资源/漂移页、本地 helper 产品入口、目标 Agent 文件映射、
+Windows ACL、MDM、浏览器 E2E、真实企业 IdP 和 Docker/Compose 实机均未验收。
 
 Compose 必须把网关数据卷只读挂载到管理容器：
 
@@ -394,7 +398,7 @@ volumes:
 
 以下 C4/C5 条目是后续生产候选的验收条件。C4-01 只完成了机器协议和本地测试；C4-02 已完成
 受控适配器和 15 项 Mock/故障测试，但 Docker/Compose、真实共享卷和健康检查尚未实机验证；
-C4-03b/C4-03c 核心已有 25 项 auth 测试，管理端已接入额度/模型 API 并覆盖同步后交付和
+C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 API 并覆盖同步后交付和
 失败补偿；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过，C4-03d、C5 和 M2-D 的基础
 页面已接入，但浏览器 E2E、失败恢复入口、Docker/共享卷、真实 IdP 和生产环境验收尚未完成，
 不能填写为“通过”。C4-03a 已有本地专项测试，但仍需完成真实 Docker、只读挂载和 digest
@@ -437,13 +441,15 @@ C4-03b/C4-03c 核心已有 25 项 auth 测试，管理端已接入额度/模型 
 - C4-04 已通过隔离真实 Magpie 的管理链路，仍须完成真实共享卷/Docker 部署复核；C4-03d/C5
    的基础写操作、审批、operation/audit 查询、人工对账和 CSV 导出页面已接入，但浏览器 E2E、
    失败恢复入口、完整运营体验和生产环境证据尚未验收。本地 Mock/故障测试不能替代这些部署验收。
-- M3-A 已通过 11 项 resource-service 单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
-  单元/Mock 集成测试；M3-C 已通过 16 项 client-sync 单元/Mock 集成测试。仍须在真实
+- M3-A 已通过 11 项 resource-service 核心单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
+  单元/Mock 集成测试；M3-C-1 已通过 resource-service 15 项（11 核心 + 4 控制面）和
+  client-sync 24 项（16 核心 + 8 传输）单元/Mock 集成测试。仍须在真实
   Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
   MCP 单副本限制，并接入 admin-service 真实审批、管理台和 OIDC 组织分配后再做发布/回滚
-  与 MCP 故障演练。M3-C 仍须完成员工端同步凭证 API、本地 helper、目标 Agent 文件映射、
-  Windows ACL、MDM、管理台漂移页和生产验收；M3-D 受控本地 MCP 当前未实现。
+  与 MCP 故障演练。M3-C-1 仍须完成管理台资源/漂移页、本地 helper、目标 Agent 文件映射、
+  Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机和生产验收；
+  M3-D 受控本地 MCP 当前未实现。
 - 备份恢复、灰度、回滚、至少一次跨部门越权和设备丢失演练。
 
 上述任何一项没有证据，发布结论只能是“受控试点”，不能写“企业生产已完成”。

@@ -137,5 +137,17 @@ export function normalizeIdentity(claims, config) {
       throw error;
     }
   }
-  return { subject, email, name };
+  const rawGroups = claims[config.groupsClaim];
+  const groups = Array.isArray(rawGroups)
+    ? rawGroups
+    : typeof rawGroups === "string"
+      ? rawGroups.split(/[\s,]+/).filter(Boolean)
+      : [];
+  if (groups.length > 100
+      || groups.some((group) => typeof group !== "string"
+        || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(group))) {
+    throw new Error("OIDC groups claim contains invalid values");
+  }
+  const uniqueGroups = [...new Set(groups)].sort();
+  return { subject, email, name, groups: uniqueGroups };
 }

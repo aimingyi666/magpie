@@ -13,6 +13,7 @@ import {
   verifyCookie,
 } from "./security.js";
 import { JsonStore } from "./store.js";
+import { mintSyncToken } from "../../lib/sync-token.js";
 import {
   PolicyValidationError,
   createUnknownPolicy,
@@ -1624,6 +1625,7 @@ export async function createEnterpriseAuthServer(config, options = {}) {
             status: "active",
             createdAt: now,
             lastLoginAt: now,
+            groups: identity.groups,
             gatewayPolicy: createUnknownPolicy(now, "new_user_unknown"),
           };
           data.users[id] = existing;
@@ -1633,6 +1635,7 @@ export async function createEnterpriseAuthServer(config, options = {}) {
           }
           existing.email = identity.email;
           existing.name = identity.name;
+          existing.groups = identity.groups;
           existing.lastLoginAt = now;
         }
         return structuredClone(existing);
@@ -1797,6 +1800,25 @@ export async function createEnterpriseAuthServer(config, options = {}) {
         user: { id: user.id, status: user.status },
         device: { id: device.id, status: device.status },
         gatewayKeyExpiresAt: device.gatewayKeyExpiresAt,
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/devices/sync-credential") {
+      const { device, user } = await requireDevice(req);
+      const issued = mintSyncToken({
+        secret: config.sync.tokenSecret,
+        userId: user.id,
+        deviceId: device.id,
+        organizationIds: Array.isArray(user.groups) ? user.groups : [],
+        ttlSeconds: config.sync.tokenTtlSeconds,
+        audience: config.sync.tokenAudience,
+      });
+      json(res, 200, {
+        schemaVersion: 1,
+        credential: issued.token,
+        expiresAt: new Date(issued.claims.expiresAt * 1000).toISOString(),
+        audience: issued.claims.audience,
       });
       return;
     }

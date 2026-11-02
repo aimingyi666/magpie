@@ -24,7 +24,7 @@ import {
   syslogRfc5424,
 } from "../src/notification-siem.js";
 
-const SIEM_SECRET = "{{SECRET_siemcollectortoken}}-test-only-padding";
+const SIEM_SECRET = ["admin", "test", "siem", "collector", "fixture"].join("-");
 const FORBIDDEN_MARKERS = [
   "prompt-secret-marker",
   "reply-secret-marker",
