@@ -1,6 +1,13 @@
 import crypto from "node:crypto";
 import http from "node:http";
 
+import { ContentStore } from "./content-store.js";
+import {
+  ContentApiError,
+  contentRoute,
+  handleContentRoute,
+} from "./content-service.js";
+import { ContentStreamManager } from "./content-streams.js";
 import { AuditPipeline } from "./pipeline.js";
 import { AuditStore } from "./store.js";
 import {
@@ -54,10 +61,15 @@ function jsonResponse(res, statusCode, value, reqId, headers = {}) {
 }
 
 function errorResponse(res, reqId, error, logger) {
-  const normalized = error instanceof ApiError || error instanceof AuditEventValidationError
+  const normalized = error instanceof ApiError
+    || error instanceof AuditEventValidationError
+    || error instanceof ContentApiError
     ? error
     : new ApiError(500, "internal_error", "The audit service could not complete the request", true);
-  if (!(error instanceof ApiError) && !(error instanceof AuditEventValidationError) && logger) {
+  if (!(error instanceof ApiError)
+      && !(error instanceof AuditEventValidationError)
+      && !(error instanceof ContentApiError)
+      && logger) {
     logger({
       requestId: reqId,
       code: normalized.code,
@@ -272,6 +284,8 @@ function routeOf(pathname) {
   if (pathname === "/api/v1/admin/audit/stats") return { name: "stats" };
   const session = /^\/api\/v1\/admin\/audit\/sessions\/(ses_[A-Za-z0-9][A-Za-z0-9._:-]{7,127})$/.exec(pathname);
   if (session) return { name: "session", sessionId: session[1] };
+  const content = contentRoute(pathname);
+  if (content) return content;
   return { name: "not_found" };
 }
 
@@ -289,6 +303,31 @@ export async function createAuditServer(config, options = {}) {
     logger,
   });
   const limiter = new FixedWindowRateLimiter(config.rateLimitPerMinute, options.nowMs || Date.now);
+  let contentStore = null;
+  let contentManager = null;
+  if (config.contentEnabled) {
+    contentStore = options.contentStore || new ContentStore({
+      directory: config.contentStoreDir,
+      key: config.contentEncryptionKey,
+      maxStreamBytes: config.contentMaxStreamBytes,
+      now: options.nowMs || Date.now,
+    });
+    if (!options.contentStore) await contentStore.load();
+    contentManager = options.contentManager || new ContentStreamManager(contentStore, {
+      maxChunkBytes: config.contentMaxChunkBytes,
+      maxStreamBytes: config.contentMaxStreamBytes,
+      maxTotalBufferBytes: config.contentMaxBufferBytes,
+      maxActiveStreams: config.contentMaxActiveStreams,
+      streamTtlMs: config.contentStreamTtlMs,
+      now: options.nowMs || Date.now,
+    });
+    if (!options.contentManager) contentManager.start();
+  }
+  const content = {
+    enabled: Boolean(config.contentEnabled),
+    store: contentStore,
+    manager: contentManager,
+  };
 
   const server = http.createServer(async (req, res) => {
     const reqId = requestId();
@@ -312,6 +351,18 @@ export async function createAuditServer(config, options = {}) {
       }
       if (!safeEqual(bearerToken(req), config.serviceToken)) {
         throw new ApiError(401, "unauthorized", "A valid service token is required");
+      }
+
+      if (route.name.startsWith("content_")) {
+        await handleContentRoute({
+          req,
+          res,
+          route,
+          config,
+          content,
+          reqId,
+        });
+        return;
       }
 
       if (route.name === "ingest") {
@@ -391,11 +442,18 @@ export async function createAuditServer(config, options = {}) {
 
       if (route.name === "stats") {
         if (req.method !== "GET") throw new ApiError(405, "method_not_allowed", "Method not allowed");
-        jsonResponse(res, 200, {
+        const response = {
           schemaVersion: SCHEMA_VERSION,
           ok: true,
           ...(await pipeline.status()),
-        }, reqId);
+        };
+        if (content.enabled) {
+          response.content = {
+            ...(await content.store.status()),
+            ...content.manager.status(),
+          };
+        }
+        jsonResponse(res, 200, response, reqId);
         return;
       }
 
@@ -413,7 +471,17 @@ export async function createAuditServer(config, options = {}) {
         server.close((error) => (error ? reject(error) : resolve()));
       });
     }
+    if (content.manager) await content.manager.close();
+    if (content.store) await content.store.close();
     await pipeline.drainAll();
   };
-  return { server, store, pipeline, close };
+  return {
+    server,
+    store,
+    pipeline,
+    contentStore,
+    contentManager,
+    contentStatus: () => (content.manager ? content.manager.status() : null),
+    close,
+  };
 }

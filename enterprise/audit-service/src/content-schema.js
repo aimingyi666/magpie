@@ -258,36 +258,52 @@ export function contentFingerprint(value) {
 }
 
 export function contentChunkFingerprint(chunk) {
-  return sha256Text(chunk.text);
+  return sha256Text(canonicalJson(chunk));
 }
 
 export function publicContentStream(stream) {
+  const metadata = plainObject(stream?.request)
+    ? {
+        ...stream.request,
+        status: stream.status,
+        createdAt: stream.createdAt,
+        updatedAt: stream.updatedAt,
+        nextSequence: stream.nextSequence,
+        chunkCount: stream.chunkCount,
+        bytes: stream.bytes,
+        contentRef: stream.contentRef,
+        redaction: stream.redaction,
+        failureCode: stream.failureCode,
+        finalizedAt: stream.finalizedAt,
+      }
+    : stream;
+  if (!plainObject(metadata)) return null;
   return {
     streamId: stream.streamId,
-    requestId: stream.requestId,
-    sessionId: stream.sessionId,
-    userId: stream.userId,
-    departmentId: stream.departmentId,
-    deviceId: stream.deviceId,
-    agentId: stream.agentId,
-    ...(stream.modelId ? { modelId: stream.modelId } : {}),
-    ...(stream.providerId ? { providerId: stream.providerId } : {}),
-    ...(stream.mcpServerId ? { mcpServerId: stream.mcpServerId } : {}),
-    ...(stream.toolName ? { toolName: stream.toolName } : {}),
-    contentKind: stream.contentKind,
-    mediaType: stream.mediaType,
-    auditLevel: stream.auditLevel,
-    collection: structuredClone(stream.collection),
-    status: stream.status,
-    createdAt: stream.createdAt,
-    updatedAt: stream.updatedAt,
-    nextSequence: stream.nextSequence,
-    chunkCount: stream.chunkCount,
-    bytes: stream.bytes,
-    ...(stream.contentRef ? { contentRef: stream.contentRef } : {}),
-    ...(stream.redaction ? { redaction: structuredClone(stream.redaction) } : {}),
-    ...(stream.failureCode ? { failureCode: stream.failureCode } : {}),
-    ...(stream.finalizedAt ? { finalizedAt: stream.finalizedAt } : {}),
+    requestId: metadata.requestId,
+    sessionId: metadata.sessionId,
+    userId: metadata.userId,
+    departmentId: metadata.departmentId,
+    deviceId: metadata.deviceId,
+    agentId: metadata.agentId,
+    ...(metadata.modelId ? { modelId: metadata.modelId } : {}),
+    ...(metadata.providerId ? { providerId: metadata.providerId } : {}),
+    ...(metadata.mcpServerId ? { mcpServerId: metadata.mcpServerId } : {}),
+    ...(metadata.toolName ? { toolName: metadata.toolName } : {}),
+    contentKind: metadata.contentKind,
+    mediaType: metadata.mediaType,
+    auditLevel: metadata.auditLevel,
+    collection: structuredClone(metadata.collection),
+    status: metadata.status,
+    createdAt: metadata.createdAt,
+    updatedAt: metadata.updatedAt,
+    nextSequence: metadata.nextSequence,
+    chunkCount: metadata.chunkCount,
+    bytes: metadata.bytes,
+    ...(metadata.contentRef ? { contentRef: metadata.contentRef } : {}),
+    ...(metadata.redaction ? { redaction: structuredClone(metadata.redaction) } : {}),
+    ...(metadata.failureCode ? { failureCode: metadata.failureCode } : {}),
+    ...(metadata.finalizedAt ? { finalizedAt: metadata.finalizedAt } : {}),
   };
 }
 

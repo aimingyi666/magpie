@@ -3,7 +3,7 @@ import { createAuditServer } from "./service.js";
 
 async function main() {
   const config = loadConfig();
-  const { server, pipeline } = await createAuditServer(config, {
+  const { server, close } = await createAuditServer(config, {
     logger: ({ requestId, code, errorName }) => {
       console.error(`request ${requestId} failed: ${code} (${errorName})`);
     },
@@ -20,10 +20,7 @@ async function main() {
     const forced = setTimeout(() => process.exit(1), 10_000);
     forced.unref();
     try {
-      await new Promise((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-      });
-      await pipeline.drainAll();
+      await close();
       clearTimeout(forced);
       process.exit(0);
     } catch {

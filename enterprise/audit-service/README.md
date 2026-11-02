@@ -1,10 +1,15 @@
-# Magpie 企业审计事件管道（M4-A）
+# Magpie 企业审计事件与内容管道（M4-A + M4-B 核心）
 
-`audit-service` 是 M4-A 的独立审计事件管道核心。它接收、校验、排队并持久化
-L0/L1 元数据事件，按请求和会话建立索引，并提供受服务令牌保护的查询接口。
+`audit-service` 当前包含两个核心：
+
+- M4-A：接收、校验、排队并持久化 L0/L1 元数据事件，按请求和会话建立索引，并提供受
+  服务令牌保护的查询接口。
+- M4-B：默认关闭的 L2 脱敏正文分片管道，包含跨分片统一脱敏、AES-256-GCM 加密对象存储、
+  独立读取令牌、理由/授权 ID 和正文访问审计。
 
 这个切片**不是完整的 M4**，也不是生产可用的内容审计系统。当前没有接入真实网关、
-管理台或员工页面，没有 L2/L3 正文采集、检索、留存、删除证明或管理员 OIDC/RBAC。
+管理台或员工页面；没有 L3、附件、二进制正文、正文检索、留存/删除证明、法律保留、
+WORM 或管理员 OIDC/RBAC/组织范围。
 
 ## 当前边界
 
@@ -19,13 +24,20 @@ L0/L1 元数据事件，按请求和会话建立索引，并提供受服务令�
 - 持久 JSON 队列、批量提交、重启恢复、幂等重放和冲突检测；
 - 会话索引、游标分页、筛选、统计、队列深度和健康状态；
 - 原子写入、串行变更、优雅 drain 和客户端有界重试。
+- M4-B 默认关闭，只接受 `text/plain` 的 L2 正文，拒绝 L3、附件和二进制；
+- 最多 1 MiB 正文的分片提交、顺序/累计字节校验、幂等重放、乱序/冲突/容量/TTL 拒绝；
+- 全部分片拼接完成后统一脱敏，覆盖私钥、密码赋值、Bearer/JWT、云/厂商 token、
+  URL 凭据、邮箱、手机号、身份证和通过 Luhn 校验的银行卡；
+- AES-256-GCM 加密正文对象，对象与索引分目录存储；
+- 独立 `X-Audit-Content-Token`、理由和授权 ID，成功/失败读取均写访问审计；
+- 未完成流在重启时标记中断，已完成对象可恢复读取。
 
 未实现：
 
 - 真实 Magpie 网关、admin-service、管理台和员工页面的审计流接入；
 - 管理员 OIDC、RBAC、组织范围、管理员会话、访问审计和导出审批；
-- L2/L3 正文、流式拼接、正文脱敏、对象存储、正文索引和查看授权；
-- 留存策略、法律保留、删除证明、WORM 和备份恢复演练；
+- L3、附件/二进制正文、正文检索、管理台 UI 和真实网关正文采集；
+- 正文留存、删除、删除证明、法律保留、WORM、加密导出和备份恢复演练；
 - PostgreSQL/ClickHouse、多副本、HA、负载测试和生产容量验证；
 - Compose 实机构建、真实共享卷、真实 IdP、浏览器 E2E 和生产验收。
 
@@ -34,10 +46,11 @@ L0/L1 元数据事件，按请求和会话建立索引，并提供受服务令�
 需要 Node.js 22 或更高版本。
 
 ```powershell
-$env:AUDIT_SERVICE_TOKEN = "replace-with-an-independent-32-character-token"
+$env:AUDIT_SERVICE_TOKEN = "replace-with-a-separate-long-random-audit-service-token"
 $env:AUDIT_BIND = "127.0.0.1"
 $env:AUDIT_PORT = "3449"
 $env:AUDIT_STORE_PATH = ".\data\audit-store.json"
+$env:AUDIT_CONTENT_ENABLED = "false"
 node src/server.js
 ```
 
@@ -50,6 +63,10 @@ docker compose --profile audit up -d audit
 该服务默认只在 Compose 内部网络暴露 `3449`，不发布宿主机端口。`AUDIT_SERVICE_TOKEN`
 必须与网关控制、auth、admin、resource、MCP 和其他服务令牌不同。当前 ingest 和管理查询
 共用这一个 Bearer 服务令牌；这不是生产管理员授权模型，必须在 M4-C 前替换。
+
+M4-B 默认关闭。启用时必须另设 32 字节 `AUDIT_CONTENT_ENCRYPTION_KEY`（base64 或 64 位
+hex）和独立 `AUDIT_CONTENT_READ_TOKEN`；正文读取还必须同时提供服务令牌和读取令牌。
+这两个秘密都不得与 `AUDIT_SERVICE_TOKEN` 或其他服务令牌复用。
 
 ## 环境变量
 
@@ -66,6 +83,16 @@ docker compose --profile audit up -d audit
 | `AUDIT_FLUSH_INTERVAL_MS` | `1000` | 后台 drain 间隔 |
 | `AUDIT_BATCH_SIZE` | `200` | 每次提交的最大事件数 |
 | `AUDIT_RATE_LIMIT_PER_MINUTE` | `6000` | 单来源每分钟请求上限 |
+| `AUDIT_CONTENT_ENABLED` | `false` | 是否启用 M4-B 内容审计核心 |
+| `AUDIT_CONTENT_ENCRYPTION_KEY` | 启用时必填 | AES-256-GCM 密钥，32 字节 base64 或 64 位 hex |
+| `AUDIT_CONTENT_READ_TOKEN` | 空 | 独立正文读取令牌；为空时正文读取失败关闭 |
+| `AUDIT_CONTENT_STORE_DIR` | `./data/audit-content` | 正文对象和索引目录 |
+| `AUDIT_CONTENT_MAX_BODY_BYTES` | `393216` | 内容 API 单请求上限，最大 64 MiB |
+| `AUDIT_CONTENT_MAX_CHUNK_BYTES` | `262144` | 单分片上限，最大 4 MiB 且不得超过流上限 |
+| `AUDIT_CONTENT_MAX_STREAM_BYTES` | `1048576` | 单正文流上限，最大 32 MiB |
+| `AUDIT_CONTENT_MAX_BUFFER_BYTES` | `67108864` | 所有活动流的总缓冲上限 |
+| `AUDIT_CONTENT_MAX_ACTIVE_STREAMS` | `256` | 同时活动的正文流上限 |
+| `AUDIT_CONTENT_STREAM_TTL_MS` | `900000` | 未完成流 TTL，范围 10 秒到 24 小时 |
 
 队列或索引达到配置上限时，服务返回稳定错误，不会静默丢弃事件。
 
@@ -84,7 +111,23 @@ GET  /api/v1/admin/audit/events
 GET  /api/v1/admin/audit/sessions
 GET  /api/v1/admin/audit/sessions/{sessionId}
 GET  /api/v1/admin/audit/stats
+POST /api/v1/internal/audit/content/streams
+POST /api/v1/internal/audit/content/streams/{streamId}/chunks
+GET  /api/v1/admin/audit/content/streams/{streamId}
+GET  /api/v1/admin/audit/content/{contentRef}
 ```
+
+正文读取额外要求：
+
+```text
+X-Audit-Content-Token: <AUDIT_CONTENT_READ_TOKEN>
+X-Audit-Content-Reason: <至少 8 个字符的查看理由>
+X-Audit-Content-Authorization: <至少 8 个字符的授权 ID>
+```
+
+成功和失败的正文读取都会尝试写入访问审计。响应带
+`X-Audit-Watermark: MAGPIE-AUDIT-CONTENT ...`，`cache-control: no-store`。
+内容流 ID 和内容引用是随机的，不含员工、时间或组织信息。
 
 事件写入还要求 `Content-Type: application/json` 和 1-128 个可打印 ASCII 字符的
 `Idempotency-Key`。新事件返回 `202`；同键同体重放返回 `200` 且
@@ -161,6 +204,13 @@ L1 工具调用示例：
 ```
 
 这两个示例只描述契约，不代表真实网关已经发送这些事件。
+
+## 内容审计 schema
+
+内容流只接受 L2 `text/plain`，不接收 L3、附件、二进制、未知字段或超出上限的正文。
+所有分片必须按连续序号提交，并受累计字节上限约束；同一幂等键同体重放，异体返回冲突。最后一片完成后，服务先
+拼接完整正文，再统一脱敏，避免跨分片秘密漏检。加密对象写入后，索引只保留摘要、脱敏
+统计和访问证据，不保留明文正文。
 
 ## 队列、恢复和健康
 
