@@ -190,13 +190,13 @@ services:
       retries: 3
       start_period: 10s
 
-  # M4-A/M4-B/M4-C/M4-D audit core. This service is internal-only: it accepts
-  # L0/L1 metadata events, stores optional L2 redacted content, and exposes
-  # filtered content metadata, one-time body grants, retention/legal holds,
-  # deletion proofs and encrypted export packages to a trusted management
-  # gateway. Administrator OIDC/RBAC/step-up orchestration, the admin UI,
-  # real gateway ingestion, HA and production acceptance are not implemented
-  # here.
+  # M4-A/M4-B/M4-C/M4-D/M4-E audit core. This service is internal-only: it
+  # accepts L0/L1 metadata events, stores optional L2 redacted content, and
+  # exposes filtered content metadata, one-time body grants, retention/legal
+  # holds, deletion proofs and encrypted export packages to admin-service.
+  # M4-E administrator orchestration and the management UI are connected in
+  # admin-service. Real gateway ingestion, enterprise IdP/MFA, TLS/reverse
+  # proxy, WORM/KMS, HA and production acceptance remain incomplete.
   # Start it explicitly with:
   #   docker compose --profile audit up -d audit
   audit:
@@ -375,6 +375,14 @@ services:
       ADMIN_RESOURCE_SERVICE_TOKEN: ${ADMIN_RESOURCE_SERVICE_TOKEN:-}
       ADMIN_RESOURCE_SERVICE_TIMEOUT_MS: ${ADMIN_RESOURCE_SERVICE_TIMEOUT_MS:-5000}
       ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES: ${ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES:-4194304}
+      ADMIN_AUDIT_CONTENT_SERVICE_URL: ${ADMIN_AUDIT_CONTENT_SERVICE_URL:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN: ${ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: ${ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID: ${ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID:-}
+      ADMIN_AUDIT_CONTENT_EXPORT_KEY: ${ADMIN_AUDIT_CONTENT_EXPORT_KEY:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS: ${ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS:-5000}
+      ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES: ${ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES:-4194304}
+      ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES: ${ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES:-33554432}
       ADMIN_APPROVAL_CALLBACK_SECRET: ${ADMIN_APPROVAL_CALLBACK_SECRET:-}
       ADMIN_APPROVAL_CALLBACK_ISSUER: ${ADMIN_APPROVAL_CALLBACK_ISSUER:-}
       ADMIN_APPROVAL_CALLBACK_AUDIENCE: ${ADMIN_APPROVAL_CALLBACK_AUDIENCE:-}

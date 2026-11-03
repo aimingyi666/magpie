@@ -18,8 +18,9 @@
 `gateway-key describe --json` 与原子 `gateway-key policy apply --json` 机器协议已实现，
 并通过 Go 单测、gateway-key CLI 回归和隔离真实二进制冒烟。C4-02
 `enterprise/gateway-control/` 受控适配器也已实现，并通过 15 项 Mock/故障测试。C4-03a
-正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 109 项测试通过（82 项管理
-服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项），`GET /api/v1/admin/models` 已使用正式目录，
+正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 123 项测试通过（86 项管理
+服务集成、5 项内容治理客户端专项、5 项内容治理存储专项、7 项目录专项、7 项通知渠道专项、
+7 项通知规则专项、6 项 SIEM 专项），`GET /api/v1/admin/models` 已使用正式目录，
 `ADMIN_MODELS` 仅保留
 无正式目录时的兼容显示。C4-03b 用户级 `gatewayPolicy` 核心已在 auth-service 实现，
 覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 26 项测试通过；
@@ -48,7 +49,10 @@ Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项�
 核心已通过 14 项测试；M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员
 JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
 client-sync 26 项（18 核心 + 8 传输）测试通过；M3-C-2 已实现 admin-service 只读资源/
-同步报告 API 和管理页面板，admin-service 109 项、local-mcp 60 项通过；企业七套回归合计 265 项。
+同步报告 API 和管理页面板，admin-service 123 项、local-mcp 60 项通过；企业八套回归合计
+346 项。M4-E 管理员内容治理已接入管理台、OIDC/RBAC/step-up、审批、幂等、operation/审计
+和双层 AES-256-GCM 导出，但默认关闭；真实 Magpie 网关正文采集、WORM/KMS、HA、备份恢复、
+浏览器 E2E 和生产验收未完成。
 M3-A/M3-B 只有核心服务 API；M3-C-1/M3-C-2 已有控制面 API 和只读管理页，但尚未接入
 admin-service 真实审批、资源发布/回滚 UI、发布/回滚审批联动、OIDC 组织分配和本地 helper
 安装器/员工产品流；
@@ -235,7 +239,8 @@ M2-C5/M2-D 已补审批、operation/audit 基础筛选查询、人工对账和 C
 失败恢复入口、费用趋势看板、Excel/异步大批量导出和完整运营体验仍未完成。C4-01 的机器协议和 C4-02 的受控适配器已实现并通过本地/Mock 测试；C4-04 已通过
 隔离真实 Magpie 的完整管理链路 E2E，但真实共享卷、Docker/Compose、真实企业 IdP、
 公司反向代理和生产环境仍未验收。
-不要把 Mock 测试当成生产管理台验收，也不要把“能看元数据”说成“能看对话正文”。
+不要把 Mock 测试当成生产管理台验收。系统默认 L0、默认不采集正文；M4-E 只有在显式启用、
+授权、审批和 fresh step-up 后才能查看已采集的脱敏正文，不能把“功能已接入”说成“生产已验收”。
 
 ### 9.1 启动
 
@@ -398,12 +403,43 @@ tests:
 & 'D:\Environment\node-v26.12.1\node.exe' --test enterprise\local-mcp\test\*.test.mjs
 ```
 
-当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业七套回归合计 265 项。测试只使用精确文件路径、
+当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业八套回归合计 346 项。测试只使用精确文件路径、
 临时目录和隔离子进程，不读取真实 usage、管理员会话、Agent 配置或生产 Secret。
 
 生产阻断项：helper/server、stdio bridge、Codex 配置映射和一键配置编排核心已实现，但尚未接入本地 helper 安装器、生产启动器/Windows ACL/DPAPI/token 轮换、真实 Codex 客户端和管理台员工产品流；真实 OIDC、审批服务、Secret Broker、
 KMS/HSM、Windows ACL/MDM、代码签名、安装升级/回滚和已证明的外部 OS 沙箱未验收；
 Docker/VM、共享卷并发、浏览器 E2E、HA 和生产验收未完成。
+
+### 9.1.4 M4-E 管理员内容治理
+
+M4-E 是管理员侧的受控内容治理入口，默认关闭。启用时必须同时启动 `admin` 和 `audit`
+profile，并成组配置五项环境变量；缺少任一项会导致启动失败，不会降级为“只读元数据”：
+
+```bash
+docker compose --profile admin --profile audit up -d
+```
+
+```dotenv
+ADMIN_AUDIT_CONTENT_SERVICE_URL=http://audit:4180
+ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN=<至少 32 字符，对应 AUDIT_CONTENT_ADMIN_TOKEN>
+ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN=<至少 32 字符，对应 AUDIT_CONTENT_GOVERNANCE_TOKEN>
+ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID=<与 AUDIT_CONTENT_ORGANIZATION_ID 一致>
+ADMIN_AUDIT_CONTENT_EXPORT_KEY=<独立于 AUDIT_CONTENT_EXPORT_KEY 的 AES-256 密钥材料>
+```
+
+两个服务间 token 必须至少 32 字符且彼此不同；`ADMIN_AUDIT_CONTENT_EXPORT_KEY` 不得复用
+audit-service 的导出密钥或其他服务秘密。可选 `ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS`、
+`ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES` 和
+`ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES` 只调整超时/响应/导出上限，不改变授权边界。
+
+管理台提供内容流检索、详情、正文读取、留存清扫、删除/脱敏、删除证明、法律保留和导出。
+正文读取与导出下载只消费一次；前端不持久化一次性 token。所有敏感动作要求管理 OIDC、
+RBAC、CSRF、理由、幂等键，并按风险完成审批和 fresh step-up。内容治理只允许全局组织范围
+`*`，且明确禁止使用 break-glass。audit-service 先生成 AES-256-GCM `.mge`，admin-service
+再用独立 AES-256-GCM 密钥加密为 `.mge.enc`；两层密钥和 operation/审计记录必须分别备份。
+
+当前默认 L0，真实 Magpie 网关正文采集、水印、WORM/KMS、HA、备份恢复、企业 OIDC/MFA、
+TLS/反向代理、浏览器 E2E 和正式合规验收尚未完成，不能直接作为生产取证系统上线。
 
 ### 9.2 管理员流程
 
@@ -477,7 +513,7 @@ C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 
 - M3-A 已通过 11 项 resource-service 核心单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
   单元/Mock 集成测试；M3-C-1 已通过 resource-service 15 项（11 核心 + 4 控制面）和
   client-sync 26 项（18 核心 + 8 传输）单元/Mock 集成测试；M3-C-2 已通过 admin-service
-  109 项测试中的 5 项新增用例（企业全量 265 项）。仍须在真实
+  123 项测试中的 5 项新增用例（企业全量 346 项）。仍须在真实
   Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
   MCP 单副本限制，并接入 admin-service 真实审批、可写管理台和 OIDC 组织分配后再做
@@ -678,7 +714,8 @@ Mock/故障测试已覆盖这些映射；真实 Docker/共享卷故障恢复仍�
 - 任何“页面值已变但实际请求未被限制/未被拒绝”的结果都视为 C4 失败。
 - C4-01 机器协议和 C4-02 `gateway-control` 已实现；C4-02 通过 15 项 Mock/故障测试，
   但 Docker/Compose、真实共享卷、健康检查和故障恢复尚未实机验收。C4-03a 正式只读目录
-  已通过 7 项目录专项；管理服务当前 109 项通过（含 7 项通知渠道、7 项通知规则和 6 项 SIEM 专项），
+  已通过 7 项目录专项；管理服务当前 123 项通过（含 5 项内容治理客户端、5 项内容治理存储、
+  7 项通知渠道、7 项通知规则和 6 项 SIEM 专项），
   但仍待真实部署验收。
   C4-03b/C4-03c 已接通本地 Mock/故障链路，C4-04 完整管理链路 E2E 已通过；C4-03d、C5
   和 M2-D 核心已实现，基础查询、对账和导出页面已接入，但浏览器 E2E、失败恢复入口和

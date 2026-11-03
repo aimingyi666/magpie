@@ -1,4 +1,8 @@
 import crypto from "node:crypto";
+import {
+  isAuditContentAction,
+  normalizeAuditContentPayload,
+} from "./audit-content-governance.js";
 
 export const APPROVAL_POLICY_VERSION = "APR-01a-v1";
 
@@ -33,6 +37,12 @@ const ACTION_RISK = Object.freeze({
   "user.policy.models": "H",
   "usage.export.create": "H",
   "audit.export.create": "H",
+  "audit.content.read_request": "C",
+  "audit.content.retention.run": "C",
+  "audit.content.delete": "C",
+  "audit.content.legal_hold.create": "H",
+  "audit.content.legal_hold.release": "C",
+  "audit.content.export.create": "C",
   "operation.reconcile": "C",
 });
 
@@ -115,6 +125,9 @@ export function normalizedApprovalPayload(action, value = {}) {
         ? canonicalValue(value.filters)
         : {},
     };
+  }
+  if (isAuditContentAction(action)) {
+    return normalizeAuditContentPayload(action, value);
   }
   if ([
     "user.disable",

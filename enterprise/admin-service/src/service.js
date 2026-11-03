@@ -4,6 +4,33 @@ import fs from "node:fs/promises";
 import { AuthServiceClient } from "./auth-client.js";
 import { ResourceServiceClient, ResourceServiceError } from "./resource-client.js";
 import {
+  AuditContentServiceClient,
+  AuditContentServiceError,
+} from "./audit-content-client.js";
+import {
+  AUDIT_CONTENT_ACTIONS,
+  AuditContentValidationError,
+  CONTENT_ACTION_PERMISSIONS,
+  CONTENT_ACTION_TARGETS,
+  contentApprovalTargetId,
+  contentExportAad,
+  contentRequestFingerprint,
+  decryptContentExport,
+  encryptContentExport,
+  isAuditContentAction,
+  isCanonicalUtcTimestamp,
+  isContentBase64,
+  normalizeAuditContentPayload,
+  normalizeContentReason,
+  normalizeContentRef,
+  normalizeDeletionId,
+  normalizeHoldId,
+  normalizeLocalExportId,
+  normalizeStreamId,
+  normalizeUpstreamExportId,
+  sha256ContentDigest,
+} from "./audit-content-governance.js";
+import {
   normalizeAdminIdentity,
   OidcClient,
   validateStepUpAuthentication,
@@ -110,6 +137,145 @@ const MAX_OPERATION_LIMIT = 200;
 const MAX_OPERATION_CURSOR = 4096;
 const MAX_EXPORT_TOKEN_BYTES = 512;
 const APPROVAL_TTL_MS = 24 * 60 * 60 * 1000;
+const TARGET_TYPES = Object.freeze([
+  "user",
+  "device",
+  "credential",
+  "operation",
+  "export",
+  "content",
+  "content_retention",
+  "content_hold",
+  "content_export",
+]);
+const CONTENT_COLLECTION_FIELDS = Object.freeze([
+  "purpose",
+  "authorizationId",
+  "confirmed",
+  "retentionDays",
+  "metadataRetentionDays",
+]);
+const CONTENT_REDACTION_FIELDS = Object.freeze([
+  "ruleVersion",
+  "replacements",
+  "categories",
+]);
+const CONTENT_SCOPE_FIELDS = Object.freeze([
+  "contentRef",
+  "streamId",
+  "userId",
+  "departmentId",
+  "deviceId",
+  "agentId",
+]);
+const CONTENT_STREAM_FIELDS = Object.freeze([
+  "streamId",
+  "requestId",
+  "sessionId",
+  "userId",
+  "departmentId",
+  "deviceId",
+  "agentId",
+  "modelId",
+  "providerId",
+  "mcpServerId",
+  "toolName",
+  "contentKind",
+  "mediaType",
+  "auditLevel",
+  "collection",
+  "status",
+  "createdAt",
+  "updatedAt",
+  "nextSequence",
+  "chunkCount",
+  "bytes",
+  "contentRef",
+  "redaction",
+  "failureCode",
+  "finalizedAt",
+  "contentRetentionExpiresAt",
+  "metadataRetentionExpiresAt",
+  "deletedAt",
+  "deletionId",
+  "metadataRedactedAt",
+]);
+const CONTENT_DELETION_FIELDS = Object.freeze([
+  "deletionId",
+  "contentRef",
+  "streamId",
+  "deletedAt",
+  "plaintextSha256",
+  "objectBytes",
+  "retentionExpiresAt",
+  "actorType",
+  "actorId",
+  "organizationId",
+  "requestId",
+  "reason",
+  "approvalId",
+  "policyVersion",
+]);
+const CONTENT_VERIFICATION_FIELDS = Object.freeze([
+  "valid",
+  "deletionId",
+  "contentRef",
+  "deletedAt",
+  "proofDigest",
+]);
+const CONTENT_RETENTION_FIELDS = Object.freeze([
+  "dryRun",
+  "scanned",
+  "contentDeleted",
+  "metadataRedacted",
+  "skippedLegalHold",
+  "exportsExpired",
+  "errors",
+]);
+const CONTENT_HOLD_FIELDS = Object.freeze([
+  "holdId",
+  "scope",
+  "reason",
+  "approvalId",
+  "custodianId",
+  "startsAt",
+  "expiresAt",
+  "createdAt",
+  "createdBy",
+  "organizationId",
+  "status",
+  "effectiveStatus",
+  "releasedAt",
+  "releasedBy",
+  "releaseReason",
+  "releaseApprovalId",
+]);
+const CONTENT_EXPORT_FIELDS = Object.freeze([
+  "exportId",
+  "status",
+  "fileName",
+  "contentType",
+  "byteLength",
+  "createdAt",
+  "expiresAt",
+  "consumedAt",
+  "downloadPath",
+]);
+const CONTENT_AUDIT_SUMMARY_FIELDS = Object.freeze([
+  "targetType",
+  "targetId",
+  "payloadDigest",
+  "contentRef",
+  "streamId",
+  "requestId",
+  "sessionId",
+  "deletionId",
+  "holdId",
+  "exportId",
+  "byteLength",
+  "objectCount",
+  "status",
+]);
 const ADMIN_APP_JS = await fs.readFile(new URL("./admin-app.js", import.meta.url), "utf8");
 
 const OPERATION_PERMISSIONS = Object.freeze({
@@ -133,6 +299,30 @@ const APPROVAL_ACTION_TARGETS = Object.freeze({
   "user.policy.models": { targetType: "user", permission: "models.write" },
   "usage.export.create": { targetType: "export", permission: "usage.export" },
   "audit.export.create": { targetType: "export", permission: "audit.export" },
+  "audit.content.read_request": {
+    targetType: CONTENT_ACTION_TARGETS["audit.content.read_request"],
+    permission: CONTENT_ACTION_PERMISSIONS["audit.content.read_request"],
+  },
+  "audit.content.retention.run": {
+    targetType: CONTENT_ACTION_TARGETS["audit.content.retention.run"],
+    permission: CONTENT_ACTION_PERMISSIONS["audit.content.retention.run"],
+  },
+  "audit.content.delete": {
+    targetType: CONTENT_ACTION_TARGETS["audit.content.delete"],
+    permission: CONTENT_ACTION_PERMISSIONS["audit.content.delete"],
+  },
+  "audit.content.legal_hold.create": {
+    targetType: CONTENT_ACTION_TARGETS["audit.content.legal_hold.create"],
+    permission: CONTENT_ACTION_PERMISSIONS["audit.content.legal_hold.create"],
+  },
+  "audit.content.legal_hold.release": {
+    targetType: CONTENT_ACTION_TARGETS["audit.content.legal_hold.release"],
+    permission: CONTENT_ACTION_PERMISSIONS["audit.content.legal_hold.release"],
+  },
+  "audit.content.export.create": {
+    targetType: CONTENT_ACTION_TARGETS["audit.content.export.create"],
+    permission: CONTENT_ACTION_PERMISSIONS["audit.content.export.create"],
+  },
   "operation.reconcile": { targetType: "operation", permission: "operations.reconcile" },
 });
 
@@ -336,6 +526,17 @@ function cleanReason(value) {
     throw new HttpError(400, "invalid_reason", "reason must be at most 500 characters");
   }
   return reason;
+}
+
+function cleanContentReason(value) {
+  try {
+    return normalizeContentReason(value);
+  } catch (error) {
+    if (error instanceof AuditContentValidationError) {
+      throw new HttpError(400, error.code, error.message);
+    }
+    throw error;
+  }
 }
 
 function validateOptionalIdempotencyKey(req) {
@@ -1119,7 +1320,15 @@ function policyEditor(user, evidence, operation, access) {
   </details>`;
 }
 
-function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
+function adminPage(
+  session,
+  access,
+  orgUnits,
+  csrfToken,
+  overview,
+  stepUp,
+  auditContentEnabled,
+) {
   const roles = access.roles.length > 0 ? access.roles.join(", ") : "No active role";
   const scopes = access.scopeOrgUnitIds.length > 0 ? access.scopeOrgUnitIds.join(", ") : "None";
   const can = (permission) => access.permissions.includes(permission);
@@ -1176,7 +1385,22 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
     ["usage.export.create", "Create usage export", can("usage.export")],
     ["audit.export.create", "Create audit export", can("audit.export")],
     ["operation.reconcile", "Reconcile operation", can("operations.reconcile")],
+    ["audit.content.read_request", "Read audit content", can("audit.content.read")],
+    ["audit.content.retention.run", "Run content retention", can("audit.content.retention")],
+    ["audit.content.delete", "Delete audit content", can("audit.content.delete")],
+    [
+      "audit.content.legal_hold.create",
+      "Create content legal hold",
+      can("audit.content.legal_hold"),
+    ],
+    [
+      "audit.content.legal_hold.release",
+      "Release content legal hold",
+      can("audit.content.legal_hold"),
+    ],
+    ["audit.content.export.create", "Create content export", can("audit.content.export")],
   ].filter((entry) => entry[2]);
+  const breakGlassActions = approvalActions.filter(([value]) => !isAuditContentAction(value));
   const exportKinds = [
     ["usage", "Usage metadata", can("usage.export")],
     ["audit", "Audit metadata", can("audit.export")],
@@ -1261,6 +1485,10 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
             <option value="credential">Credential</option>
             <option value="operation">Operation</option>
             <option value="export">Export</option>
+            <option value="content">Audit content</option>
+            <option value="content_retention">Content retention</option>
+            <option value="content_hold">Content legal hold</option>
+            <option value="content_export">Content export</option>
           </select>
         </label>
         <label>Requester subject <input name="requesterSubjectId" maxlength="128"></label>
@@ -1315,13 +1543,13 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
-  const canRequestBreakGlass = can("breakglass.request") && approvalActions.length > 0;
+  const canRequestBreakGlass = can("breakglass.request") && breakGlassActions.length > 0;
   const breakGlassRequest = canRequestBreakGlass
     ? `<form id="break-glass-request-form" class="stack-form">
         <h3>Request emergency break-glass authorization</h3>
         <p>Requests are short-lived and single-use. The requester cannot review their own use.</p>
         <label>Action
-          <select name="action">${approvalActions.map(([value, label]) => (
+          <select name="action">${breakGlassActions.map(([value, label]) => (
             `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
           )).join("")}</select>
         </label>
@@ -1406,7 +1634,7 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         <label>Actor subject <input name="actorSubjectId" maxlength="128"></label>
         <label>Action <input name="action" maxlength="128"></label>
         <label>Target type
-          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option></select>
+          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option><option value="content">Audit content</option><option value="content_retention">Content retention</option><option value="content_hold">Content legal hold</option><option value="content_export">Content export</option></select>
         </label>
         <label>Status <input name="status" maxlength="64"></label>
         <label>From <input name="from" placeholder="2026-10-01T00:00:00Z"></label>
@@ -1441,7 +1669,7 @@ function adminPage(session, access, orgUnits, csrfToken, overview, stepUp) {
         <label>Actor subject <input name="actorSubjectId" maxlength="128"></label>
         <label>Action <input name="action" maxlength="128"></label>
         <label>Target type
-          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option></select>
+          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option><option value="content">Audit content</option><option value="content_retention">Content retention</option><option value="content_hold">Content legal hold</option><option value="content_export">Content export</option></select>
         </label>
         <label>Result <input name="result" maxlength="64"></label>
         <label>Phase <input name="phase" maxlength="32"></label>
@@ -1627,6 +1855,186 @@ targetOrgUnitId</textarea>
     notificationRulePanel,
     notificationOperationsPanel,
   ].join("");
+  const contentPermission = (permission) => auditContentEnabled
+    && hasGlobalScope(access)
+    && can(permission);
+  const contentGlobalScopeNotice = auditContentEnabled && !hasGlobalScope(access)
+    ? `<p class="notice">Audit content access requires global organization scope. Your current scope cannot search, read, delete, retain, hold, or export content.</p>`
+    : "";
+  const canSearchContent = contentPermission("audit.content.search");
+  const canReadContent = contentPermission("audit.content.read");
+  const canRunContentRetention = contentPermission("audit.content.retention");
+  const canDeleteContent = contentPermission("audit.content.delete");
+  const canReadContentDeletions = contentPermission("audit.content.deletion_read");
+  const canManageContentHolds = contentPermission("audit.content.legal_hold");
+  const canExportContent = contentPermission("audit.content.export");
+  const contentApprovalFields = `
+    <label>Approved approval ID <input name="approvalId" maxlength="128" required></label>
+    <label>Reason <input name="reason" maxlength="1024" required></label>`;
+  const contentStreamPanel = canSearchContent
+    ? `<form id="content-stream-filter" class="toolbar">
+        <label>User <input name="userId" maxlength="128"></label>
+        <label>Department <input name="departmentId" maxlength="128"></label>
+        <label>Device <input name="deviceId" maxlength="128"></label>
+        <label>Agent <input name="agentId" maxlength="128"></label>
+        <label>Model <input name="modelId" maxlength="128"></label>
+        <label>MCP server <input name="mcpServerId" maxlength="128"></label>
+        <label>Tool <input name="toolName" maxlength="128"></label>
+        <label>Content kind <input name="contentKind" maxlength="64"></label>
+        <label>Status <input name="status" maxlength="64"></label>
+        <label>From <input name="from" placeholder="2026-10-01T00:00:00.000Z"></label>
+        <label>To <input name="to" placeholder="2026-10-08T00:00:00.000Z"></label>
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Search content metadata</button>
+        <button type="button" id="content-stream-next" hidden>Next page</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="content-stream-list" aria-live="polite"></div>
+      <section class="detail-panel">
+        <h3>Content stream detail</h3>
+        <pre id="content-stream-detail">Select a content stream to inspect its projected metadata.</pre>
+      </section>`
+    : "";
+  const contentReadPanel = canReadContent
+    ? `<form id="content-read-form" class="stack-form">
+        <h3>Read redacted content once</h3>
+        <p class="notice">Plaintext is returned once, rendered as text, and never stored in this page. Reusing the request or approval fails closed.</p>
+        <label>Content reference <input name="contentRef" maxlength="64" required></label>
+        <label>Purpose
+          <select name="purpose">
+            <option value="security_investigation">Security investigation</option>
+            <option value="incident_response">Incident response</option>
+            <option value="compliance_review">Compliance review</option>
+            <option value="legal_investigation">Legal investigation</option>
+          </select>
+        </label>
+        <label>Grant TTL (seconds) <input name="ttlSeconds" type="number" min="15" max="300" value="60"></label>
+        ${contentApprovalFields}
+        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
+        <button type="submit">Read content once</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+        <pre id="content-read-result" aria-live="polite"></pre>
+      </form>`
+    : "";
+  const contentRetentionPanel = canRunContentRetention
+    ? `<form id="content-retention-form" class="stack-form">
+        <h3>Run content retention</h3>
+        <label>Mode
+          <select name="dryRun"><option value="true">Dry run</option><option value="false">Apply retention</option></select>
+        </label>
+        <label>Limit <input name="limit" type="number" min="1" max="500" value="100"></label>
+        ${contentApprovalFields}
+        <button type="submit">Run retention</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+        <div id="content-retention-result" aria-live="polite"></div>
+      </form>`
+    : "";
+  const contentDeletePanel = canDeleteContent
+    ? `<form id="content-delete-form" class="stack-form">
+        <h3>Delete or redact content</h3>
+        <p>Deletion requires a matching approved request and is idempotent.</p>
+        <label>Content reference <input name="contentRef" maxlength="64" required></label>
+        <label>Force redaction
+          <select name="force"><option value="false">No</option><option value="true">Yes</option></select>
+        </label>
+        ${contentApprovalFields}
+        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
+        <button type="submit">Delete content</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+        <div id="content-delete-result" aria-live="polite"></div>
+      </form>`
+    : "";
+  const contentDeletionPanel = canReadContentDeletions
+    ? `<form id="content-deletion-filter" class="toolbar">
+        <label>Content reference <input name="contentRef" maxlength="64"></label>
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load deletion proofs</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="content-deletion-list" aria-live="polite"></div>
+      <form id="content-deletion-verify-form" class="stack-form">
+        <h3>Verify a deletion proof</h3>
+        <label>Deletion ID <input name="deletionId" maxlength="64" required></label>
+        <button type="submit">Verify proof</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
+  const contentLegalHoldPanel = canManageContentHolds
+    ? `<form id="content-hold-create-form" class="stack-form">
+        <h3>Create a content legal hold</h3>
+        <p>Scope keys are matched together. Enter a JSON object with contentRef, streamId, userId, departmentId, deviceId, or agentId.</p>
+        <label>Scope (JSON) <textarea name="scope" rows="4" required>{"userId":"usr_alice"}</textarea></label>
+        <label>Custodian ID <input name="custodianId" maxlength="128" required></label>
+        <label>Starts at <input name="startsAt" placeholder="2026-10-01T00:00:00.000Z"></label>
+        <label>Expires at <input name="expiresAt" required placeholder="2027-10-01T00:00:00.000Z"></label>
+        ${contentApprovalFields}
+        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
+        <button type="submit">Create legal hold</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <form id="content-hold-filter" class="toolbar">
+        <label>Effective status
+          <select name="effectiveStatus"><option value="">All states</option><option value="active">Active</option><option value="expired">Expired</option><option value="released">Released</option></select>
+        </label>
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load legal holds</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="content-hold-list" aria-live="polite"></div>
+      <form id="content-hold-release-form" class="stack-form">
+        <h3>Release a content legal hold</h3>
+        <label>Legal hold ID <input name="holdId" maxlength="64" required></label>
+        ${contentApprovalFields}
+        <button type="submit">Release legal hold</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>`
+    : "";
+  const contentExportPanel = canExportContent
+    ? `<form id="content-export-form" class="stack-form">
+        <h3>Create an encrypted content export</h3>
+        <p>Exports are encrypted at rest and downloaded once. The one-time token is held only in this page's memory.</p>
+        <label>Scope (JSON) <textarea name="scope" rows="4" required>{"userId":"usr_alice"}</textarea></label>
+        <label>Purpose
+          <select name="purpose">
+            <option value="security_investigation">Security investigation</option>
+            <option value="incident_response">Incident response</option>
+            <option value="compliance_review">Compliance review</option>
+            <option value="legal_investigation">Legal investigation</option>
+          </select>
+        </label>
+        <label>Upstream export TTL (seconds) <input name="ttlSeconds" type="number" min="15" max="300" value="300"></label>
+        ${contentApprovalFields}
+        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
+        <button type="submit">Create content export</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+        <div id="content-export-result" aria-live="polite"></div>
+      </form>
+      <form id="content-export-filter" class="toolbar">
+        <label>Status
+          <select name="status"><option value="">All states</option><option value="ready">Ready</option><option value="consumed">Consumed</option><option value="expired">Expired</option></select>
+        </label>
+        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">Load content exports</button>
+        <p class="write-result" role="status" aria-live="polite"></p>
+      </form>
+      <div id="content-export-list" aria-live="polite"></div>`
+    : "";
+  const contentGovernancePanel = auditContentEnabled
+    ? `<p>Content search, one-time reads, retention, deletion proofs, legal holds, and encrypted exports require global organization scope. Break-glass never authorizes content access.</p>
+      ${contentGlobalScopeNotice}
+      ${contentStreamPanel}
+      ${contentReadPanel}
+      ${contentRetentionPanel}
+      ${contentDeletePanel}
+      ${contentDeletionPanel}
+      ${contentLegalHoldPanel}
+      ${contentExportPanel}
+      ${!contentStreamPanel && !contentReadPanel && !contentRetentionPanel
+        && !contentDeletePanel && !contentDeletionPanel && !contentLegalHoldPanel
+        && !contentExportPanel
+        ? `<p class="notice">Your role cannot use audit content governance.</p>`
+        : ""}`
+    : "";
   // M3-C-2: read-only resource catalog and client sync visibility. The panels
   // are rendered empty on the server and filled by /admin/app.js from the
   // scoped JSON APIs, so no resource content or token can be embedded here.
@@ -1666,6 +2074,7 @@ targetOrgUnitId</textarea>
   <meta name="admin-permissions" content="${escapeHtml(access.permissions.join(" "))}">
   <meta name="step-up-state" content="${escapeHtml(stepUp.state)}">
   <meta name="step-up-start-url" content="${escapeHtml(stepUp.startUrl)}">
+  <meta name="data-audit-content-enabled" content="${auditContentEnabled ? "true" : "false"}">
   <title>Magpie Enterprise Admin</title>
   <style>
     :root{--ink:#172018;--paper:#f4f0e4;--card:#fffdf6;--line:#d7cfb9;--accent:#b93c2b;--ok:#17643a;--warn:#9a5b00;--danger:#9e2518}
@@ -1705,6 +2114,7 @@ targetOrgUnitId</textarea>
   <h2>Operations</h2>${operationPanel}
   <h2>Notifications</h2>${notificationPanel}
   <h2>Audit metadata</h2>${auditPanel}
+  ${auditContentEnabled ? `<h2>Audit content governance</h2>${contentGovernancePanel}` : ""}
   <h2>Usage overview</h2>${usageBox}
   <h2>Users</h2>
   <p class="notice">${escapeHtml(overview.usersError || "Current organization-scoped identities.")}</p>
@@ -1829,6 +2239,10 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   const authService = options.authService || new AuthServiceClient(config.authService);
   const resourceService = options.resourceService
     || new ResourceServiceClient(config.resourceService || { enabled: false });
+  const auditContentService = options.auditContentService
+    || new AuditContentServiceClient(
+      config.auditContentService || { enabled: false },
+    );
   const notificationChannelSettings = config.notifications?.channels || {};
   const notificationChannelTransport = options.notificationChannelTransport || (
     notificationChannelSettings.enabled
@@ -2584,7 +2998,56 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     })))}`;
   }
 
+  function contentBusinessPayload(action, body, overrides = {}) {
+    const source = body && typeof body === "object" && !Array.isArray(body) ? body : {};
+    if (action === "audit.content.read_request") {
+      return {
+        contentRef: overrides.contentRef ?? source.contentRef,
+        purpose: source.purpose,
+        ...(source.ttlSeconds === undefined ? {} : { ttlSeconds: source.ttlSeconds }),
+      };
+    }
+    if (action === "audit.content.retention.run") {
+      return {
+        dryRun: source.dryRun === undefined ? false : source.dryRun,
+        limit: source.limit === undefined ? 100 : source.limit,
+      };
+    }
+    if (action === "audit.content.delete") {
+      return {
+        contentRef: overrides.contentRef ?? source.contentRef,
+        force: source.force === undefined ? false : source.force,
+      };
+    }
+    if (action === "audit.content.legal_hold.create") {
+      return {
+        scope: source.scope,
+        custodianId: source.custodianId,
+        ...(source.startsAt === undefined ? {} : { startsAt: source.startsAt }),
+        expiresAt: source.expiresAt,
+      };
+    }
+    if (action === "audit.content.legal_hold.release") {
+      return { holdId: overrides.holdId ?? source.holdId };
+    }
+    return {
+      scope: source.scope,
+      purpose: source.purpose,
+      ...(source.ttlSeconds === undefined ? {} : { ttlSeconds: source.ttlSeconds }),
+    };
+  }
+
   function approvalBusinessPayload(action, body) {
+    if (isAuditContentAction(action)) {
+      try {
+        return normalizeAuditContentPayload(action, contentBusinessPayload(action, body));
+      } catch (error) {
+        if (error instanceof AuditContentValidationError) {
+          throw new HttpError(400, error.code, error.message);
+        }
+        throw error;
+      }
+    }
     if (action === "user.policy.quota") {
       if (!Number.isSafeInteger(body.expectedVersion) || body.expectedVersion < 0) {
         throw new HttpError(400, "version_required", "expectedVersion must be a non-negative integer");
@@ -2644,6 +3107,34 @@ export async function createEnterpriseAdminServer(config, options = {}) {
 
   async function resolveApprovalTarget(session, action, targetId, payload) {
     const definition = approvalActionDefinition(action);
+    if (isAuditContentAction(action)) {
+      const access = await requirePermission(session, definition.permission);
+      if (!hasGlobalScope(access.access)) {
+        throw new HttpError(
+          403,
+          "forbidden_scope",
+          "Audit content access requires global organization scope",
+        );
+      }
+      const expectedTargetId = contentApprovalTargetId(action, payload);
+      if (expectedTargetId !== targetId) {
+        throw new HttpError(
+          400,
+          "invalid_content_target",
+          "targetId does not match the content request",
+        );
+      }
+      return {
+        targetType: definition.targetType,
+        targetId,
+        targetOrgUnitId: "*",
+        target: {
+          id: targetId,
+          action,
+          organizationId: config.auditContentService?.organizationId || "",
+        },
+      };
+    }
     if (action === "operation.reconcile") {
       if (payload.parentOperationId !== targetId) {
         throw new HttpError(
@@ -3014,10 +3505,22 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     if (!approvalRequiredForAction(action)) {
       throw new HttpError(400, "approval_not_required", "This action does not require approval");
     }
-    const reason = cleanReason(body.reason);
+    const reason = isAuditContentAction(action)
+      ? cleanContentReason(body.reason)
+      : cleanReason(body.reason);
     const payload = approvalBusinessPayload(action, body);
     let targetId;
-    if (action === "usage.export.create" || action === "audit.export.create") {
+    if (isAuditContentAction(action)) {
+      targetId = contentApprovalTargetId(action, payload);
+      if (body.targetId != null && String(body.targetId).trim()
+          && String(body.targetId).trim() !== targetId) {
+        throw new HttpError(
+          400,
+          "invalid_content_target",
+          "targetId does not match the content request",
+        );
+      }
+    } else if (action === "usage.export.create" || action === "audit.export.create") {
       targetId = exportTargetId(action, payload);
       if (body.targetId != null && String(body.targetId).trim()) {
         const suppliedTargetId = cleanIdentifier(
@@ -3220,6 +3723,13 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     await requireCsrf(req, current.session);
     const body = await readJsonBody(req);
     const action = String(body.action || "").trim();
+    if (isAuditContentAction(action)) {
+      throw new HttpError(
+        403,
+        "content_break_glass_forbidden",
+        "Break-glass cannot authorize audit content access",
+      );
+    }
     approvalActionDefinition(action);
     if (!approvalRequiredForAction(action)) {
       throw new HttpError(
@@ -3484,8 +3994,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     const action = one("action", 128);
     if (action) approvalActionDefinition(action);
     const targetType = one("targetType", 32);
-    if (targetType
-        && !["user", "device", "credential", "operation", "export"].includes(targetType)) {
+    if (targetType && !TARGET_TYPES.includes(targetType)) {
       throw new HttpError(400, "invalid_approval_filter", "targetType is not supported");
     }
     return {
@@ -4525,8 +5034,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       throw new HttpError(400, "invalid_time_range", "from must not be after to");
     }
     const targetType = one("targetType", 32);
-    if (targetType
-        && !["user", "device", "credential", "operation", "export"].includes(targetType)) {
+    if (targetType && !TARGET_TYPES.includes(targetType)) {
       throw new HttpError(400, "invalid_operation_filter", "targetType is not supported");
     }
     const normalized = {
@@ -4691,10 +5199,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       to,
       limit,
     };
-    if (normalized.targetType
-        && !["user", "device", "credential", "operation", "export"].includes(
-          normalized.targetType,
-        )) {
+    if (normalized.targetType && !TARGET_TYPES.includes(normalized.targetType)) {
       throw new HttpError(400, "invalid_audit_filter", "targetType is not supported");
     }
     return {
@@ -7686,6 +8191,1279 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     }
   }
 
+  function auditContentError(error) {
+    if (error instanceof HttpError) throw error;
+    if (error instanceof AuditContentServiceError) {
+      if (error.code === "content_read_replayed") {
+        throw new HttpError(
+          409,
+          "content_read_replayed",
+          "This content read request has already been used",
+        );
+      }
+      if (error.code === "content_export_token_reused") {
+        throw new HttpError(
+          409,
+          "content_export_token_reused",
+          "The audit export token has already been used",
+        );
+      }
+      if (error.statusCode === 404) {
+        throw new HttpError(404, "content_not_found", "Audit content was not found");
+      }
+    }
+    throw new HttpError(
+      503,
+      "audit_content_unavailable",
+      "The audit content service is unavailable",
+    );
+  }
+
+  function requireAuditContentService(exportRequired = false) {
+    if (!auditContentService?.enabled || !config.auditContentService?.enabled) {
+      throw new HttpError(
+        503,
+        "audit_content_unavailable",
+        "The audit content service is not configured",
+      );
+    }
+    if (exportRequired
+        && (!Buffer.isBuffer(config.auditContentService.exportKey)
+          || config.auditContentService.exportKey.length !== 32)) {
+      throw new HttpError(
+        503,
+        "audit_content_unavailable",
+        "The audit content export key is unavailable",
+      );
+    }
+  }
+
+  function auditContentIdentity(current) {
+    return {
+      adminId: current.session.subjectId,
+      sessionHash: current.sidHash,
+    };
+  }
+
+  async function requireContentGlobal(session, permission) {
+    const result = await requirePermission(session, permission);
+    if (!hasGlobalScope(result.access)) {
+      throw new HttpError(
+        403,
+        "forbidden_scope",
+        "Audit content access requires global organization scope",
+      );
+    }
+    return result;
+  }
+
+  function contentCompareAndReserve(data, approvalId, expected, operation, requestHash, storeKey, record) {
+    if (data[storeKey][requestHash]) {
+      throw new HttpError(
+        409,
+        "content_request_in_progress",
+        "This content request is already in progress",
+      );
+    }
+    const failure = approvalConsumptionFailure(data.approvalRequests[approvalId], expected);
+    if (failure) {
+      throw approvalHttpError(failure, "Approval cannot be consumed for this content request");
+    }
+    reserveApprovalForOperation(data, approvalId, expected, operation);
+    data[storeKey][requestHash] = record;
+  }
+
+  function consumeContentApproval(data, approvalId, operation, outcome) {
+    if (!approvalId) return;
+    consumeApprovalForOperation(data, approvalId, operation, outcome);
+  }
+
+  function contentOperation(
+    current,
+    requestId,
+    access,
+    action,
+    targetType,
+    targetId,
+    reason,
+    approvalId,
+    payload,
+  ) {
+    return {
+      id: `content_${requestId}`,
+      requestId,
+      actorSubjectId: current.session.subjectId,
+      actorEmail: current.session.email,
+      roles: [...access.roles],
+      scopeOrgUnitIds: [...access.scopeOrgUnitIds],
+      action,
+      targetType,
+      targetId,
+      targetOrgUnitId: "*",
+      reason,
+      approvalId,
+      breakGlassId: "",
+      beforeSummary: {
+        targetType,
+        targetId,
+        payloadDigest: approvalPayloadDigest(action, payload),
+      },
+      sourceIp: String(current.sourceIp || ""),
+      userAgentHash: String(current.userAgentHash || ""),
+    };
+  }
+
+  function appendContentAudit(data, operation, result, options = {}) {
+    const afterSummary = projectContentFields(
+      options.afterSummary,
+      CONTENT_AUDIT_SUMMARY_FIELDS,
+    );
+    if (options.afterSummary
+        && Object.prototype.hasOwnProperty.call(options.afterSummary, "result")) {
+      afterSummary.result = contentWritePublicResult(
+        operation.action,
+        options.afterSummary.result,
+      );
+    }
+    data.adminAuditLogs.push(auditRecord(operation, "result", result, {
+      afterSummary,
+      errorCode: String(options.errorCode || ""),
+    }));
+  }
+
+  function contentFieldPresent(value) {
+    if (value === undefined || value === null || value === "") return false;
+    if (Array.isArray(value)) return value.length > 0;
+    if (typeof value === "object") return Object.keys(value).length > 0;
+    return true;
+  }
+
+  function projectContentFields(value, fields, transforms = {}) {
+    const output = {};
+    if (!value || typeof value !== "object" || Array.isArray(value)) return output;
+    for (const field of fields) {
+      if (!Object.prototype.hasOwnProperty.call(value, field)) continue;
+      const transform = transforms[field];
+      const projected = transform ? transform(value[field]) : value[field];
+      if (!contentFieldPresent(projected)) continue;
+      output[field] = structuredClone(projected);
+    }
+    return output;
+  }
+
+  function projectContentCollection(value) {
+    return projectContentFields(value, CONTENT_COLLECTION_FIELDS);
+  }
+
+  function projectContentRedaction(value) {
+    return projectContentFields(value, CONTENT_REDACTION_FIELDS);
+  }
+
+  function projectContentScope(value) {
+    return projectContentFields(value, CONTENT_SCOPE_FIELDS);
+  }
+
+  function publicContentStream(value) {
+    return projectContentFields(value, CONTENT_STREAM_FIELDS, {
+      collection: projectContentCollection,
+      redaction: projectContentRedaction,
+    });
+  }
+
+  function publicContentDeletion(value) {
+    return projectContentFields(value, CONTENT_DELETION_FIELDS);
+  }
+
+  function publicContentVerification(value) {
+    return projectContentFields(value, CONTENT_VERIFICATION_FIELDS);
+  }
+
+  function publicContentRetentionSummary(value) {
+    return projectContentFields(value, CONTENT_RETENTION_FIELDS);
+  }
+
+  function publicContentLegalHold(value) {
+    return projectContentFields(value, CONTENT_HOLD_FIELDS, {
+      scope: projectContentScope,
+    });
+  }
+
+  function contentWritePublicResult(action, value) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+    if (action === "audit.content.retention.run") {
+      return { summary: publicContentRetentionSummary(value.summary) };
+    }
+    if (action === "audit.content.delete") {
+      return {
+        duplicate: value.duplicate === true,
+        deletion: publicContentDeletion(value.deletion),
+      };
+    }
+    if (action === "audit.content.legal_hold.create") {
+      return {
+        duplicate: value.duplicate === true,
+        hold: publicContentLegalHold(value.hold),
+      };
+    }
+    if (action === "audit.content.legal_hold.release") {
+      return { hold: publicContentLegalHold(value.hold) };
+    }
+    if (action === "audit.content.export.create") {
+      const projected = projectContentFields(value, CONTENT_EXPORT_FIELDS);
+      if (projected.status === "ready"
+          && Number.isFinite(Date.parse(projected.expiresAt))
+          && Date.parse(projected.expiresAt) <= Date.now()) {
+        projected.status = "expired";
+        delete projected.downloadPath;
+      }
+      return projected;
+    }
+    return {};
+  }
+
+  function contentQuery(searchParams) {
+    const output = {};
+    for (const name of [
+      "userId",
+      "departmentId",
+      "deviceId",
+      "agentId",
+      "modelId",
+      "mcpServerId",
+      "toolName",
+      "contentKind",
+      "status",
+      "from",
+      "to",
+      "limit",
+      "cursor",
+      "effectiveStatus",
+      "contentRef",
+    ]) {
+      if (searchParams.has(name)) output[name] = searchParams.get(name);
+    }
+    return output;
+  }
+
+  function publicContentExport(record, now = Date.now()) {
+    const expired = Number.isFinite(Date.parse(record.expiresAt))
+      && Date.parse(record.expiresAt) <= now;
+    const status = record.status === "ready" && expired ? "expired" : record.status;
+    const projected = {
+      exportId: String(record.id || ""),
+      status,
+      fileName: String(record.fileName || ""),
+      contentType: "application/octet-stream",
+      byteLength: Number(record.byteLength || 0),
+      createdAt: String(record.createdAt || ""),
+      expiresAt: String(record.expiresAt || ""),
+    };
+    if (record.consumedAt) projected.consumedAt = String(record.consumedAt);
+    if (status === "ready") {
+      projected.downloadPath =
+        `/api/v1/admin/audit/content/exports/${encodeURIComponent(record.id)}/download`;
+    }
+    return contentWritePublicResult("audit.content.export.create", projected);
+  }
+
+  async function validateContentApproval(approvalId, expected) {
+    await store.read((data) => {
+      const failure = approvalConsumptionFailure(data.approvalRequests[approvalId], expected);
+      if (failure) {
+        throw approvalHttpError(failure, "Approval cannot be consumed for this content request");
+      }
+      return true;
+    });
+  }
+
+  async function prepareContentWrite(
+    req,
+    res,
+    action,
+    permission,
+    body,
+    targetType,
+    targetId,
+    payload,
+    reason,
+    approvalId,
+    requireIdempotency = false,
+  ) {
+    requireAuditContentService(action === "audit.content.export.create");
+    const current = await currentSession(req);
+    if (!current) {
+      throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    }
+    current.sourceIp = String(req.socket.remoteAddress || "");
+    current.userAgentHash = sha256(String(req.headers["user-agent"] || ""));
+    const { access } = await requireContentGlobal(current.session, permission);
+    if (body.breakGlassId) {
+      throw new HttpError(
+        403,
+        "content_break_glass_forbidden",
+        "Break-glass cannot authorize audit content access",
+      );
+    }
+    const idempotencyKey = requireIdempotency
+      ? validateRequiredIdempotencyKey(req)
+      : validateOptionalIdempotencyKey(req);
+    const requestId = String(res.getHeader("x-request-id") || crypto.randomUUID());
+    const requestHash = idempotencyKey
+      ? sha256(`${current.session.subjectId}\u0000${idempotencyKey}`)
+      : sha256(`${current.session.subjectId}\u0000request\u0000${requestId}`);
+    const fingerprint = contentRequestFingerprint(action, payload, approvalId, reason);
+    const existing = idempotencyKey
+      ? await store.read((data) => {
+        const record = data.adminContentGovernanceRequests[requestHash];
+        return record ? structuredClone(record) : null;
+      })
+      : null;
+    if (existing) {
+      if (existing.requestFingerprint !== fingerprint) {
+        throw new HttpError(
+          409,
+          "idempotency_conflict",
+          "Idempotency-Key was already used for a different content request",
+        );
+      }
+      if (existing.status === "reserved") {
+        throw new HttpError(
+          409,
+          "content_request_in_progress",
+          "This content request is already in progress",
+        );
+      }
+      if (existing.status === "failed") {
+        throw new HttpError(
+          503,
+          "content_request_failed",
+          "The original content request failed; use a new approval and idempotency key",
+        );
+      }
+      return {
+        replayed: true,
+        existing,
+        current,
+        access,
+        requestHash,
+        fingerprint,
+        idempotencyKey,
+        operation: null,
+      };
+    }
+    if (!approvalId) {
+      throw new HttpError(400, "approval_required", "approvalId is required");
+    }
+    const expected = approvalExpectedBinding({
+      requesterSubjectId: current.session.subjectId,
+      action,
+      targetType,
+      targetId,
+      targetOrgUnitId: "*",
+      riskLevel: riskForAction(action),
+      reason,
+      payload,
+    });
+    await validateContentApproval(approvalId, expected);
+    await requireCsrf(req, current.session);
+    await requireStepUp(current, req, action);
+    const operation = contentOperation(
+      current,
+      requestId,
+      access,
+      action,
+      targetType,
+      targetId,
+      reason,
+      approvalId,
+      payload,
+    );
+    const createdAt = new Date().toISOString();
+    const record = {
+      id: `gcr_${requestHash.slice(0, 32)}`,
+      requestHash,
+      requestFingerprint: fingerprint,
+      action,
+      targetType,
+      targetId,
+      approvalId,
+      actorSubjectId: current.session.subjectId,
+      sessionHash: current.sidHash,
+      status: "reserved",
+      result: {},
+      createdAt,
+      updatedAt: createdAt,
+    };
+    await store.mutate((data) => {
+      contentCompareAndReserve(
+        data,
+        approvalId,
+        expected,
+        operation,
+        requestHash,
+        "adminContentGovernanceRequests",
+        record,
+      );
+    });
+    return {
+      replayed: false,
+      existing: null,
+      current,
+      access,
+      requestHash,
+      fingerprint,
+      idempotencyKey,
+      operation,
+    };
+  }
+
+  async function finishContentWrite(
+    context,
+    result,
+    afterSummary = {},
+    beforeComplete = null,
+  ) {
+    const safeResult = contentWritePublicResult(context.operation.action, result);
+    await store.mutate((data) => {
+      const record = data.adminContentGovernanceRequests[context.requestHash];
+      if (!record || record.status !== "reserved") {
+        throw new Error("The content request reservation is missing");
+      }
+      const now = new Date().toISOString();
+      if (beforeComplete) beforeComplete(data, now);
+      record.status = "succeeded";
+      record.result = safeResult;
+      record.updatedAt = now;
+      consumeContentApproval(data, context.operation.approvalId, context.operation, "succeeded");
+      appendContentAudit(data, context.operation, "succeeded", {
+        afterSummary: {
+          ...projectContentFields(afterSummary, CONTENT_AUDIT_SUMMARY_FIELDS),
+          result: safeResult,
+        },
+      });
+    });
+    return safeResult;
+  }
+
+  async function failContentWrite(context, error) {
+    await store.mutate((data) => {
+      const record = data.adminContentGovernanceRequests[context.requestHash];
+      if (record && record.status === "reserved") {
+        record.status = "failed";
+        record.updatedAt = new Date().toISOString();
+      }
+      if (context.operation) {
+        consumeContentApproval(data, context.operation.approvalId, context.operation, "failed");
+        appendContentAudit(data, context.operation, "failed", {
+          errorCode: error instanceof AuditContentServiceError
+            ? error.code
+            : "audit_content_unavailable",
+        });
+      }
+    });
+  }
+
+  async function readAuditContent(req, res, rawContentRef) {
+    requireAuditContentService();
+    const current = await currentSession(req);
+    if (!current) {
+      throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    }
+    let contentRef;
+    try {
+      contentRef = normalizeContentRef(rawContentRef);
+    } catch (error) {
+      if (error instanceof AuditContentValidationError) {
+        throw new HttpError(400, error.code, error.message);
+      }
+      throw error;
+    }
+    const { access } = await requireContentGlobal(current.session, "audit.content.read");
+    const body = await readJsonBody(req);
+    if (body.breakGlassId) {
+      throw new HttpError(
+        403,
+        "content_break_glass_forbidden",
+        "Break-glass cannot authorize audit content access",
+      );
+    }
+    if (body.contentRef != null
+        && String(body.contentRef).trim()
+        && String(body.contentRef).trim() !== contentRef) {
+      throw new HttpError(400, "invalid_content_target", "contentRef does not match the path");
+    }
+    let payload;
+    try {
+      payload = normalizeAuditContentPayload(
+        "audit.content.read_request",
+        contentBusinessPayload("audit.content.read_request", body, { contentRef }),
+      );
+    } catch (error) {
+      if (error instanceof AuditContentValidationError) {
+        throw new HttpError(400, error.code, error.message);
+      }
+      throw error;
+    }
+    const reason = cleanContentReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const action = "audit.content.read_request";
+    const targetType = "content";
+    const idempotencyKey = validateRequiredIdempotencyKey(req);
+    const requestHash = sha256(`${current.session.subjectId}\u0000${idempotencyKey}`);
+    const fingerprint = contentRequestFingerprint(action, payload, approvalId, reason);
+    const existing = await store.read((data) => (
+      data.adminContentReadRequests[requestHash]
+        ? structuredClone(data.adminContentReadRequests[requestHash])
+        : null
+    ));
+    if (existing) {
+      if (existing.requestFingerprint !== fingerprint) {
+        throw new HttpError(
+          409,
+          "idempotency_conflict",
+          "Idempotency-Key was already used for a different content read",
+        );
+      }
+      throw new HttpError(
+        409,
+        "content_read_replayed",
+        "This content read request has already been used",
+      );
+    }
+    if (!approvalId) {
+      throw new HttpError(400, "approval_required", "approvalId is required");
+    }
+    const expected = approvalExpectedBinding({
+      requesterSubjectId: current.session.subjectId,
+      action,
+      targetType,
+      targetId: contentRef,
+      targetOrgUnitId: "*",
+      riskLevel: riskForAction(action),
+      reason,
+      payload,
+    });
+    await validateContentApproval(approvalId, expected);
+    await requireCsrf(req, current.session);
+    await requireStepUp(current, req, action);
+    current.sourceIp = String(req.socket.remoteAddress || "");
+    current.userAgentHash = sha256(String(req.headers["user-agent"] || ""));
+    const requestId = String(res.getHeader("x-request-id") || crypto.randomUUID());
+    const operation = contentOperation(
+      current,
+      requestId,
+      access,
+      action,
+      targetType,
+      contentRef,
+      reason,
+      approvalId,
+      payload,
+    );
+    const createdAt = new Date().toISOString();
+    const record = {
+      id: `crr_${requestHash.slice(0, 32)}`,
+      requestHash,
+      requestFingerprint: fingerprint,
+      action,
+      contentRef,
+      approvalId,
+      actorSubjectId: current.session.subjectId,
+      actorEmail: current.session.email,
+      sessionHash: current.sidHash,
+      status: "reserved",
+      createdAt,
+      updatedAt: createdAt,
+    };
+    await store.mutate((data) => {
+      if (data.adminContentReadRequests[requestHash]) {
+        throw new HttpError(
+          409,
+          "content_read_replayed",
+          "This content read request has already been used",
+        );
+      }
+      contentCompareAndReserve(
+        data,
+        approvalId,
+        expected,
+        operation,
+        requestHash,
+        "adminContentReadRequests",
+        record,
+      );
+    });
+
+    let issued;
+    try {
+      issued = await auditContentService.issueGrant(
+        auditContentIdentity(current),
+        contentRef,
+        {
+          purpose: payload.purpose,
+          reason,
+          approvalId,
+          ...(payload.ttlSeconds === undefined ? {} : { ttlSeconds: payload.ttlSeconds }),
+        },
+      );
+    } catch (error) {
+      await store.mutate((data) => {
+        const stored = data.adminContentReadRequests[requestHash];
+        if (stored && stored.status === "reserved") {
+          stored.status = "failed";
+          stored.updatedAt = new Date().toISOString();
+        }
+        consumeContentApproval(data, approvalId, operation, "failed");
+        appendContentAudit(data, operation, "failed", {
+          errorCode: error instanceof AuditContentServiceError
+            ? error.code
+            : "audit_content_unavailable",
+        });
+      });
+      auditContentError(error);
+    }
+
+    let content;
+    try {
+      content = await auditContentService.readContent(
+        auditContentIdentity(current),
+        contentRef,
+        issued.grant,
+      );
+    } catch (error) {
+      await store.mutate((data) => {
+        const stored = data.adminContentReadRequests[requestHash];
+        if (stored) {
+          stored.status = "failed";
+          stored.updatedAt = new Date().toISOString();
+        }
+        consumeContentApproval(data, approvalId, operation, "failed");
+        appendContentAudit(data, operation, "failed", {
+          errorCode: error instanceof AuditContentServiceError
+            ? error.code
+            : "audit_content_unavailable",
+          afterSummary: { contentRef },
+        });
+      });
+      auditContentError(error);
+    }
+    await store.mutate((data) => {
+      const stored = data.adminContentReadRequests[requestHash];
+      stored.status = "succeeded";
+      stored.updatedAt = new Date().toISOString();
+      consumeContentApproval(data, approvalId, operation, "succeeded");
+      appendContentAudit(data, operation, "succeeded", {
+        afterSummary: {
+          contentRef,
+          streamId: content.streamId,
+          requestId: content.requestId || "",
+          sessionId: content.sessionId || "",
+        },
+      });
+    });
+    res.writeHead(200, {
+      "content-type": "text/plain; charset=utf-8",
+      "content-length": Buffer.byteLength(content.content, "utf8"),
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "x-audit-content-ref": contentRef,
+    });
+    res.end(content.content);
+  }
+
+  function normalizedContentPayload(action, value) {
+    try {
+      return normalizeAuditContentPayload(action, value);
+    } catch (error) {
+      if (error instanceof AuditContentValidationError) {
+        throw new HttpError(400, error.code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  function normalizedContentIdentifier(value, normalizer) {
+    try {
+      return normalizer(value);
+    } catch (error) {
+      if (error instanceof AuditContentValidationError) {
+        throw new HttpError(400, error.code, error.message);
+      }
+      throw error;
+    }
+  }
+
+  function replayContentWrite(res, context) {
+    json(res, 200, {
+      ...contentWritePublicResult(context.existing.action, context.existing.result),
+      replayed: true,
+    });
+  }
+
+  async function listAuditContentStreams(req, res, searchParams) {
+    requireAuditContentService();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.search");
+    try {
+      const result = await auditContentService.listStreams(
+        auditContentIdentity(current),
+        contentQuery(searchParams),
+      );
+      json(res, 200, {
+        streams: result.streams.map(publicContentStream),
+        nextCursor: result.nextCursor,
+      });
+    } catch (error) {
+      auditContentError(error);
+    }
+  }
+
+  async function getAuditContentStream(req, res, rawStreamId) {
+    requireAuditContentService();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.search");
+    const streamId = normalizedContentIdentifier(rawStreamId, normalizeStreamId);
+    try {
+      const stream = await auditContentService.getStream(
+        auditContentIdentity(current),
+        streamId,
+      );
+      json(res, 200, { stream: publicContentStream(stream) });
+    } catch (error) {
+      auditContentError(error);
+    }
+  }
+
+  async function runAuditContentRetention(req, res) {
+    const body = await readJsonBody(req);
+    const action = "audit.content.retention.run";
+    const payload = normalizedContentPayload(action, contentBusinessPayload(action, body));
+    const reason = cleanContentReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const targetType = CONTENT_ACTION_TARGETS[action];
+    const targetId = contentApprovalTargetId(action, payload);
+    const context = await prepareContentWrite(
+      req,
+      res,
+      action,
+      CONTENT_ACTION_PERMISSIONS[action],
+      body,
+      targetType,
+      targetId,
+      payload,
+      reason,
+      approvalId,
+    );
+    if (context.replayed) {
+      replayContentWrite(res, context);
+      return;
+    }
+    try {
+      const summary = await auditContentService.runRetention(
+        auditContentIdentity(context.current),
+        { ...payload, reason, approvalId },
+      );
+      const result = await finishContentWrite(
+        context,
+        { summary },
+        { targetType, targetId },
+      );
+      json(res, 200, result);
+    } catch (error) {
+      await failContentWrite(context, error);
+      auditContentError(error);
+    }
+  }
+
+  async function deleteAuditContent(req, res, rawContentRef) {
+    const contentRef = normalizedContentIdentifier(rawContentRef, normalizeContentRef);
+    const body = await readJsonBody(req);
+    if (body.contentRef != null
+        && String(body.contentRef).trim()
+        && String(body.contentRef).trim() !== contentRef) {
+      throw new HttpError(400, "invalid_content_target", "contentRef does not match the path");
+    }
+    const action = "audit.content.delete";
+    const payload = normalizedContentPayload(
+      action,
+      contentBusinessPayload(action, body, { contentRef }),
+    );
+    const reason = cleanContentReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const targetType = CONTENT_ACTION_TARGETS[action];
+    const targetId = contentApprovalTargetId(action, payload);
+    const context = await prepareContentWrite(
+      req,
+      res,
+      action,
+      CONTENT_ACTION_PERMISSIONS[action],
+      body,
+      targetType,
+      targetId,
+      payload,
+      reason,
+      approvalId,
+      true,
+    );
+    if (context.replayed) {
+      replayContentWrite(res, context);
+      return;
+    }
+    try {
+      const result = await auditContentService.deleteContent(
+        auditContentIdentity(context.current),
+        contentRef,
+        { reason, approvalId, force: payload.force },
+        context.idempotencyKey,
+      );
+      const safe = await finishContentWrite(
+        context,
+        result,
+        { contentRef, deletionId: result.deletion?.deletionId || "" },
+      );
+      json(res, 200, safe);
+    } catch (error) {
+      await failContentWrite(context, error);
+      auditContentError(error);
+    }
+  }
+
+  async function listAuditContentDeletions(req, res, searchParams) {
+    requireAuditContentService();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.deletion_read");
+    try {
+      const deletions = await auditContentService.listDeletions(
+        auditContentIdentity(current),
+        contentQuery(searchParams),
+      );
+      json(res, 200, {
+        deletions: deletions.map(publicContentDeletion),
+      });
+    } catch (error) {
+      auditContentError(error);
+    }
+  }
+
+  async function getAuditContentDeletion(req, res, rawDeletionId) {
+    requireAuditContentService();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.deletion_read");
+    const deletionId = normalizedContentIdentifier(rawDeletionId, normalizeDeletionId);
+    try {
+      const deletion = await auditContentService.getDeletion(
+        auditContentIdentity(current),
+        deletionId,
+      );
+      json(res, 200, { deletion: publicContentDeletion(deletion) });
+    } catch (error) {
+      auditContentError(error);
+    }
+  }
+
+  async function verifyAuditContentDeletion(req, res, rawDeletionId) {
+    requireAuditContentService();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.deletion_read");
+    await requireCsrf(req, current.session);
+    const deletionId = normalizedContentIdentifier(rawDeletionId, normalizeDeletionId);
+    try {
+      const verification = await auditContentService.verifyDeletion(
+        auditContentIdentity(current),
+        deletionId,
+      );
+      json(res, 200, {
+        deletionId,
+        verification: publicContentVerification(verification),
+      });
+    } catch (error) {
+      auditContentError(error);
+    }
+  }
+
+  async function createAuditContentLegalHold(req, res) {
+    const body = await readJsonBody(req);
+    const action = "audit.content.legal_hold.create";
+    const payload = normalizedContentPayload(action, contentBusinessPayload(action, body));
+    const reason = cleanContentReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const targetType = CONTENT_ACTION_TARGETS[action];
+    const targetId = contentApprovalTargetId(action, payload);
+    const context = await prepareContentWrite(
+      req,
+      res,
+      action,
+      CONTENT_ACTION_PERMISSIONS[action],
+      body,
+      targetType,
+      targetId,
+      payload,
+      reason,
+      approvalId,
+      true,
+    );
+    if (context.replayed) {
+      replayContentWrite(res, context);
+      return;
+    }
+    try {
+      const result = await auditContentService.createLegalHold(
+        auditContentIdentity(context.current),
+        { ...payload, reason, approvalId },
+        context.idempotencyKey,
+      );
+      const safe = await finishContentWrite(
+        context,
+        result,
+        { targetType, targetId, holdId: result.hold?.holdId || "" },
+      );
+      json(res, 201, safe);
+    } catch (error) {
+      await failContentWrite(context, error);
+      auditContentError(error);
+    }
+  }
+
+  async function listAuditContentLegalHolds(req, res, searchParams) {
+    requireAuditContentService();
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.legal_hold");
+    try {
+      const holds = await auditContentService.listLegalHolds(
+        auditContentIdentity(current),
+        contentQuery(searchParams),
+      );
+      json(res, 200, {
+        holds: holds.map(publicContentLegalHold),
+      });
+    } catch (error) {
+      auditContentError(error);
+    }
+  }
+
+  async function releaseAuditContentLegalHold(req, res, rawHoldId) {
+    const holdId = normalizedContentIdentifier(rawHoldId, normalizeHoldId);
+    const body = await readJsonBody(req);
+    if (body.holdId != null
+        && String(body.holdId).trim()
+        && String(body.holdId).trim() !== holdId) {
+      throw new HttpError(400, "invalid_content_target", "holdId does not match the path");
+    }
+    const action = "audit.content.legal_hold.release";
+    const payload = normalizedContentPayload(
+      action,
+      contentBusinessPayload(action, body, { holdId }),
+    );
+    const reason = cleanContentReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const targetType = CONTENT_ACTION_TARGETS[action];
+    const targetId = contentApprovalTargetId(action, payload);
+    const context = await prepareContentWrite(
+      req,
+      res,
+      action,
+      CONTENT_ACTION_PERMISSIONS[action],
+      body,
+      targetType,
+      targetId,
+      payload,
+      reason,
+      approvalId,
+    );
+    if (context.replayed) {
+      replayContentWrite(res, context);
+      return;
+    }
+    try {
+      const hold = await auditContentService.releaseLegalHold(
+        auditContentIdentity(context.current),
+        holdId,
+        { reason, approvalId },
+      );
+      const safe = await finishContentWrite(
+        context,
+        { hold },
+        { targetType, targetId, holdId },
+      );
+      json(res, 200, safe);
+    } catch (error) {
+      await failContentWrite(context, error);
+      auditContentError(error);
+    }
+  }
+
+  async function createAuditContentExport(req, res) {
+    const body = await readJsonBody(req);
+    const action = "audit.content.export.create";
+    const payload = normalizedContentPayload(action, contentBusinessPayload(action, body));
+    const reason = cleanContentReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const targetType = CONTENT_ACTION_TARGETS[action];
+    const targetId = contentApprovalTargetId(action, payload);
+    const context = await prepareContentWrite(
+      req,
+      res,
+      action,
+      CONTENT_ACTION_PERMISSIONS[action],
+      body,
+      targetType,
+      targetId,
+      payload,
+      reason,
+      approvalId,
+      true,
+    );
+    if (context.replayed) {
+      replayContentWrite(res, context);
+      return;
+    }
+    try {
+      const created = await auditContentService.createExport(
+        auditContentIdentity(context.current),
+        { ...payload, reason, approvalId },
+        context.idempotencyKey,
+      );
+      const expiresAt = String(created.export?.expiresAt || "");
+      if (!isCanonicalUtcTimestamp(expiresAt)
+          || Date.parse(expiresAt) <= Date.now()) {
+        throw new AuditContentServiceError(
+          "The audit content service returned an invalid export expiry",
+          { statusCode: 502, code: "audit_content_invalid_response" },
+        );
+      }
+      const downloaded = await auditContentService.downloadExport(
+        auditContentIdentity(context.current),
+        created.export.exportId,
+        created.token,
+      );
+      const exportId = `cexp_${crypto.randomBytes(32).toString("base64url")}`;
+      const record = {
+        id: exportId,
+        exportId,
+        actorSubjectId: context.current.session.subjectId,
+        actorEmail: context.current.session.email,
+        sessionHash: context.current.sidHash,
+        organizationId: config.auditContentService.organizationId,
+        upstreamExportId: created.export.exportId,
+        fileName: `${exportId}.mge.enc`,
+        contentType: "application/octet-stream",
+        byteLength: downloaded.bytes.length,
+        objectCount: Number.isSafeInteger(created.export.objectCount)
+          ? created.export.objectCount
+          : 0,
+        ciphertext: "",
+        iv: "",
+        tag: "",
+        digest: "",
+        status: "ready",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        expiresAt,
+        consumedAt: "",
+      };
+      const encrypted = encryptContentExport(
+        config.auditContentService.exportKey,
+        downloaded.bytes,
+        contentExportAad(record),
+      );
+      Object.assign(record, encrypted);
+      const downloadToken = randomToken(32);
+      const downloadTokenHash = sha256(downloadToken);
+      const tokenRecord = {
+        tokenHash: downloadTokenHash,
+        exportId,
+        actorSubjectId: record.actorSubjectId,
+        actorEmail: record.actorEmail,
+        sessionHash: record.sessionHash,
+        createdAt: record.createdAt,
+        expiresAt: record.expiresAt,
+        consumedAt: "",
+      };
+      const publicRecord = publicContentExport(record);
+      const safe = await finishContentWrite(
+        context,
+        publicRecord,
+        {
+          targetType,
+          targetId,
+          exportId,
+          byteLength: record.byteLength,
+        },
+        (data) => {
+          data.adminContentExports[exportId] = record;
+          data.adminContentExportTokens[downloadTokenHash] = tokenRecord;
+        },
+      );
+      json(res, 201, safe, {
+        "x-magpie-download-token": downloadToken,
+      });
+    } catch (error) {
+      await failContentWrite(context, error);
+      auditContentError(error);
+    }
+  }
+
+  async function listAuditContentExports(req, res, searchParams) {
+    requireAuditContentService(true);
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.export");
+    const requestedLimit = Number(searchParams.get("limit") || 50);
+    if (!Number.isSafeInteger(requestedLimit) || requestedLimit < 1 || requestedLimit > 200) {
+      throw new HttpError(400, "invalid_limit", "limit must be between 1 and 200");
+    }
+    const status = String(searchParams.get("status") || "").trim();
+    if (status && !["ready", "consumed", "expired"].includes(status)) {
+      throw new HttpError(400, "invalid_content_status", "status is not supported");
+    }
+    const now = Date.now();
+    const exports = await store.read((data) => Object.values(data.adminContentExports)
+      .filter((record) => record.actorSubjectId === current.session.subjectId)
+      .map((record) => publicContentExport(record, now))
+      .filter((record) => !status || record.status === status)
+      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, requestedLimit));
+    json(res, 200, { exports });
+  }
+
+  async function downloadAuditContentExport(req, res, rawExportId) {
+    requireAuditContentService(true);
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireContentGlobal(current.session, "audit.content.export");
+    const exportId = normalizedContentIdentifier(rawExportId, normalizeLocalExportId);
+    const downloadToken = String(req.headers["x-magpie-download-token"] || "");
+    if (!/^[A-Za-z0-9_-]{43}$/.test(downloadToken)) {
+      throw new HttpError(403, "content_export_unauthorized", "The export download token is invalid");
+    }
+    const tokenHash = sha256(downloadToken);
+    const snapshot = await store.read((data) => ({
+      record: data.adminContentExports[exportId]
+        ? structuredClone(data.adminContentExports[exportId])
+        : null,
+      token: data.adminContentExportTokens[tokenHash]
+        ? structuredClone(data.adminContentExportTokens[tokenHash])
+        : null,
+    }));
+    const record = snapshot.record;
+    const token = snapshot.token;
+    const now = Date.now();
+    if (!record || !token
+        || token.exportId !== exportId
+        || token.actorSubjectId !== current.session.subjectId
+        || token.sessionHash !== current.sidHash
+        || record.sessionHash !== current.sidHash) {
+      throw new HttpError(
+        403,
+        "content_export_unauthorized",
+        "The export download is not available",
+      );
+    }
+    if (token.consumedAt || record.consumedAt || record.status === "consumed") {
+      throw new HttpError(
+        409,
+        "content_export_token_reused",
+        "The audit export download token has already been used",
+      );
+    }
+    if (!isCanonicalUtcTimestamp(record.expiresAt) || Date.parse(record.expiresAt) <= now) {
+      throw new HttpError(410, "content_export_expired", "The audit export has expired");
+    }
+    let artifact;
+    try {
+      decryptContentExport(
+        config.auditContentService.exportKey,
+        record,
+        contentExportAad(record),
+      );
+      const magic = Buffer.from("MAGPIE-EXPORT-1", "utf8");
+      artifact = Buffer.concat([
+        magic,
+        Buffer.from(record.iv, "base64"),
+        Buffer.from(record.tag, "base64"),
+        Buffer.from(record.ciphertext, "base64"),
+      ]);
+    } catch {
+      throw new HttpError(
+        503,
+        "content_export_unavailable",
+        "The encrypted audit export is unavailable",
+      );
+    }
+    const requestId = String(res.getHeader("x-request-id") || crypto.randomUUID());
+    const operation = {
+      id: `content_${requestId}`,
+      requestId,
+      actorSubjectId: current.session.subjectId,
+      actorEmail: current.session.email,
+      roles: [],
+      scopeOrgUnitIds: ["*"],
+      action: "audit.content.export.download",
+      targetType: "content_export",
+      targetId: exportId,
+      targetOrgUnitId: "*",
+      reason: "one-time encrypted audit export download",
+      approvalId: "",
+      breakGlassId: "",
+      beforeSummary: { targetType: "content_export", targetId: exportId },
+      sourceIp: String(req.socket.remoteAddress || ""),
+      userAgentHash: sha256(String(req.headers["user-agent"] || "")),
+    };
+    await store.mutate((data) => {
+      const storedRecord = data.adminContentExports[exportId];
+      const storedToken = data.adminContentExportTokens[tokenHash];
+      if (!storedRecord || !storedToken
+          || storedRecord.consumedAt
+          || storedToken.consumedAt
+          || storedRecord.status === "consumed") {
+        throw new HttpError(
+          409,
+          "content_export_token_reused",
+          "The audit export download token has already been used",
+        );
+      }
+      if (Date.parse(storedRecord.expiresAt) <= Date.now()) {
+        throw new HttpError(410, "content_export_expired", "The audit export has expired");
+      }
+      const consumedAt = new Date().toISOString();
+      storedRecord.status = "consumed";
+      storedRecord.consumedAt = consumedAt;
+      storedRecord.updatedAt = consumedAt;
+      storedToken.consumedAt = consumedAt;
+      for (const request of Object.values(data.adminContentGovernanceRequests)) {
+        if (request.action === "audit.content.export.create"
+            && request.status === "succeeded"
+            && request.result?.exportId === exportId) {
+          request.result.status = "consumed";
+          request.result.consumedAt = consumedAt;
+          request.updatedAt = consumedAt;
+          delete request.result.downloadPath;
+        }
+      }
+      appendContentAudit(data, operation, "succeeded", {
+        afterSummary: {
+          exportId,
+          byteLength: artifact.length,
+        },
+      });
+    });
+    res.writeHead(200, {
+      "content-type": "application/octet-stream",
+      "content-length": artifact.length,
+      "content-disposition": `attachment; filename="${exportId}.mge.enc"`,
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+      "x-content-digest": sha256(artifact),
+    });
+    res.end(artifact);
+  }
+
   async function mePayload(req, current) {
     const { session } = current;
     let token = csrfCookie(req, config);
@@ -8021,6 +9799,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         payload.value.csrfToken,
         overview,
         payload.value.stepUp,
+        config.auditContentService.enabled,
       ));
       return;
     }
@@ -8126,6 +9905,106 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     );
     if (req.method === "GET" && approvalMatch) {
       await getApproval(req, res, approvalMatch[1]);
+      return;
+    }
+
+    if (req.method === "GET"
+        && url.pathname === "/api/v1/admin/audit/content/streams") {
+      await listAuditContentStreams(req, res, url.searchParams);
+      return;
+    }
+
+    const contentStreamMatch =
+      /^\/api\/v1\/admin\/audit\/content\/streams\/(str_[A-Za-z0-9_-]{43})$/.exec(
+        url.pathname,
+      );
+    if (req.method === "GET" && contentStreamMatch) {
+      await getAuditContentStream(req, res, contentStreamMatch[1]);
+      return;
+    }
+
+    if (req.method === "POST"
+        && url.pathname === "/api/v1/admin/audit/content/retention/run") {
+      await runAuditContentRetention(req, res);
+      return;
+    }
+
+    if (req.method === "GET"
+        && url.pathname === "/api/v1/admin/audit/content/deletions") {
+      await listAuditContentDeletions(req, res, url.searchParams);
+      return;
+    }
+
+    const contentDeletionVerifyMatch =
+      /^\/api\/v1\/admin\/audit\/content\/deletions\/(del_[A-Za-z0-9_-]{43})\/verify$/
+        .exec(url.pathname);
+    if (req.method === "POST" && contentDeletionVerifyMatch) {
+      await verifyAuditContentDeletion(req, res, contentDeletionVerifyMatch[1]);
+      return;
+    }
+
+    const contentDeletionMatch =
+      /^\/api\/v1\/admin\/audit\/content\/deletions\/(del_[A-Za-z0-9_-]{43})$/.exec(
+        url.pathname,
+      );
+    if (req.method === "GET" && contentDeletionMatch) {
+      await getAuditContentDeletion(req, res, contentDeletionMatch[1]);
+      return;
+    }
+
+    if (req.method === "POST"
+        && url.pathname === "/api/v1/admin/audit/content/legal-holds") {
+      await createAuditContentLegalHold(req, res);
+      return;
+    }
+
+    if (req.method === "GET"
+        && url.pathname === "/api/v1/admin/audit/content/legal-holds") {
+      await listAuditContentLegalHolds(req, res, url.searchParams);
+      return;
+    }
+
+    const contentLegalHoldReleaseMatch =
+      /^\/api\/v1\/admin\/audit\/content\/legal-holds\/(hld_[A-Za-z0-9_-]{43})\/release$/
+        .exec(url.pathname);
+    if (req.method === "POST" && contentLegalHoldReleaseMatch) {
+      await releaseAuditContentLegalHold(req, res, contentLegalHoldReleaseMatch[1]);
+      return;
+    }
+
+    if (req.method === "POST"
+        && url.pathname === "/api/v1/admin/audit/content/exports") {
+      await createAuditContentExport(req, res);
+      return;
+    }
+
+    if (req.method === "GET"
+        && url.pathname === "/api/v1/admin/audit/content/exports") {
+      await listAuditContentExports(req, res, url.searchParams);
+      return;
+    }
+
+    const contentExportDownloadMatch =
+      /^\/api\/v1\/admin\/audit\/content\/exports\/(cexp_[A-Za-z0-9_-]{24,96})\/download$/
+        .exec(url.pathname);
+    if (req.method === "GET" && contentExportDownloadMatch) {
+      await downloadAuditContentExport(req, res, contentExportDownloadMatch[1]);
+      return;
+    }
+
+    const contentReadMatch =
+      /^\/api\/v1\/admin\/audit\/content\/(ct_[A-Za-z0-9_-]{43})\/read$/.exec(
+        url.pathname,
+      );
+    if (req.method === "POST" && contentReadMatch) {
+      await readAuditContent(req, res, contentReadMatch[1]);
+      return;
+    }
+
+    const contentDeleteMatch =
+      /^\/api\/v1\/admin\/audit\/content\/(ct_[A-Za-z0-9_-]{43})$/.exec(url.pathname);
+    if (req.method === "DELETE" && contentDeleteMatch) {
+      await deleteAuditContent(req, res, contentDeleteMatch[1]);
       return;
     }
 
