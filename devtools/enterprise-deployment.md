@@ -469,10 +469,16 @@ SECURITY_TRUSTED_REGIONS=<逗号分隔的受信区域，可留空
 `GET /healthz` 和 `GET /api/v1/stats`；管理侧读取接口只返回稳定 finding/聚合，不返回
 正文或凭据。
 
-M5-A 只完成规则引擎核心：真实 Magpie 网关事件投递、管理台安全运营页面、告警/限流/
-阻断/吊销/设备锁定/工单联动、OTel/Prometheus/Grafana、生产 SIEM、值班手册、故障演练、
-备份恢复演练和生产验收均未完成。不能把本 profile 或 17 项隔离测试描述为 M5 已完成或
-企业生产就绪。
+M5-A 已完成规则引擎和网关元数据投递核心：网关通过默认关闭的 `securitydetect` 插件，
+按每次路由尝试发送严格 schema v1 元数据，不发送 Prompt、回复、Cookie、Authorization、
+网关密钥或原始 IP；连接 peer 地址先做 HMAC-SHA256。启用前必须同时配置
+`MAGPIE_SECURITY_DETECTION_*` 和匹配的 `SECURITY_INGEST_TOKEN`，队列饱和时丢弃事件而不是
+阻塞模型流量。网关投递新增 12 项 Go 测试通过，规则服务保持 17 项测试通过。
+
+管理台安全运营页面、告警/限流/阻断/吊销/设备锁定/工单联动、OTel/Prometheus/Grafana、
+生产 SIEM、值班手册、故障演练、备份恢复演练、Docker/Compose、真实反向代理来源地址、
+运行中端到端投递和生产验收均未完成。不能把本 profile、核心实现或隔离测试描述为 M5 已完成
+或企业生产就绪。
 
 ### 9.2 管理员流程
 

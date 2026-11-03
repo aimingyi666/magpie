@@ -27,8 +27,11 @@ func observeRequest(r *http.Request, kind string, body []byte) (*http.Request, *
 	}
 	// the agent it is recorded as, another magpie's own (callerFrom)
 	agent := callerOf(r).agent
+	who := access.Caller(r.Context())
+	source, _ := peerAddr(r)
 	q := usage.Request{Header: r.Header, Agent: agent, Session: observedSession(r.Header), Kind: observedKind(agent, kind, body),
-		Plain: local(r) && access.Caller(r.Context()).KeyID == "" && callerOf(r).via == ""}
+		CallerKeyID: who.KeyID, CallerKeyName: who.KeyName, CallerIssuerID: who.IssuerID(), SourceAddr: source,
+		Plain: local(r) && who.KeyID == "" && callerOf(r).via == ""}
 	o := &observed{}
 	for _, ob := range observers {
 		if w := ob.Begin(q); w != nil {
