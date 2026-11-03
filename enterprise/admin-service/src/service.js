@@ -30,6 +30,7 @@ import {
   normalizeUpstreamExportId,
   sha256ContentDigest,
 } from "./audit-content-governance.js";
+import { SecurityServiceClient } from "./security-client.js";
 import {
   normalizeAdminIdentity,
   OidcClient,
@@ -2243,6 +2244,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     || new AuditContentServiceClient(
       config.auditContentService || { enabled: false },
     );
+    const securityService = options.securityService
+      || new SecurityServiceClient(config.securityService || { enabled: false });
   const notificationChannelSettings = config.notifications?.channels || {};
   const notificationChannelTransport = options.notificationChannelTransport || (
     notificationChannelSettings.enabled
@@ -10393,6 +10396,68 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       return;
     }
 
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/security/alerts") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      if (!securityService?.enabled || !config.securityService?.enabled) {
+        json(res, 503, { ok: false, error: { code: "security_unavailable", message: "The security service is not configured" } });
+        return;
+      }
+      const result = await securityService.listAlerts(url.searchParams);
+      json(res, 200, result);
+      return;
+    }
+
+    const alertMatch = /^\/api\/v1\/admin\/security\/alerts\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+    if (req.method === "GET" && alertMatch) {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const alert = await securityService.getAlert(alertMatch[1]);
+      json(res, 200, alert);
+      return;
+    }
+
+    const alertActionMatch = /^\/api\/v1\/admin\/security\/alerts\/([A-Za-z0-9_-]+)\/(assign|acknowledge|resolve|reopen|audit)$/.exec(url.pathname);
+    if (alertActionMatch && req.method === "POST") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const alertId = alertActionMatch[1];
+      const action = alertActionMatch[2];
+      const body = await readJsonBody(req);
+      let result;
+      if (action === "assign") result = await securityService.assignAlert(alertId, body);
+      else if (action === "acknowledge") result = await securityService.acknowledgeAlert(alertId, body);
+      else if (action === "resolve") result = await securityService.resolveAlert(alertId, body);
+      else if (action === "reopen") result = await securityService.reopenAlert(alertId, body);
+      else if (action === "audit") result = await securityService.getAlertAudit(alertId);
+      json(res, 200, result);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/security/findings") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const result = await securityService.listFindings(url.searchParams);
+      json(res, 200, result);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/security/rules") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const result = await securityService.describeRules();
+      json(res, 200, result);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/security/metrics") {
+      const current = await currentSession(req);
+      if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+      const result = await securityService.getMetrics();
+      json(res, 200, result);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/v1/admin/audit-logs") {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
@@ -10454,6 +10519,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     store,
     oidc,
     authService,
+    securityService,
     modelCatalog,
     notificationOutbox,
     notificationDispatcher,

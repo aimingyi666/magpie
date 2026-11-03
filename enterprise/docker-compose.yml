@@ -486,7 +486,137 @@ services:
       retries: 3
       start_period: 10s
 
+    # M9 employee portal - web portal for one-click agent config, usage stats, tickets
+    employee-portal:
+      profiles: ["employee-portal"]
+      build:
+        context: ./employee-portal
+      container_name: magpie-enterprise-employee-portal
+      restart: unless-stopped
+      depends_on:
+        auth:
+          condition: service_healthy
+      ports:
+        - "${EMPLOYEE_PORTAL_BIND:-0.0.0.0}:${EMPLOYEE_PORTAL_HOST_PORT:-3007}:3007"
+      environment:
+        EMPLOYEE_PUBLIC_URL: ${EMPLOYEE_PUBLIC_URL:-http://127.0.0.1:3007}
+        EMPLOYEE_PORT: 3007
+        EMPLOYEE_BIND: 0.0.0.0
+        EMPLOYEE_STORE_PATH: /data/employee-portal.json
+        EMPLOYEE_SESSION_SECRET: ${EMPLOYEE_SESSION_SECRET:-}
+        EMPLOYEE_SECURE_COOKIE: ${EMPLOYEE_SECURE_COOKIE:-true}
+        EMPLOYEE_SESSION_TTL_HOURS: ${EMPLOYEE_SESSION_TTL_HOURS:-8}
+        EMPLOYEE_RATE_LIMIT_PER_MINUTE: ${EMPLOYEE_RATE_LIMIT_PER_MINUTE:-120}
+        ADMIN_MODEL_CATALOG_URL: http://admin:3445/api/v1/admin/model-catalog
+        ADMIN_MODEL_CATALOG_TOKEN: ${ADMIN_MODEL_CATALOG_TOKEN:-}
+        USAGE_SERVICE_URL: http://admin:3445/api/v1/admin/usage
+        USAGE_SERVICE_TOKEN: ${ADMIN_MODEL_CATALOG_TOKEN:-}
+      volumes:
+        - employee-portal-data:/data
+      healthcheck:
+        test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3007/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+        interval: 30s
+        timeout: 5s
+        retries: 3
+        start_period: 10s
+
+    # Nginx reverse proxy - public-facing entrypoint with TLS termination
+    nginx:
+      profiles: ["nginx"]
+      image: nginx:alpine
+      container_name: magpie-enterprise-nginx
+      restart: unless-stopped
+      ports:
+        - "${NGINX_HOST_PORT:-80}:80"
+        - "${NGINX_SSL_PORT:-443}:443"
+      volumes:
+        - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+        - ./nginx/certs:/etc/nginx/certs:ro
+      depends_on:
+        employee-portal:
+          condition: service_healthy
+        admin:
+          condition: service_healthy
+        auth:
+          condition: service_healthy
+    # Postgres - enterprise metadata database
+    postgres:
+      profiles: ["postgres"]
+      image: postgres:16-alpine
+      container_name: magpie-enterprise-postgres
+      restart: unless-stopped
+      ports:
+        - "${POSTGRES_HOST_PORT:-5432}:5432"
+      environment:
+        POSTGRES_USER: ${POSTGRES_USER:-magpie}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-magpie-secret}
+        POSTGRES_DB: ${POSTGRES_DB:-magpie_enterprise}
+      volumes:
+        - postgres-data:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U magpie -d magpie_enterprise"]
+        interval: 30s
+        timeout: 5s
+        retries: 3
+        start_period: 10s
+    # Redis - session cache and message broker
+    redis:
+      profiles: ["redis"]
+      image: redis:7-alpine
+      container_name: magpie-enterprise-redis
+      restart: unless-stopped
+      ports:
+        - "${REDIS_HOST_PORT:-6379}:6379"
+      command: ["redis-server", "--appendonly", "yes"]
+      volumes:
+        - redis-data:/data
+      healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 30s
+        timeout: 3s
+        retries: 3
+        start_period: 5s
+    # Prometheus - metrics collection
+    prometheus:
+      profiles: ["monitoring"]
+      image: prom/prometheus:latest
+      container_name: magpie-enterprise-prometheus
+      restart: unless-stopped
+      ports:
+        - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+      volumes:
+        - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+        - prometheus-data:/prometheus
+      command: --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
+      healthcheck:
+        test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+        interval: 30s
+        timeout: 5s
+        retries: 3
+        start_period: 10s
+    # Grafana - observability dashboards
+    grafana:
+      profiles: ["monitoring"]
+      image: grafana/grafana:latest
+      container_name: magpie-enterprise-grafana
+      restart: unless-stopped
+      ports:
+        - "${GRAFANA_HOST_PORT:-3008}:3000"
+      environment:
+        GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+        GF_USERS_ALLOW_SIGN_UP: "false"
+      volumes:
+        - grafana-data:/var/lib/grafana
+      depends_on:
+        prometheus:
+          condition: service_healthy
+
 volumes:
+  employee-portal-data:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
   magpie-data:
   auth-data:
   admin-data:

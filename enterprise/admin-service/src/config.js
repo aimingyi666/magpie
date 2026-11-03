@@ -380,6 +380,20 @@ export function loadConfig(env = process.env) {
         128 * 1024 * 1024,
       ),
     },
+     securityService: {
+       enabled: Boolean(String(env.ADMIN_SECURITY_SERVICE_URL || "").trim()),
+       url: String(env.ADMIN_SECURITY_SERVICE_URL || "").trim()
+         ? url(env, "ADMIN_SECURITY_SERVICE_URL")
+         : "",
+       token: String(env.ADMIN_SECURITY_SERVICE_TOKEN || "").trim(),
+       timeoutMs: integer(
+         env,
+         "ADMIN_SECURITY_SERVICE_TIMEOUT_MS",
+         5000,
+         500,
+         30000,
+       ),
+     },
     approvalCallback: {
       enabled: Boolean(approvalCallbackSecret),
       secret: approvalCallbackSecret,
