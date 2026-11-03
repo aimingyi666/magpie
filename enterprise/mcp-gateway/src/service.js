@@ -257,7 +257,7 @@ export async function createMcpGatewayServer(config, {
   store = new McpRegistryStore(config.storePath),
   audit = new McpAuditLog(config.auditPath),
   upstream = new UpstreamMcpClient(config),
-  permissionStore = new McpPermissionStore(store),
+  permissionStore = new McpPermissionStore(path.join(path.dirname(config.storePath), "mcp-permissions.json")),
   callAuditStore = new McpCallAuditStore(config.auditPath || path.join(path.dirname(config.storePath), "mcp-call-audit.jsonl")),
   resolver,
   logger = () => {},
@@ -271,6 +271,8 @@ export async function createMcpGatewayServer(config, {
     logger,
   });
   await registry.initialize();
+  await permissionStore.load();
+  await callAuditStore.load();
 
   const adminLimiter = new FixedWindowRateLimiter(config.rateLimitPerMinute);
   const dataLimiter = new FixedWindowRateLimiter(config.rateLimitPerMinute);

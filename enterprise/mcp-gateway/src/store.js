@@ -8,6 +8,7 @@ export const TOOL_ACCESS = Object.freeze(["allow", "deny"]);
 export const RISK_LEVELS = Object.freeze(["low", "medium", "high", "critical"]);
 
 const STORE_FIELDS = new Set(["version", "servers", "clients", "idempotency"]);
+const STORE_FIELDS_WITH_PERMS = new Set(["version", "servers", "clients", "idempotency", "mcpPermissions"]);
 const SERVER_FIELDS = new Set([
   "id",
   "namespace",
@@ -228,8 +229,9 @@ export function emptyStore() {
 }
 
 export function validateStore(data) {
-  if (!exactFields(data, STORE_FIELDS)) {
-    throw new Error("MCP registry must be an object with exactly the schema fields");
+  const fields = "mcpPermissions" in data ? STORE_FIELDS_WITH_PERMS : STORE_FIELDS;
+  if (!exactFields(data, fields)) {
+    throw new Error("MCP registry with permissions must include only schema fields plus mcpPermissions");
   }
   if (data.version !== STORE_SCHEMA_VERSION) {
     throw new Error(`MCP registry schema ${data.version} is unsupported`);
@@ -238,6 +240,9 @@ export function validateStore(data) {
       || !plainObject(data.clients)
       || !plainObject(data.idempotency)) {
     throw new Error("MCP registry collection types are invalid");
+  }
+  if ("mcpPermissions" in data && !plainObject(data.mcpPermissions)) {
+    throw new Error("MCP registry mcpPermissions must be an object");
   }
   const namespaces = new Set();
   for (const [serverId, server] of Object.entries(data.servers)) {

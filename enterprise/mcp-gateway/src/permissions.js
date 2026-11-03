@@ -5,6 +5,9 @@
  * role + org unit.
  */
 
+import fs from "node:fs/promises";
+import path from "node:path";
+
 export const PERMISSION_FIELDS = new Set([
   "id",
   "mcpServerId",
@@ -15,13 +18,6 @@ export const PERMISSION_FIELDS = new Set([
   "description",
   "createdAt",
   "createdBy",
-]);
-
-export const ROLE_SCOPE_FIELDS = new Set([
-  "allowedRoles",
-  "allowedOrgUnits",
-  "deniedRoles",
-  "deniedOrgUnits",
 ]);
 
 const ID_PATTERN = /^mcp_perm_[a-z0-9]{16,64}$/;
@@ -58,11 +54,15 @@ function uniqueTextArray(value, maximum, validate) {
     && new Set(value).size === value.length;
 }
 
+export function emptyPermissions() {
+  return {};
+}
+
 function validatePermission(permissionId, permission) {
   if (!exactFields(permission, PERMISSION_FIELDS)
       || permission.id !== permissionId
       || !ID_PATTERN.test(permissionId)) {
-    throw new Error(`MCP permission ${permissionId} is invalid`);
+    throw new Error("MCP permission " + permissionId + " is invalid");
   }
   if (!safeText(permission.mcpServerId, 200)
       || !uniqueTextArray(permission.allowedRoles, 100, identityId)
@@ -73,86 +73,104 @@ function validatePermission(permissionId, permission) {
       || !safeText(permission.createdBy, 128)
       || typeof permission.createdAt !== "string"
       || !Date.parse(permission.createdAt)) {
-    throw new Error(`MCP permission ${permissionId} contains invalid fields`);
+    throw new Error("MCP permission " + permissionId + " contains invalid fields");
   }
   return permission;
 }
 
-export function emptyPermissions() {
-  return {};
+function validatePermissions(data) {
+  if (!plainObject(data)) {
+    throw new Error("MCP permissions must be an object");
+  }
+  for (const [permissionId, permission] of Object.entries(data)) {
+    validatePermission(permissionId, permission);
+  }
+  return data;
+}
+
+export async function writeAtomicJson(file, value) {
+  await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+  const temporary = file + "." + process.pid + "." + Date.now() + "." + Math.random().toString(16).slice(2) + ".tmp";
+  const handle = await fs.open(temporary, "wx", 0o600);
+  try {
+    await handle.writeFile(JSON.stringify(value, null, 2) + "\n", "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await fs.rename(temporary, file);
 }
 
 export class McpPermissionStore {
-  constructor(store) {
-    this.store = store;
+  constructor(file) {
+    this.file = file;
+    this.data = {};
+    this.queue = Promise.resolve();
   }
 
-  get storeKey() {
-    return "mcpPermissions";
-  }
-
-  async read(fn) {
-    await this.store.read((data) => {
-      if (!(this.storeKey in data)) {
-        data[this.storeKey] = {};
-      }
-      return fn(data[this.storeKey]);
-    });
+  async load() {
+    try {
+      this.data = validatePermissions(JSON.parse(await fs.readFile(this.file, "utf8")));
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+      await writeAtomicJson(this.file, this.data);
+    }
+    return this.data;
   }
 
   async mutate(fn) {
-    const result = await this.store.mutate((data) => {
-      if (!(this.storeKey in data)) {
-        data[this.storeKey] = {};
-      }
-      const draft = data[this.storeKey];
-      const outcome = fn(draft);
-      return outcome;
+    const run = this.queue.then(async () => {
+      const draft = structuredClone(this.data);
+      const result = await fn(draft);
+      validatePermissions(draft);
+      await writeAtomicJson(this.file, draft);
+      this.data = draft;
+      return result;
     });
-    return result;
+    this.queue = run.catch(() => {});
+    return run;
   }
 
   async list() {
-    return await this.read((permissions) => {
-      return Object.values(permissions);
-    });
+    await this.queue;
+    return Object.values(this.data);
   }
 
   async get(permissionId) {
-    return await this.read((permissions) => {
-      return permissions[permissionId] ?? null;
-    });
+    await this.queue;
+    return this.data[permissionId] ?? null;
   }
 
-  async create(permissionId, permission) {
+  async create(permissionId, input, actor = "admin-service") {
     const now = new Date().toISOString();
-    const complete = {
+    const permission = {
       id: permissionId,
-      mcpServerId: permission.mcpServerId,
-      allowedRoles: permission.allowedRoles ?? [],
-      allowedOrgUnits: permission.allowedOrgUnits ?? [],
-      deniedRoles: permission.deniedRoles ?? [],
-      deniedOrgUnits: permission.deniedOrgUnits ?? [],
-      description: permission.description ?? "",
-      createdAt: permission.createdAt ?? now,
-      createdBy: permission.createdBy ?? "admin-service",
+      mcpServerId: input.mcpServerId,
+      allowedRoles: input.allowedRoles ?? [],
+      allowedOrgUnits: input.allowedOrgUnits ?? [],
+      deniedRoles: input.deniedRoles ?? [],
+      deniedOrgUnits: input.deniedOrgUnits ?? [],
+      description: input.description ?? "",
+      createdAt: input.createdAt ?? now,
+      createdBy: input.createdBy ?? actor,
     };
-    validatePermission(permissionId, complete);
+    validatePermission(permissionId, permission);
     return await this.mutate((permissions) => {
       if (permissionId in permissions) {
         throw new McpPermissionError("Permission already exists", { statusCode: 409 });
       }
-      permissions[permissionId] = complete;
-      return complete;
+      permissions[permissionId] = permission;
+      return permission;
     });
   }
 
   async update(permissionId, patch) {
-    const existing = await this.get(permissionId);
+    await this.queue;
+    const existing = this.data[permissionId];
     if (!existing) {
       throw new McpPermissionError("Permission not found", { statusCode: 404 });
     }
-    const merged = { ...existing, ...patch };
+    const merged = { ...existing, ...patch, id: permissionId };
     validatePermission(permissionId, merged);
     return await this.mutate((permissions) => {
       permissions[permissionId] = merged;
@@ -161,7 +179,8 @@ export class McpPermissionStore {
   }
 
   async delete(permissionId) {
-    const existing = await this.get(permissionId);
+    await this.queue;
+    const existing = this.data[permissionId];
     if (!existing) {
       throw new McpPermissionError("Permission not found", { statusCode: 404 });
     }
@@ -191,7 +210,6 @@ export class McpPermissionChecker {
   async canAccess({ mcpServerId, roles, orgUnits }) {
     const permissions = await this.permissionStore.list();
 
-    // Step 1: explicit deny wins.
     const denies = permissions.filter((perm) => perm.mcpServerId === mcpServerId)
       .some((perm) => {
         if (perm.deniedRoles.some((r) => roles.includes(r))) return true;
@@ -200,7 +218,6 @@ export class McpPermissionChecker {
       });
     if (denies) return { allowed: false, reason: "denied" };
 
-    // Step 2: allow rules matching role + org unit.
     const allows = permissions.filter((perm) => perm.mcpServerId === mcpServerId)
       .some((perm) => {
         const roleMatch = perm.allowedRoles.length === 0
@@ -211,7 +228,8 @@ export class McpPermissionChecker {
       });
     if (allows) return { allowed: true };
 
-    // Step 3: deny by default.
     return { allowed: false, reason: "no_rule" };
   }
+
+
 }
