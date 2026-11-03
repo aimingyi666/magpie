@@ -91,6 +91,13 @@ export function loadConfig(env = process.env) {
       1,
       2_000_000,
     ),
+    maxAlerts: integer(
+      env,
+      "SECURITY_MAX_ALERTS",
+      200_000,
+      1,
+      2_000_000,
+    ),
     maxStoreBytes: integer(
       env,
       "SECURITY_MAX_STORE_BYTES",

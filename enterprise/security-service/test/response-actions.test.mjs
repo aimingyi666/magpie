@@ -850,10 +850,13 @@ test("v1 stores migrate to v2 response collections on startup", async () => {
   const app = await start(root);
   try {
     const migrated = JSON.parse(fs.readFileSync(storePath, "utf8"));
-    assert.equal(migrated.version, 2);
+    assert.equal(migrated.version, 3);
     assert.deepEqual(migrated.responseActions, {});
     assert.deepEqual(migrated.responseAudits, {});
     assert.deepEqual(migrated.responseIdempotency, {});
+    assert.deepEqual(migrated.alerts, {});
+    assert.deepEqual(migrated.alertAudits, {});
+    assert.deepEqual(migrated.alertIdempotency, {});
     const stats = await responseJson(await request(app.base, "/api/v1/stats"));
     assert.equal(stats.responseActionCount, 0);
   } finally {

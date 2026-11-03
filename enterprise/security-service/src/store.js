@@ -3,6 +3,19 @@ import fs from "node:fs/promises";
 import path from "node:path";
 
 import {
+  ALERT_OPERATIONS,
+  ALERT_SLA_SECONDS,
+  AlertValidationError,
+  alertAuditEntry,
+  alertConflict,
+  alertIdFor,
+  isAlertId,
+  normalizeAlertCreateRequest,
+  validateAlertAuditChain,
+  validateAlertIdempotencyRecord,
+  validateAlertRecord,
+} from "./alerts.js";
+import {
   canonicalJson,
   hasSecretMaterial,
   plainObject,
@@ -24,7 +37,7 @@ import {
   validateResponseIdempotencyRecord,
 } from "./response-actions.js";
 
-export const SECURITY_STORE_SCHEMA_VERSION = 2;
+export const SECURITY_STORE_SCHEMA_VERSION = 3;
 const FINDING_ID_PATTERN = /^sdf_[a-f0-9]{24}$/;
 const AGGREGATE_ID_PATTERN = /^sag_[a-f0-9]{24}$/;
 const DEDUPE_KEY_PATTERN = /^sdk_[a-f0-9]{24}$/;
@@ -37,6 +50,9 @@ const STATE_FIELDS = new Set([
   "findings",
   "aggregates",
   "suppressions",
+  "alerts",
+  "alertAudits",
+  "alertIdempotency",
   "responseActions",
   "responseAudits",
   "responseIdempotency",
@@ -197,6 +213,9 @@ function emptyStore() {
     findings: {},
     aggregates: {},
     suppressions: {},
+    alerts: {},
+    alertAudits: {},
+    alertIdempotency: {},
     responseActions: {},
     responseAudits: {},
     responseIdempotency: {},
@@ -386,6 +405,171 @@ function validateSuppression(dedupeKey, suppression) {
   }
 }
 
+function alertSourceContext(alert, state) {
+  if (alert.source.type === "finding") {
+    const record = state.findings[alert.source.id];
+    return record ? { finding: record.finding, aggregate: null } : null;
+  }
+  const aggregate = state.aggregates[alert.source.id];
+  if (!aggregate) return null;
+  const record = state.findings[aggregate.lastFindingId];
+  return record ? { finding: record.finding, aggregate } : null;
+}
+
+function alertMatchesSource(alert, context) {
+  if (!context) return false;
+  const { finding, aggregate } = context;
+  if (finding.organizationId !== alert.organizationId
+      || finding.ruleId !== alert.ruleId
+      || finding.severity !== alert.severity
+      || finding.subject.type !== alert.subject.type
+      || finding.subject.id !== alert.subject.id
+      || finding.detectedAt !== alert.detectedAt
+      || (finding.subject.orgUnitId || "") !== (alert.subject.orgUnitId || "")
+      || (aggregate
+        && (aggregate.organizationId !== alert.organizationId
+          || aggregate.ruleId !== alert.ruleId
+          || aggregate.subjectType !== alert.subject.type
+          || aggregate.subjectId !== alert.subject.id))) {
+    return false;
+  }
+  const expectedId = alertIdFor({
+    organizationId: alert.organizationId,
+    source: { type: alert.source.type, id: alert.source.id },
+    ruleId: alert.ruleId,
+    severity: alert.severity,
+  });
+  return expectedId === alert.alertId;
+}
+
+const ALERT_OPERATION_EVENTS = new Map([
+  ["create", "opened"],
+  ["assign", "assigned"],
+  ["acknowledge", "acknowledged"],
+  ["resolve", "resolved"],
+  ["reopen", "reopened"],
+]);
+
+function validateAlertState(data, limits) {
+  if (Object.keys(data.alerts).length > limits.maxAlerts) {
+    throw new SecurityStoreError(
+      "security_store_invalid",
+      "security store exceeds the configured alert limit",
+    );
+  }
+  const recordsByAlert = new Map();
+  for (const [alertId, rawAlert] of Object.entries(data.alerts)) {
+    let alert;
+    try {
+      alert = validateAlertRecord(rawAlert);
+    } catch {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert ${alertId} is invalid`,
+      );
+    }
+    if (alert.alertId !== alertId) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert ${alertId} has a mismatched id`,
+      );
+    }
+    const context = alertSourceContext(alert, data);
+    if (!alertMatchesSource(alert, context)) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert ${alertId} does not match its source`,
+      );
+    }
+    const expectedDue = new Date(
+      Date.parse(alert.detectedAt) + ALERT_SLA_SECONDS[alert.severity] * 1000,
+    ).toISOString();
+    if (alert.slaDueAt !== expectedDue) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert ${alertId} has an invalid SLA deadline`,
+      );
+    }
+    data.alerts[alertId] = alert;
+  }
+
+  for (const [alertId, audits] of Object.entries(data.alertAudits)) {
+    const alert = data.alerts[alertId];
+    if (!alert) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert audits ${alertId} do not reference a stored alert`,
+      );
+    }
+    try {
+      validateAlertAuditChain(alert, audits);
+    } catch {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert audits ${alertId} are invalid`,
+      );
+    }
+  }
+  for (const alertId of Object.keys(data.alerts)) {
+    if (!data.alertAudits[alertId]) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert ${alertId} has no audit chain`,
+      );
+    }
+  }
+
+  for (const [keyHash, rawRecord] of Object.entries(data.alertIdempotency)) {
+    let record;
+    try {
+      record = validateAlertIdempotencyRecord(keyHash, rawRecord);
+    } catch {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert idempotency record ${keyHash} is invalid`,
+      );
+    }
+    const alert = data.alerts[record.alertId];
+    if (!alert) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `alert idempotency record ${keyHash} references a missing alert`,
+      );
+    }
+    const records = recordsByAlert.get(record.alertId) || [];
+    records.push(record);
+    recordsByAlert.set(record.alertId, records);
+  }
+  for (const [alertId, alert] of Object.entries(data.alerts)) {
+    const records = recordsByAlert.get(alertId) || [];
+    const audits = data.alertAudits[alertId];
+    const used = new Set();
+    for (const record of records) {
+      const expectedEvent = ALERT_OPERATION_EVENTS.get(record.operation);
+      const index = audits.findIndex((audit, candidateIndex) => (
+        !used.has(candidateIndex)
+        && audit.event === expectedEvent
+        && audit.at === record.createdAt
+      ));
+      if (index < 0) {
+        throw new SecurityStoreError(
+          "security_store_invalid",
+          `alert ${alertId} idempotency operation does not match its audit chain`,
+        );
+      }
+      used.add(index);
+    }
+    for (let index = 1; index < audits.length; index += 1) {
+      if (!used.has(index)) {
+        throw new SecurityStoreError(
+          "security_store_invalid",
+          `alert ${alertId} transition has no idempotency record`,
+        );
+      }
+    }
+  }
+}
+
 function responseSourceContext(action, state) {
   if (action.source.type === "finding") {
     const record = state.findings[action.source.id];
@@ -557,6 +741,9 @@ function validateLoadedStateV2(data, limits) {
     "findings",
     "aggregates",
     "suppressions",
+    "alerts",
+    "alertAudits",
+    "alertIdempotency",
     "responseActions",
     "responseAudits",
     "responseIdempotency",
@@ -632,6 +819,7 @@ function validateLoadedStateV2(data, limits) {
       );
     }
   }
+  validateAlertState(data, limits);
   validateResponseState(data, limits);
   return data;
 }
@@ -641,9 +829,23 @@ function validateLoadedState(data, limits) {
     const migrated = {
       ...data,
       version: SECURITY_STORE_SCHEMA_VERSION,
+      alerts: {},
+      alertAudits: {},
+      alertIdempotency: {},
       responseActions: {},
       responseAudits: {},
       responseIdempotency: {},
+    };
+    validateLoadedStateV2(migrated, limits);
+    return { state: migrated, migrated: true };
+  }
+  if (plainObject(data) && data.version === 2) {
+    const migrated = {
+      ...data,
+      version: SECURITY_STORE_SCHEMA_VERSION,
+      alerts: {},
+      alertAudits: {},
+      alertIdempotency: {},
     };
     validateLoadedStateV2(migrated, limits);
     return { state: migrated, migrated: true };
@@ -665,6 +867,7 @@ export class SecurityStore {
     this.path = path.resolve(String(storePath));
     this.maxEvents = limits.maxEvents ?? 1_000_000;
     this.maxFindings = limits.maxFindings ?? 2_000_000;
+    this.maxAlerts = limits.maxAlerts ?? 2_000_000;
     this.maxResponseActions = limits.maxResponseActions ?? 200_000;
     this.maxStoreBytes = limits.maxStoreBytes ?? 536_870_912;
     this.now = typeof limits.now === "function" ? limits.now : Date.now;
@@ -771,6 +974,7 @@ export class SecurityStore {
           duplicate: true,
           findings: [],
           aggregateIds: [],
+          alertIds: [],
         };
       }
       if (Object.keys(this.state.events).length >= this.maxEvents) {
@@ -808,6 +1012,7 @@ export class SecurityStore {
 
       const storedFindings = [];
       const aggregateIds = [];
+      const alertIds = [];
       const windowSeconds = options.suppressionWindowSeconds ?? 300;
       const windowMs = windowSeconds * 1000;
       for (const rawFinding of evaluated) {
@@ -883,6 +1088,17 @@ export class SecurityStore {
               : new Date(now.getTime() + windowMs).toISOString(),
           };
         }
+
+        if (!suppressed && ["high", "critical"].includes(finding.severity)) {
+          const alert = this.#openAlertInState(
+            next,
+            { type: "finding", id: finding.findingId },
+            finding,
+            receivedAt,
+            options.requestId || "req_security_system",
+          );
+          if (alert) alertIds.push(alert.alertId);
+        }
       }
 
       await this.#persist(next);
@@ -891,7 +1107,458 @@ export class SecurityStore {
         duplicate: false,
         findings: structuredClone(storedFindings),
         aggregateIds: [...new Set(aggregateIds)],
+        alertIds: [...new Set(alertIds)],
       };
+    });
+  }
+
+  #alertTime(value) {
+    const now = value instanceof Date
+      ? value
+      : new Date(value === undefined ? this.now() : value);
+    if (!Number.isFinite(now.getTime())) {
+      throw new AlertValidationError(400, "invalid_evaluation_time", "Time is invalid");
+    }
+    return now.toISOString();
+  }
+
+  #alertState() {
+    return {
+      ...this.state,
+      alerts: { ...this.state.alerts },
+      alertAudits: { ...this.state.alertAudits },
+      alertIdempotency: { ...this.state.alertIdempotency },
+    };
+  }
+
+  #appendAlertAudit(state, input) {
+    const chain = state.alertAudits[input.alertId] || [];
+    const audit = alertAuditEntry({
+      ...input,
+      sequence: chain.length + 1,
+      previousHash: chain.at(-1)?.hash || "0".repeat(64),
+    });
+    state.alertAudits[input.alertId] = [...chain, audit];
+    return audit;
+  }
+
+  #openAlertInState(state, source, finding, at, requestId, options = {}) {
+    const alertId = alertIdFor({
+      organizationId: finding.organizationId,
+      source,
+      ruleId: finding.ruleId,
+      severity: finding.severity,
+    });
+    if (state.alerts[alertId]) return null;
+    if (Object.keys(state.alerts).length >= this.maxAlerts) {
+      throw new SecurityStoreError(
+        "security_alert_capacity_exceeded",
+        "The configured alert capacity has been reached",
+        507,
+      );
+    }
+    const reason = options.reason || "Automatically opened from a detection finding";
+    const assigneeSubjectId = options.assigneeSubjectId || "";
+    const actorSubjectId = options.actorSubjectId || "system";
+    const alert = {
+      schemaVersion: 1,
+      alertId,
+      status: "open",
+      severity: finding.severity,
+      ruleId: finding.ruleId,
+      organizationId: finding.organizationId,
+      source,
+      subject: { ...finding.subject },
+      detectedAt: finding.detectedAt,
+      createdAt: at,
+      updatedAt: at,
+      revision: 1,
+      assigneeSubjectId,
+      acknowledgedAt: "",
+      resolvedAt: "",
+      resolutionCode: "",
+      slaDueAt: new Date(
+        Date.parse(finding.detectedAt) + ALERT_SLA_SECONDS[finding.severity] * 1000,
+      ).toISOString(),
+      lastRequestId: requestId,
+    };
+    state.alerts[alertId] = alert;
+    state.alertAudits[alertId] = [];
+    this.#appendAlertAudit(state, {
+      alertId,
+      event: "opened",
+      status: "open",
+      actorSubjectId,
+      reason,
+      assigneeSubjectId,
+      resolutionCode: "",
+      at,
+      requestId,
+    });
+    return alert;
+  }
+
+  #alert(actionId, organizationId) {
+    const alert = this.state.alerts[actionId];
+    if (!alert || alert.organizationId !== organizationId) {
+      throw new AlertValidationError(404, "alert_not_found", "Alert not found");
+    }
+    return alert;
+  }
+
+  #alertReplay(keyHash, requestDigest, operation, organizationId) {
+    const record = this.state.alertIdempotency[keyHash];
+    if (!record) return null;
+    if (record.operation !== operation || record.requestDigest !== requestDigest) {
+      alertConflict(
+        "The Idempotency-Key was already used for a different request",
+        "alert_idempotency_conflict",
+      );
+    }
+    const alert = this.state.alerts[record.alertId];
+    if (!alert || alert.organizationId !== organizationId) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        "alert idempotency state is inconsistent",
+      );
+    }
+    const audits = this.state.alertAudits[record.alertId] || [];
+    const expectedEvent = ALERT_OPERATION_EVENTS.get(record.operation);
+    const auditIndex = audits.findIndex((audit) => (
+      audit.event === expectedEvent && audit.at === record.createdAt
+    ));
+    if (auditIndex < 0) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        "alert idempotency state has no matching audit",
+      );
+    }
+    let assigneeSubjectId = "";
+    let acknowledgedAt = "";
+    let resolvedAt = "";
+    let resolutionCode = "";
+    for (const audit of audits.slice(0, auditIndex + 1)) {
+      if (audit.event === "opened" || audit.event === "assigned") {
+        assigneeSubjectId = audit.assigneeSubjectId;
+      } else if (audit.event === "acknowledged") {
+        acknowledgedAt = audit.at;
+      } else if (audit.event === "resolved") {
+        if (acknowledgedAt === "") acknowledgedAt = audit.at;
+        resolvedAt = audit.at;
+        resolutionCode = audit.resolutionCode;
+      } else if (audit.event === "reopened") {
+        acknowledgedAt = "";
+        resolvedAt = "";
+        resolutionCode = "";
+      }
+    }
+    const audit = audits[auditIndex];
+    return {
+      alert: {
+        ...alert,
+        status: audit.status,
+        updatedAt: audit.at,
+        revision: auditIndex + 1,
+        assigneeSubjectId,
+        acknowledgedAt,
+        resolvedAt,
+        resolutionCode,
+        lastRequestId: audit.requestId,
+      },
+      replayed: true,
+    };
+  }
+
+  #recordAlertIdempotency(state, input) {
+    state.alertIdempotency[input.keyHash] = {
+      keyHash: input.keyHash,
+      alertId: input.alertId,
+      operation: input.operation,
+      requestDigest: input.requestDigest,
+      createdAt: input.at,
+    };
+  }
+
+  #assertAlertOperationInput(input) {
+    if (!/^[a-f0-9]{64}$/.test(input.idempotencyKeyHash || "")
+        || !/^[a-f0-9]{64}$/.test(input.requestDigest || "")) {
+      throw new AlertValidationError(
+        400,
+        "invalid_alert_operation",
+        "Alert operation hashes are invalid",
+      );
+    }
+    if (typeof input.requestId !== "string"
+        || !/^req_[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(input.requestId)) {
+      throw new AlertValidationError(
+        400,
+        "invalid_alert_operation",
+        "Alert request id is invalid",
+      );
+    }
+  }
+
+  createAlert(request, input) {
+    return this.#enqueue(async () => {
+      this.#assertAlertOperationInput(input);
+      const at = this.#alertTime(input.now);
+      const replay = this.#alertReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "create",
+        request.organizationId,
+      );
+      if (replay) return replay;
+      const context = request.source.type === "finding"
+        ? responseSourceContext({ source: request.source }, this.state)
+        : responseSourceContext({ source: request.source }, this.state);
+      if (!context
+          || context.finding.organizationId !== request.organizationId
+          || (context.aggregate
+            && context.aggregate.organizationId !== request.organizationId)) {
+        throw new AlertValidationError(
+          400,
+          "alert_source_invalid",
+          "The source finding or aggregate does not exist in the organization",
+        );
+      }
+      const alertId = alertIdFor({
+        organizationId: request.organizationId,
+        source: request.source,
+        ruleId: context.finding.ruleId,
+        severity: context.finding.severity,
+      });
+      if (this.state.alerts[alertId]) {
+        alertConflict("An alert already exists for this source", "alert_already_exists");
+      }
+      const state = this.#alertState();
+      const alert = this.#openAlertInState(
+        state,
+        request.source,
+        context.finding,
+        at,
+        input.requestId,
+        {
+          actorSubjectId: request.actorSubjectId,
+          assigneeSubjectId: request.assigneeSubjectId,
+          reason: request.reason,
+        },
+      );
+      if (!alert) {
+        alertConflict("An alert already exists for this source", "alert_already_exists");
+      }
+      this.#recordAlertIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        alertId,
+        operation: "create",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { alert: structuredClone(alert), replayed: false };
+    });
+  }
+
+  assignAlert(alertId, request, input) {
+    return this.#enqueue(async () => {
+      this.#assertAlertOperationInput(input);
+      const at = this.#alertTime(input.now);
+      const replay = this.#alertReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "assign",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const alert = this.#alert(alertId, input.organizationId);
+      if (alert.status === "resolved") {
+        alertConflict("A resolved alert must be reopened before assignment");
+      }
+      if (alert.assigneeSubjectId === request.assigneeSubjectId) {
+        alertConflict("The alert already has this assignee", "alert_assignee_unchanged");
+      }
+      const state = this.#alertState();
+      const next = {
+        ...alert,
+        assigneeSubjectId: request.assigneeSubjectId,
+        updatedAt: at,
+        revision: alert.revision + 1,
+        lastRequestId: input.requestId,
+      };
+      state.alerts[alertId] = next;
+      this.#appendAlertAudit(state, {
+        alertId,
+        event: "assigned",
+        status: next.status,
+        actorSubjectId: request.actorSubjectId,
+        reason: request.reason,
+        assigneeSubjectId: request.assigneeSubjectId,
+        resolutionCode: "",
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordAlertIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        alertId,
+        operation: "assign",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { alert: structuredClone(next), replayed: false };
+    });
+  }
+
+  acknowledgeAlert(alertId, request, input) {
+    return this.#enqueue(async () => {
+      this.#assertAlertOperationInput(input);
+      const at = this.#alertTime(input.now);
+      const replay = this.#alertReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "acknowledge",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const alert = this.#alert(alertId, input.organizationId);
+      if (alert.status !== "open") {
+        alertConflict("Only an open alert can be acknowledged");
+      }
+      const state = this.#alertState();
+      const next = {
+        ...alert,
+        status: "acknowledged",
+        acknowledgedAt: at,
+        updatedAt: at,
+        revision: alert.revision + 1,
+        lastRequestId: input.requestId,
+      };
+      state.alerts[alertId] = next;
+      this.#appendAlertAudit(state, {
+        alertId,
+        event: "acknowledged",
+        status: "acknowledged",
+        actorSubjectId: request.actorSubjectId,
+        reason: request.reason,
+        assigneeSubjectId: "",
+        resolutionCode: "",
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordAlertIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        alertId,
+        operation: "acknowledge",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { alert: structuredClone(next), replayed: false };
+    });
+  }
+
+  resolveAlert(alertId, request, input) {
+    return this.#enqueue(async () => {
+      this.#assertAlertOperationInput(input);
+      const at = this.#alertTime(input.now);
+      const replay = this.#alertReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "resolve",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const alert = this.#alert(alertId, input.organizationId);
+      if (!["open", "acknowledged"].includes(alert.status)) {
+        alertConflict("Only an open or acknowledged alert can be resolved");
+      }
+      const state = this.#alertState();
+      const next = {
+        ...alert,
+        status: "resolved",
+        acknowledgedAt: alert.acknowledgedAt || at,
+        resolvedAt: at,
+        resolutionCode: request.resolutionCode,
+        updatedAt: at,
+        revision: alert.revision + 1,
+        lastRequestId: input.requestId,
+      };
+      state.alerts[alertId] = next;
+      this.#appendAlertAudit(state, {
+        alertId,
+        event: "resolved",
+        status: "resolved",
+        actorSubjectId: request.actorSubjectId,
+        reason: request.reason,
+        assigneeSubjectId: "",
+        resolutionCode: request.resolutionCode,
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordAlertIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        alertId,
+        operation: "resolve",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { alert: structuredClone(next), replayed: false };
+    });
+  }
+
+  reopenAlert(alertId, request, input) {
+    return this.#enqueue(async () => {
+      this.#assertAlertOperationInput(input);
+      const at = this.#alertTime(input.now);
+      const replay = this.#alertReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "reopen",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const alert = this.#alert(alertId, input.organizationId);
+      if (alert.status !== "resolved") {
+        alertConflict("Only a resolved alert can be reopened");
+      }
+      const state = this.#alertState();
+      const next = {
+        ...alert,
+        status: "open",
+        acknowledgedAt: "",
+        resolvedAt: "",
+        resolutionCode: "",
+        updatedAt: at,
+        revision: alert.revision + 1,
+        lastRequestId: input.requestId,
+      };
+      state.alerts[alertId] = next;
+      this.#appendAlertAudit(state, {
+        alertId,
+        event: "reopened",
+        status: "open",
+        actorSubjectId: request.actorSubjectId,
+        reason: request.reason,
+        assigneeSubjectId: "",
+        resolutionCode: "",
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordAlertIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        alertId,
+        operation: "reopen",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { alert: structuredClone(next), replayed: false };
     });
   }
 
@@ -1423,11 +2090,22 @@ export class SecurityStore {
   stats() {
     return this.read((state) => {
       const now = this.now();
+      const alerts = Object.values(state.alerts);
       return {
         eventCount: Object.keys(state.events).length,
         findingCount: Object.keys(state.findings).length,
         aggregateCount: Object.keys(state.aggregates).length,
         suppressionCount: Object.keys(state.suppressions).length,
+        alertCount: alerts.length,
+        alertAuditCount: Object.values(state.alertAudits)
+          .reduce((total, audits) => total + audits.length, 0),
+        openAlertCount: alerts.filter((alert) => alert.status !== "resolved").length,
+        unassignedAlertCount: alerts.filter((alert) => (
+          alert.status !== "resolved" && alert.assigneeSubjectId === ""
+        )).length,
+        overdueAlertCount: alerts.filter((alert) => (
+          alert.status !== "resolved" && Date.parse(alert.slaDueAt) <= now
+        )).length,
         responseActionCount: Object.keys(state.responseActions).length,
         responseAuditCount: Object.values(state.responseAudits)
           .reduce((total, audits) => total + audits.length, 0),
@@ -1438,6 +2116,7 @@ export class SecurityStore {
         limits: {
           maxEvents: this.maxEvents,
           maxFindings: this.maxFindings,
+          maxAlerts: this.maxAlerts,
           maxResponseActions: this.maxResponseActions,
         },
       };
@@ -1515,6 +2194,83 @@ export class SecurityStore {
       const action = state.responseActions[actionId];
       if (!action || action.organizationId !== organizationId) return null;
       return [...(state.responseAudits[actionId] || [])];
+    });
+  }
+
+  getAlert(alertId, organizationId) {
+    return this.read((state) => {
+      const alert = state.alerts[alertId];
+      return alert && alert.organizationId === organizationId ? alert : null;
+    });
+  }
+
+  listAlerts(filters = {}) {
+    const limit = Math.min(Math.max(Number(filters.limit) || 100, 1), 500);
+    return this.read((state) => Object.values(state.alerts)
+      .filter((alert) => (
+        (!filters.organizationId || alert.organizationId === filters.organizationId)
+        && (!filters.status || alert.status === filters.status)
+        && (!filters.severity || alert.severity === filters.severity)
+        && (!filters.ruleId || alert.ruleId === filters.ruleId)
+        && (!filters.subjectId || alert.subject.id === filters.subjectId)
+        && (!filters.assigneeSubjectId
+          || alert.assigneeSubjectId === filters.assigneeSubjectId)
+        && (!filters.unassigned || alert.assigneeSubjectId === "")
+        && (!filters.overdue || Date.parse(alert.slaDueAt) <= this.now())
+        && (!filters.activeOnly || alert.status !== "resolved")
+      ))
+      .sort((left, right) => {
+        const byTime = right.updatedAt.localeCompare(left.updatedAt);
+        return byTime || left.alertId.localeCompare(right.alertId);
+      })
+      .slice(0, limit));
+  }
+
+  listAlertAudits(alertId, organizationId) {
+    return this.read((state) => {
+      const alert = state.alerts[alertId];
+      if (!alert || alert.organizationId !== organizationId) return null;
+      return [...(state.alertAudits[alertId] || [])];
+    });
+  }
+
+  metricsSnapshot() {
+    return this.read((state) => {
+      const now = this.now();
+      const alerts = Object.values(state.alerts);
+      const byStatus = { open: 0, acknowledged: 0, resolved: 0 };
+      const bySeverity = { warning: 0, high: 0, critical: 0 };
+      const unassigned = { warning: 0, high: 0, critical: 0 };
+      const oldest = { warning: 0, high: 0, critical: 0 };
+      const overdue = { warning: 0, high: 0, critical: 0 };
+      for (const alert of alerts) {
+        byStatus[alert.status] += 1;
+        bySeverity[alert.severity] += 1;
+        if (alert.status !== "resolved") {
+          if (alert.assigneeSubjectId === "") unassigned[alert.severity] += 1;
+          const age = Math.max(0, Math.floor((now - Date.parse(alert.createdAt)) / 1000));
+          oldest[alert.severity] = Math.max(oldest[alert.severity], age);
+          if (Date.parse(alert.slaDueAt) <= now) overdue[alert.severity] += 1;
+        }
+      }
+      return {
+        acceptedEvents: state.stats.acceptedEvents,
+        duplicateEvents: state.stats.duplicateEvents,
+        findings: state.stats.findings,
+        suppressedFindings: state.stats.suppressedFindings,
+        alerts: { byStatus, bySeverity, unassigned, oldest, overdue },
+        responseActions: Object.values(state.responseActions)
+          .reduce((counts, action) => {
+            counts[action.status] = (counts[action.status] || 0) + 1;
+            return counts;
+          }, {}),
+        store: {
+          events: Object.keys(state.events).length,
+          findings: Object.keys(state.findings).length,
+          alerts: alerts.length,
+          responseActions: Object.keys(state.responseActions).length,
+        },
+      };
     });
   }
 }

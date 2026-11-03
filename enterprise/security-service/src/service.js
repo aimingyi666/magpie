@@ -21,7 +21,26 @@ import {
   responseIdempotencyHash,
   responseRequestDigest,
 } from "./response-actions.js";
+import {
+  ALERT_STATUSES,
+  ALERT_SEVERITIES,
+  AlertValidationError,
+  alertConflict,
+  alertIdempotencyHash,
+  alertRequestDigest,
+  normalizeAlertAssignRequest,
+  normalizeAlertActorRequest,
+  normalizeAlertCreateRequest,
+  normalizeAlertResolveRequest,
+  isAlertId,
+  publicAlert,
+  publicAlertAudit,
+} from "./alerts.js";
+const ALERT_ID_PATTERN = /^sal_[a-f0-9]{24}$/;
+const ALERT_STATUSES_SET = new Set(ALERT_STATUSES);
+const ALERT_SEVERITIES_SET = new Set(ALERT_SEVERITIES);
 import { createDetectionPolicy, describeRules } from "./rules.js";
+import { renderPrometheusMetrics } from "./metrics.js";
 import { SecurityStore, SecurityStoreError } from "./store.js";
 
 const SCHEMA_VERSION = 1;
@@ -245,6 +264,7 @@ function publicIngestResult(eventId, result) {
     accepted: true,
     duplicate: result.duplicate,
     eventId,
+    alertIds: result.alertIds,
     findingIds: result.findings.map((finding) => finding.findingId),
     aggregateIds: result.aggregateIds,
   };
@@ -320,6 +340,7 @@ function routeOf(pathname) {
   if (pathname === "/api/v1/findings") return { name: "findings", access: "read" };
   if (pathname === "/api/v1/aggregates") return { name: "aggregates", access: "read" };
   if (pathname === "/api/v1/suppressions") return { name: "suppressions", access: "read" };
+  if (pathname === "/metrics") return { name: "metrics", access: "read" };
   if (pathname === "/api/v1/response-actions") {
     return { name: "response-actions", access: "control" };
   }
@@ -329,6 +350,18 @@ function routeOf(pathname) {
       name: responseActionMatch[2] || "response-action",
       actionId: responseActionMatch[1],
       access: "control",
+    };
+  }
+  const alertMatch = /^\/api\/v1\/alerts(?:\/([^/]+))?(?:\/(audit|assign|acknowledge|resolve|reopen))?$/.exec(pathname);
+  if (alertMatch) {
+    return {
+      name: alertMatch[3]
+        ? `alert-${alertMatch[3]}`
+        : alertMatch[1]
+          ? "alert"
+          : "alerts",
+      alertId: alertMatch[1],
+      access: "alert",
     };
   }
   return { name: "not_found" };
@@ -363,6 +396,7 @@ export async function createSecurityServer(config, options = {}) {
     maxFindings: config.maxFindings,
     maxResponseActions: config.maxResponseActions,
     maxStoreBytes: config.maxStoreBytes,
+    maxAlerts: config.maxAlerts,
     now: clock,
     executor: options.responseExecutor,
   });
@@ -400,7 +434,11 @@ export async function createSecurityServer(config, options = {}) {
         ? config.ingestToken
         : route.access === "control"
           ? config.controlToken
-          : config.readToken;
+          : route.access === "alert"
+            ? route.name === "alerts" || route.name === "alert"
+              ? config.readToken
+              : config.controlToken
+            : config.readToken;
       if (!safeEqual(bearerToken(req), expectedToken)) {
         throw new SecurityApiError(
           401,
@@ -409,7 +447,9 @@ export async function createSecurityServer(config, options = {}) {
             ? "A valid ingest token is required"
             : route.access === "control"
               ? "A valid control token is required"
-              : "A valid read token is required",
+              : route.access === "alert"
+                ? "A valid alert token is required"
+                : "A valid read token is required",
         );
       }
 
@@ -420,6 +460,7 @@ export async function createSecurityServer(config, options = {}) {
         const body = await readJsonBody(req, config.maxBodyBytes);
         const event = validateDetectionEvent(body);
         const result = await store.ingest(event, {
+          requestId: reqId,
           now: new Date(clock()),
           evaluate: (detectionEvent, { now }) => {
             const findings = evaluateDetectionEvent(detectionEvent, policy, { now });
@@ -465,6 +506,24 @@ export async function createSecurityServer(config, options = {}) {
         return;
       }
 
+      if (route.name === "metrics") {
+        if (req.method !== "GET") {
+          throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+        }
+        assertQueryKeys(url, new Set());
+        const snapshot = await store.metricsSnapshot();
+        const body = renderPrometheusMetrics(snapshot);
+        res.writeHead(200, {
+          "content-type": "text/plain; version=0.0.4; charset=utf-8",
+          "cache-control": "no-store",
+          "content-length": Buffer.byteLength(body),
+          "x-content-type-options": "nosniff",
+          "x-request-id": reqId,
+        });
+        res.end(body);
+        return;
+      }
+
       if (route.name === "findings") {
         if (req.method !== "GET") {
           throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
@@ -502,6 +561,199 @@ export async function createSecurityServer(config, options = {}) {
           schemaVersion: SCHEMA_VERSION,
           ok: true,
           suppressions,
+        }, reqId);
+        return;
+      }
+
+      if (route.name === "alerts" || route.name === "alert") {
+        const organizationId = controlOrganization(req);
+        if (route.name === "alerts") {
+          if (req.method === "GET") {
+            assertQueryKeys(url, new Set([
+              "status",
+              "severity",
+              "ruleId",
+              "subjectId",
+              "assigneeSubjectId",
+              "unassigned",
+              "overdue",
+              "activeOnly",
+              "limit",
+            ]));
+            const filters = {
+              organizationId,
+              status: queryValue(url, "status", /^[a-z]+$/, 32),
+              severity: queryValue(url, "severity", /^[a-z]+$/, 16),
+              ruleId: queryValue(url, "ruleId", RULE_ID_PATTERN),
+              subjectId: queryValue(url, "subjectId", FILTER_PATTERN),
+              assigneeSubjectId: queryValue(url, "assigneeSubjectId", FILTER_PATTERN),
+              unassigned: booleanQuery(url, "unassigned"),
+              overdue: booleanQuery(url, "overdue"),
+              activeOnly: booleanQuery(url, "activeOnly"),
+              limit: integerQuery(url, "limit", 100),
+            };
+            if (filters.status && !ALERT_STATUSES_SET.has(filters.status)) {
+              throw new SecurityApiError(400, "invalid_query", "status is invalid");
+            }
+            if (filters.severity && !ALERT_SEVERITIES_SET.has(filters.severity)) {
+              throw new SecurityApiError(400, "invalid_query", "severity is invalid");
+            }
+            const alerts = await store.listAlerts(filters);
+            jsonResponse(res, 200, {
+              schemaVersion: SCHEMA_VERSION,
+              ok: true,
+              alerts: alerts.map(publicAlert),
+            }, reqId);
+            return;
+          }
+          if (req.method !== "POST") {
+            throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+          }
+          assertQueryKeys(url, new Set());
+          const key = idempotencyKey(req);
+          const body = normalizeAlertCreateRequest(
+            await readJsonBody(req, config.maxBodyBytes),
+          );
+          if (body.organizationId !== organizationId) {
+            throw new SecurityApiError(
+              403,
+              "organization_mismatch",
+              "X-Magpie-Organization does not match the request organization",
+            );
+          }
+          const result = await store.createAlert({
+            organizationId: body.organizationId,
+            source: body.source,
+            actorSubjectId: body.actorSubjectId,
+            assigneeSubjectId: body.assigneeSubjectId,
+            reason: body.reason,
+          }, {
+            idempotencyKeyHash: alertIdempotencyHash(key),
+            requestDigest: alertRequestDigest("create", organizationId, "", body),
+            requestId: reqId,
+            now: new Date(clock()),
+            organizationId,
+          });
+          jsonResponse(res, result.replayed ? 200 : 201, {
+            schemaVersion: SCHEMA_VERSION,
+            ok: true,
+            alert: publicAlert(result.alert),
+            replayed: result.replayed,
+          }, reqId);
+          return;
+        }
+        if (!isAlertId(route.alertId)) {
+          throw new SecurityApiError(400, "invalid_alert_id", "Alert id is invalid");
+        }
+        if (req.method !== "GET") {
+          throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+        }
+        assertQueryKeys(url, new Set());
+        const alert = await store.getAlert(route.alertId, organizationId);
+        if (!alert) {
+          throw new SecurityApiError(404, "alert_not_found", "Alert not found");
+        }
+        jsonResponse(res, 200, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          alert: publicAlert(alert),
+        }, reqId);
+        return;
+      }
+
+      if (["alert-audit", "alert-assign", "alert-acknowledge", "alert-resolve", "alert-reopen"].includes(route.name)) {
+        const organizationId = controlOrganization(req);
+        if (!isAlertId(route.alertId)) {
+          throw new SecurityApiError(400, "invalid_alert_id", "Alert id is invalid");
+        }
+        if (route.name === "alert-audit") {
+          if (req.method !== "GET") {
+            throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+          }
+          assertQueryKeys(url, new Set());
+          const audits = await store.listAlertAudits(route.alertId, organizationId);
+          if (!audits) {
+            throw new SecurityApiError(404, "alert_not_found", "Alert not found");
+          }
+          jsonResponse(res, 200, {
+            schemaVersion: SCHEMA_VERSION,
+            ok: true,
+            alertId: route.alertId,
+            audits: audits.map(publicAlertAudit),
+          }, reqId);
+          return;
+        }
+        if (req.method !== "POST") {
+          throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+        }
+        assertQueryKeys(url, new Set());
+        const key = idempotencyKey(req);
+        const rawBody = await readJsonBody(req, config.maxBodyBytes);
+        let result;
+        if (route.name === "alert-assign") {
+          const body = normalizeAlertAssignRequest(rawBody);
+          result = await store.assignAlert(route.alertId, {
+            organizationId,
+            assigneeSubjectId: body.assigneeSubjectId,
+            actorSubjectId: body.actorSubjectId,
+            reason: body.reason,
+            source: { type: "finding", id: "" },
+          }, {
+            idempotencyKeyHash: alertIdempotencyHash(key),
+            requestDigest: alertRequestDigest("assign", organizationId, route.alertId, body),
+            requestId: reqId,
+            now: new Date(clock()),
+            organizationId,
+          });
+        } else if (route.name === "alert-acknowledge") {
+          const body = normalizeAlertActorRequest(rawBody);
+          result = await store.acknowledgeAlert(route.alertId, {
+            organizationId,
+            actorSubjectId: body.actorSubjectId,
+            reason: body.reason,
+            source: { type: "finding", id: "" },
+          }, {
+            idempotencyKeyHash: alertIdempotencyHash(key),
+            requestDigest: alertRequestDigest("acknowledge", organizationId, route.alertId, body),
+            requestId: reqId,
+            now: new Date(clock()),
+            organizationId,
+          });
+        } else if (route.name === "alert-resolve") {
+          const body = normalizeAlertResolveRequest(rawBody);
+          result = await store.resolveAlert(route.alertId, {
+            organizationId,
+            actorSubjectId: body.actorSubjectId,
+            reason: body.reason,
+            resolutionCode: body.resolutionCode,
+            source: { type: "finding", id: "" },
+          }, {
+            idempotencyKeyHash: alertIdempotencyHash(key),
+            requestDigest: alertRequestDigest("resolve", organizationId, route.alertId, body),
+            requestId: reqId,
+            now: new Date(clock()),
+            organizationId,
+          });
+        } else if (route.name === "alert-reopen") {
+          const body = normalizeAlertActorRequest(rawBody);
+          result = await store.reopenAlert(route.alertId, {
+            organizationId,
+            actorSubjectId: body.actorSubjectId,
+            reason: body.reason,
+            source: { type: "finding", id: "" },
+          }, {
+            idempotencyKeyHash: alertIdempotencyHash(key),
+            requestDigest: alertRequestDigest("reopen", organizationId, route.alertId, body),
+            requestId: reqId,
+            now: new Date(clock()),
+            organizationId,
+          });
+        }
+        jsonResponse(res, 200, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          alert: publicAlert(result.alert),
+          replayed: result.replayed,
         }, reqId);
         return;
       }
