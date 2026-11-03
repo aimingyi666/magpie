@@ -1,17 +1,39 @@
-import http from "node:http";
-import { loadPortalConfig } from "./config.js";
-import { createService } from "./service.js";
+import { loadConfig } from "./config.js";
+import { createEmployeePortalServer } from "./service.js";
 
-const config = loadPortalConfig();
-const { handleRequest } = createService(config);
+async function main() {
+  const config = loadConfig();
+  const { server } = await createEmployeePortalServer(config, {
+    logger: ({ requestId, code, errorName }) => {
+      console.error(`request ${requestId || "-"} failed: ${code} (${errorName})`);
+    },
+  });
+  server.listen(config.port, config.bind, () => {
+    console.log(`Magpie Enterprise employee portal listening on ${config.bind}:${config.port}`);
+  });
 
-const server = http.createServer(handleRequest);
+  let shuttingDown = false;
+  const shutdown = async (signal) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    console.log(`received ${signal}; shutting down`);
+    const forced = setTimeout(() => process.exit(1), 10_000);
+    forced.unref();
+    try {
+      await new Promise((resolve, reject) => {
+        server.close((error) => (error ? reject(error) : resolve()));
+      });
+      clearTimeout(forced);
+      process.exit(0);
+    } catch {
+      process.exit(1);
+    }
+  };
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
+}
 
-server.listen(config.port, () => {
-  console.log("Employee portal running on port " + config.port);
-});
-
-server.on("error", (err) => {
-  console.error("Server error:", err);
+main().catch((error) => {
+  console.error(`startup failed: ${error.message}`);
   process.exit(1);
 });
