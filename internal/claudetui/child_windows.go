@@ -1,10 +1,8 @@
 package claudetui
 
 import (
-	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"sync"
 	"syscall"
 	"time"
@@ -26,7 +24,7 @@ type child struct {
 // endSignals are what the helper ends on, its Claude Code with it: Ctrl+C,
 // and its console closed. The gateway ends a run by killing its job, which
 // no handler hears: the images folder is then left for another helper to
-// remove (dropLeftImages).
+// remove (dropLeft).
 var endSignals = []os.Signal{os.Interrupt, syscall.SIGTERM}
 
 func (s *shim) start(path string, args []string) error {
@@ -35,7 +33,7 @@ func (s *shim) start(path string, args []string) error {
 		return fmt.Errorf("no pseudo console on this Windows: %w", err)
 	}
 	// a .cmd (npm's shim) is run by cmd.exe, its arguments quoted as
-	// the -p run's are
+	// Claude Code is run with elsewhere (proc)
 	cmd := proc.Command(path, args...)
 	if cmd.Err != nil {
 		return cmd.Err
@@ -67,7 +65,7 @@ func (s *shim) start(path string, args []string) error {
 		out.Close()
 		return fmt.Errorf("a pseudo console: %w", err)
 	}
-	h, err := startIn(console, cmd.Path, line, childEnv())
+	h, err := startIn(console, cmd.Path, line, childEnv(s.env...))
 	if err != nil {
 		windows.ClosePseudoConsole(console)
 		in.Close()
@@ -169,18 +167,4 @@ func (s *shim) stop() {
 	case <-time.After(3 * time.Second):
 		_ = windows.TerminateProcess(s.proc, 1)
 	}
-}
-
-// printMode runs Claude Code at path with the -p arguments pargs, on the
-// helper's own input and output, and exits as it does: Windows has no
-// exec, so the helper stays its parent.
-func printMode(path string, pargs []string) error {
-	cmd := proc.Command(path, pargs...)
-	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, os.Stdout, os.Stderr
-	err := cmd.Run()
-	var exit *exec.ExitError
-	if errors.As(err, &exit) {
-		os.Exit(exit.ExitCode())
-	}
-	return err
 }

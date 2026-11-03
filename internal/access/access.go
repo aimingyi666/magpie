@@ -178,6 +178,9 @@ type Identity struct {
 	// gateway from beyond loopback, never one the user made for someone
 	// else.
 	Default bool
+	// Group is the routing group, by name, whose own accounts hold the
+	// request as well (HeldToGroup); "" when none does.
+	Group string
 }
 type contextKey struct{}
 

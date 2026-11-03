@@ -31,7 +31,7 @@ func (s *shim) start(path string, args []string) error {
 	// wide, so a line of Claude Code's screen is a line
 	_ = unix.IoctlSetWinsize(int(tty.Fd()), unix.TIOCSWINSZ, &unix.Winsize{Row: 50, Col: 200})
 	cmd := proc.Command(path, args...)
-	cmd.Env = childEnv()
+	cmd.Env = childEnv(s.env...)
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = tty, tty, tty
 	// its own session, the terminal its controlling one: the shim ending
 	// closes the terminal, and Claude Code is hung up on with it
@@ -68,11 +68,4 @@ func (s *shim) stop() {
 	case <-time.After(3 * time.Second):
 		_ = syscall.Kill(-s.cmd.Process.Pid, syscall.SIGKILL)
 	}
-}
-
-// printMode becomes Claude Code at path, run with the -p arguments pargs:
-// the same process, so the bridge's input, output and process tree go on
-// as they were.
-func printMode(path string, pargs []string) error {
-	return unix.Exec(path, append([]string{path}, pargs...), os.Environ())
 }
