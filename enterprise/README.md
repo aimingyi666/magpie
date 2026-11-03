@@ -45,7 +45,9 @@ auth-service 已通过 26 项测试；admin-service 已通过 123 项测试（86
 local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
 + 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 67 项
 隔离测试（20 项 L0/L1 事件管道 + 27 项内容审计、检索与一次性授权核心 + 20 项留存、
-法律保留、删除证明和加密导出核心）；当前八套合计 346 项通过、0 失败。
+法律保留、删除证明和加密导出核心）；security-service 已通过 17 项隔离测试（固定事件
+allowlist、秘密扫描、八条稳定检测规则、确定性 finding/聚合、抑制标记、幂等重放和
+原子持久化）；当前九套合计 363 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -72,8 +74,11 @@ token 轮换、管理台员工产品流、真实外部沙箱和生产验收尚�
 M4-B 内容审计核心、M4-C 内容检索/一次性授权后端核心和 M4-D 留存/法律保留/删除证明/
 加密导出后端核心已实现；M4-E 已把管理员内容检索、一次性正文读取、留存/删除、法律保留和
 双层加密导出接入 admin-service、管理台、审批、step-up、幂等、operation 和审计链路，
-但默认关闭且真实网关采集、浏览器 E2E 和生产验收未完成；M5 和 M6 仍未实现；M2-D 核心
-已实现，生产验收未完成。
+但默认关闭且真实网关采集、浏览器 E2E 和生产验收未完成；M5-A 检测规则引擎核心已实现并
+通过 17 项隔离测试，提供八条规则、确定性 finding/聚合、原始事件保留和抑制标记，但真实
+网关事件投递、管理台安全运营页面、告警/阻断/吊销/设备锁定/工单联动、OTel/Prometheus/
+Grafana、生产 SIEM、值班手册和演练仍未实现；M5-B/M5-C 和 M6 仍未实现；M2-D 核心已
+实现，生产验收未完成。
 M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
@@ -534,7 +539,10 @@ token 轮换/恢复和管理台员工产品流仍未实现；
 适配器和 APR-01c step-up 门禁；C4-04 的真实管理链路 E2E 已通过，但仍缺少完整审批/运营
 体验、失败恢复入口、真实 OA 连接器、生产 break-glass 告警/复核、通知、Docker/共享卷、
 真实企业 IdP、浏览器和生产验收；M3-C-2 已提供只读资源/同步可见性，M3-B/M3-C-1 仍未接入
-可写管理台、真实审批联动和员工产品流。
+可写管理台、真实审批联动和员工产品流。M5-A 已提供固定事件 allowlist、八条检测规则、
+确定性 finding/聚合、抑制标记和只接收哈希源 IP 的规则核心，但真实网关事件接入、管理台
+安全运营页面、告警/阻断/吊销/设备锁定/工单、生产 SIEM、可观测性、值班演练和生产验收
+尚未完成；M5-B/M5-C 不能视为已交付。
 在 M2-D 生产验收、M2-E 剩余项、M3/M4 和生产验收完成前，整体只能描述为“可演示、可受控
 技术试点”。
 
@@ -623,6 +631,7 @@ enterprise/
   mcp-gateway/               M3-B 远程 MCP 注册、策略代理和健康检查
   audit-service/             M4-A + M4-B + M4-C + M4-D 审计事件、内容与治理核心
                              M4-E 由 admin-service/管理台编排
+  security-service/          M5-A 检测事件 allowlist、规则、finding 和聚合核心
   scripts/
     provision-user.ps1      服务端：开通/配置员工密钥
     join-client.ps1         客户端：加入企业网关

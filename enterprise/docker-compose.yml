@@ -264,6 +264,56 @@ services:
       retries: 3
       start_period: 10s
 
+  security:
+    profiles: ["security"]
+    build:
+      context: ./security-service
+      args:
+        SECURITY_UID: ${SECURITY_UID:-10004}
+        SECURITY_GID: ${SECURITY_GID:-10004}
+    container_name: magpie-enterprise-security
+    restart: unless-stopped
+    user: "${SECURITY_UID:-10004}:${SECURITY_GID:-10004}"
+    expose:
+      - "3450"
+    environment:
+      SECURITY_BIND: 0.0.0.0
+      SECURITY_PORT: 3450
+      SECURITY_INGEST_TOKEN: ${SECURITY_INGEST_TOKEN:-}
+      SECURITY_READ_TOKEN: ${SECURITY_READ_TOKEN:-}
+      SECURITY_STORE_PATH: ${SECURITY_STORE_PATH:-/data/security-store.json}
+      SECURITY_TRUSTED_REGIONS: ${SECURITY_TRUSTED_REGIONS:-}
+      SECURITY_TRUSTED_SOURCE_IP_HASHES: ${SECURITY_TRUSTED_SOURCE_IP_HASHES:-}
+      SECURITY_SUPPRESSION_SECONDS: ${SECURITY_SUPPRESSION_SECONDS:-300}
+      SECURITY_BUDGET_WARNING_RATIO: ${SECURITY_BUDGET_WARNING_RATIO:-0.9}
+      SECURITY_BUDGET_CRITICAL_RATIO: ${SECURITY_BUDGET_CRITICAL_RATIO:-1}
+      SECURITY_USAGE_TOKEN_MULTIPLIER: ${SECURITY_USAGE_TOKEN_MULTIPLIER:-5}
+      SECURITY_USAGE_COST_MULTIPLIER: ${SECURITY_USAGE_COST_MULTIPLIER:-5}
+      SECURITY_USAGE_MINIMUM_TOKENS: ${SECURITY_USAGE_MINIMUM_TOKENS:-100000}
+      SECURITY_USAGE_MINIMUM_COST: ${SECURITY_USAGE_MINIMUM_COST:-10}
+      SECURITY_RATE_LIMIT_PER_MINUTE: ${SECURITY_RATE_LIMIT_PER_MINUTE:-6000}
+      SECURITY_MAX_BODY_BYTES: ${SECURITY_MAX_BODY_BYTES:-65536}
+      SECURITY_MAX_EVENTS: ${SECURITY_MAX_EVENTS:-1000000}
+      SECURITY_MAX_FINDINGS: ${SECURITY_MAX_FINDINGS:-2000000}
+      SECURITY_MAX_STORE_BYTES: ${SECURITY_MAX_STORE_BYTES:-536870912}
+    volumes:
+      - security-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3450/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
   auth:
     profiles: ["auth", "admin"]
     build:
@@ -430,6 +480,7 @@ volumes:
   resource-content:
   mcp-data:
   audit-data:
+  security-data:
 
 secrets:
   resource-signing-key:

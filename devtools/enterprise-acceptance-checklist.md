@@ -1,6 +1,6 @@
 # Magpie 企业版验收清单
 
-状态：生产验收基线 v2.6（与完整方案 v3.33 对应）
+状态：生产验收基线 v2.7（与完整方案 v3.34 对应）
 
 日期：2026-11-03
 
@@ -282,7 +282,7 @@ outbox 状态、attempt、渠道、HTTP/协议结果、死信和人工重放
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| S-01 | 规则检测 | 异常用量、异地/IP、越权、敏感数据、禁用模型可告警 | 未实现 |
+| S-01 | 规则检测 | 异常用量、异地/IP、越权、敏感数据、禁用模型可告警 | 部分实现：M5-A 规则引擎核心已通过 17 项隔离测试，覆盖敏感数据、异常 Token/费用、预算阈值、直连、授权范围越权、设备不合规、来源 IP 和来源区域规则，并生成确定性 finding/聚合；真实网关事件投递、管理 UI、告警和生产规则验收未完成 |
 | S-02 | 自动响应 | 支持限流、阻断、吊销、设备锁定和工单 | 未实现 |
 | S-03 | 告警闭环 | 严重事件 5 分钟内可见，有负责人和处置记录 | 未实现 |
 | S-04 | 指标 | 登录/签发/请求/撤销/同步/审计延迟和错误率可见 | 未实现 |
@@ -292,10 +292,10 @@ outbox 状态、attempt、渠道、HTTP/协议结果、死信和人工重放
 
 | 编号 | 验收项 | 通过标准 | 当前状态 |
 | --- | --- | --- | --- |
-| O-01 | Compose | 干净环境 `--profile admin`、`--profile gateway-control` 和 `--profile audit` 分别构建、启动、健康检查、重启恢复；验证 gateway-control/audit 不发布宿主机端口且只能使用内部网络 | 当前机器无 Docker CLI；C4-02 和 M4-A..E 的 Dockerfile/Compose 仅静态编写，未构建、启动或健康检查；M4-E 启用时需同时启动 admin 与 audit profile |
+| O-01 | Compose | 干净环境 `--profile admin`、`--profile gateway-control`、`--profile audit` 和 `--profile security` 分别构建、启动、健康检查、重启恢复；验证 gateway-control/audit/security 不发布宿主机端口且只能使用内部网络 | 当前机器无 Docker CLI；C4-02、M4-A..E 和 M5-A 的 Dockerfile/Compose 仅静态编写，未构建、启动或健康检查；M4-E 启用时需同时启动 admin 与 audit profile，M5-A 使用独立 security profile |
 | O-02 | HTTPS/代理 | 管理域名、Cookie、公司 CA、WAF、可信代理头正确 | 未验收 |
 | O-03 | 密钥管理 | Gateway/issuer/session/OIDC/internal token 全部独立且不进仓库 | 文档已定义，需 Secret Manager 验收 |
-| O-04 | 备份恢复 | admin/auth/gateway/audit 数据分别备份并隔离恢复 | audit 已有独立 `audit-data` 卷定义，但 M4-A 事件索引、M4-B 加密正文对象、M4-C grant 消费账本、M4-D 删除证据/导出索引和 M4-E 双层导出密钥/operation 记录尚未做备份恢复、密钥恢复和隔离演练 |
+| O-04 | 备份恢复 | admin/auth/gateway/audit/security 数据分别备份并隔离恢复 | audit 已有独立 `audit-data` 卷，M5-A 已有独立 `security-data` 卷定义；但 M4-A 事件索引、M4-B 加密正文对象、M4-C grant 消费账本、M4-D 删除证据/导出索引、M4-E 双层导出密钥/operation 记录和 M5-A 原始检测事件/finding/聚合尚未做备份恢复、密钥恢复和隔离演练 |
 | O-05 | 灰度回滚 | 客户端、模型、资源和策略可独立灰度/回滚 | 未验收 |
 | O-06 | 容量 | 目标人数、并发、P95 延迟和存储增长压测通过 | 未做 |
 | O-07 | HA/DR | 多副本、共享存储、RPO 15 分钟、RTO 2 小时演练通过 | 未实现 |

@@ -49,8 +49,9 @@ Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项�
 核心已通过 14 项测试；M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员
 JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
 client-sync 26 项（18 核心 + 8 传输）测试通过；M3-C-2 已实现 admin-service 只读资源/
-同步报告 API 和管理页面板，admin-service 123 项、local-mcp 60 项通过；企业八套回归合计
-346 项。M4-E 管理员内容治理已接入管理台、OIDC/RBAC/step-up、审批、幂等、operation/审计
+同步报告 API 和管理页面板，admin-service 123 项、local-mcp 60 项通过；M5-A 检测规则
+引擎核心已实现并通过 security-service 17 项隔离测试，企业九套回归合计 363 项。
+M4-E 管理员内容治理已接入管理台、OIDC/RBAC/step-up、审批、幂等、operation/审计
 和双层 AES-256-GCM 导出，但默认关闭；真实 Magpie 网关正文采集、WORM/KMS、HA、备份恢复、
 浏览器 E2E 和生产验收未完成。
 M3-A/M3-B 只有核心服务 API；M3-C-1/M3-C-2 已有控制面 API 和只读管理页，但尚未接入
@@ -403,7 +404,7 @@ tests:
 & 'D:\Environment\node-v26.12.1\node.exe' --test enterprise\local-mcp\test\*.test.mjs
 ```
 
-当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业八套回归合计 346 项。测试只使用精确文件路径、
+当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业九套回归合计 363 项。测试只使用精确文件路径、
 临时目录和隔离子进程，不读取真实 usage、管理员会话、Agent 配置或生产 Secret。
 
 生产阻断项：helper/server、stdio bridge、Codex 配置映射和一键配置编排核心已实现，但尚未接入本地 helper 安装器、生产启动器/Windows ACL/DPAPI/token 轮换、真实 Codex 客户端和管理台员工产品流；真实 OIDC、审批服务、Secret Broker、
@@ -440,6 +441,38 @@ RBAC、CSRF、理由、幂等键，并按风险完成审批和 fresh step-up。�
 
 当前默认 L0，真实 Magpie 网关正文采集、水印、WORM/KMS、HA、备份恢复、企业 OIDC/MFA、
 TLS/反向代理、浏览器 E2E 和正式合规验收尚未完成，不能直接作为生产取证系统上线。
+
+### 9.1.5 M5-A 检测规则引擎核心
+
+M5-A 是安全运营的检测事件与规则核心，默认不进入部署。启用时使用独立 `security`
+profile；服务只加入内部网络，不映射宿主机端口：
+
+```bash
+docker compose --profile security up -d
+```
+
+```dotenv
+SECURITY_INGEST_TOKEN=<至少 32 字符，仅供受信采集器写入>
+SECURITY_READ_TOKEN=<至少 32 字符，仅供管理侧读取>
+SECURITY_TRUSTED_SOURCE_IP_HASHES=<逗号分隔的 sha256:<64 位小写十六进制>，可留空
+SECURITY_TRUSTED_REGIONS=<逗号分隔的受信区域，可留空
+```
+
+两个服务 token 必须至少 32 字符且彼此不同。采集端只提交固定的检测事件 allowlist，
+禁止 Prompt、回复、附件、原始正文、Cookie、凭据和未知字段；源 IP 只能提交
+`sha256:<64 位小写十六进制>`，服务端不接收或记录明文 IP。`SECURITY_TRUSTED_SOURCE_IP_HASHES`
+或 `SECURITY_TRUSTED_REGIONS` 留空时对应规则关闭，不会把所有来源误判为可信或不可信。
+
+`security-data:/data` 保存原始检测事件、finding、聚合和抑制标记；原始事件不会因抑制而
+删除，finding 只标记为 suppressed。Compose 使用只读根文件系统、临时 `/tmp`、
+`no-new-privileges`、移除全部 capabilities 和内部 healthcheck。排查时可从内部网络调用
+`GET /healthz` 和 `GET /api/v1/stats`；管理侧读取接口只返回稳定 finding/聚合，不返回
+正文或凭据。
+
+M5-A 只完成规则引擎核心：真实 Magpie 网关事件投递、管理台安全运营页面、告警/限流/
+阻断/吊销/设备锁定/工单联动、OTel/Prometheus/Grafana、生产 SIEM、值班手册、故障演练、
+备份恢复演练和生产验收均未完成。不能把本 profile 或 17 项隔离测试描述为 M5 已完成或
+企业生产就绪。
 
 ### 9.2 管理员流程
 
@@ -513,7 +546,8 @@ C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 
 - M3-A 已通过 11 项 resource-service 核心单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
   单元/Mock 集成测试；M3-C-1 已通过 resource-service 15 项（11 核心 + 4 控制面）和
   client-sync 26 项（18 核心 + 8 传输）单元/Mock 集成测试；M3-C-2 已通过 admin-service
-  123 项测试中的 5 项新增用例（企业全量 346 项）。仍须在真实
+  123 项测试中的 5 项新增用例；M5-A 已通过 security-service 17 项隔离测试（企业全量
+  363 项）。仍须在真实
   Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
   MCP 单副本限制，并接入 admin-service 真实审批、可写管理台和 OIDC 组织分配后再做
