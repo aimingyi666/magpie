@@ -125,13 +125,25 @@ export class McpPermissionStore {
   }
 
   async create(permissionId, permission) {
-    validatePermission(permissionId, permission);
+    const now = new Date().toISOString();
+    const complete = {
+      id: permissionId,
+      mcpServerId: permission.mcpServerId,
+      allowedRoles: permission.allowedRoles ?? [],
+      allowedOrgUnits: permission.allowedOrgUnits ?? [],
+      deniedRoles: permission.deniedRoles ?? [],
+      deniedOrgUnits: permission.deniedOrgUnits ?? [],
+      description: permission.description ?? "",
+      createdAt: permission.createdAt ?? now,
+      createdBy: permission.createdBy ?? "admin-service",
+    };
+    validatePermission(permissionId, complete);
     return await this.mutate((permissions) => {
       if (permissionId in permissions) {
         throw new McpPermissionError("Permission already exists", { statusCode: 409 });
       }
-      permissions[permissionId] = permission;
-      return permission;
+      permissions[permissionId] = complete;
+      return complete;
     });
   }
 

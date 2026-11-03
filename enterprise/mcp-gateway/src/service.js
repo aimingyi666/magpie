@@ -477,13 +477,14 @@ export async function createMcpGatewayServer(config, {
       return sendJson(res, 200, { auditLogs: await registry.auditLogs(limit) });
     }
 
-    throw new ApiError(404, "not_found", "The admin route was not found");
     if (route.name === "permissions"
         || route.name === "permission"
         || route.name === "call-audit"
         || route.name === "call-audit-detail") {
       return await handlePermissions(req, res, route, pathname, context);
     }
+
+    throw new ApiError(404, "not_found", "The admin route was not found");
   }
 
   async function handlePermissions(req, res, route, pathname, context) {
