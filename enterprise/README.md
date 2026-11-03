@@ -45,10 +45,10 @@ auth-service 已通过 26 项测试；admin-service 已通过 123 项测试（86
 local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
 + 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 67 项
 隔离测试（20 项 L0/L1 事件管道 + 27 项内容审计、检索与一次性授权核心 + 20 项留存、
-法律保留、删除证明和加密导出核心）；security-service 已通过 17 项隔离测试（固定事件
+法律保留、删除证明和加密导出核心）；security-service 已通过 30 项隔离测试（17 项 M5-A + 13 项 M5-B；固定事件
 allowlist、秘密扫描、八条稳定检测规则、确定性 finding/聚合、抑制标记、幂等重放和
-原子持久化）；网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、插件生命周期 3、
-身份/来源地址映射 1）；当前九套合计 363 项通过、0 失败。
+原子持久化且 M5-B 覆盖响应动作状态机、审批、幂等、撤销和 hash-chain 审计）；网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、插件生命周期 3、
+身份/来源地址映射 1）；当前九套合计 376 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -81,7 +81,7 @@ M4-B 内容审计核心、M4-C 内容检索/一次性授权后端核心和 M4-D 
 Key 身份、Agent、Token 用量和 HMAC 源地址，不发送 Prompt、回复、Cookie、Authorization、
 网关密钥或原始 IP，但管理台安全运营页面、自动响应、OTel/Prometheus/Grafana、生产 SIEM、
 值班手册、HA、Docker/Compose、真实反向代理来源地址和运行中端到端投递仍未实现或未验证；
-M5-B/M5-C 和 M6 仍未实现；M2-D 核心已实现，生产验收未完成。
+M5-B 响应动作状态机与受控模拟执行核心已实现，但真实网关阻断/吊销、真实厂商工单、管理 UI 和生产验收未完成；M5-C 和 M6 仍未实现；M2-D 核心已实现，生产验收未完成。
 M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
@@ -547,7 +547,7 @@ token 轮换/恢复和管理台员工产品流仍未实现；
 导出器；导出器在每次路由尝试后发送已认证 Key、Agent、Token 用量和 HMAC peer 地址，但
 不信任转发头且不会发送正文或凭据。管理台安全运营页面、告警/阻断/吊销/设备锁定/工单、
 生产 SIEM、可观测性、Docker/Compose、真实反向代理来源地址、运行中端到端、值班演练和
-生产验收尚未完成；M5-B/M5-C 不能视为已交付。
+生产验收尚未完成；M5-B 当前只做受控模拟执行，不能视为真实阻断能力已交付；M5-C 不能视为已交付。
 在 M2-D 生产验收、M2-E 剩余项、M3/M4 和生产验收完成前，整体只能描述为“可演示、可受控
 技术试点”。
 
@@ -636,7 +636,7 @@ enterprise/
   mcp-gateway/               M3-B 远程 MCP 注册、策略代理和健康检查
   audit-service/             M4-A + M4-B + M4-C + M4-D 审计事件、内容与治理核心
                              M4-E 由 admin-service/管理台编排
-  security-service/          M5-A 检测事件 allowlist、规则、finding 和聚合核心
+  security-service/          M5-A 检测规则/ingest 与 M5-B 响应动作状态机/模拟执行核心
   scripts/
     provision-user.ps1      服务端：开通/配置员工密钥
     join-client.ps1         客户端：加入企业网关

@@ -50,7 +50,7 @@ Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项�
 JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
 client-sync 26 项（18 核心 + 8 传输）测试通过；M3-C-2 已实现 admin-service 只读资源/
 同步报告 API 和管理页面板，admin-service 123 项、local-mcp 60 项通过；M5-A 检测规则
-引擎核心已实现并通过 security-service 17 项隔离测试，企业九套回归合计 363 项。
+引擎与 M5-B 响应动作状态机/受控模拟执行核心已实现，security-service 30 项隔离测试通过，企业九套回归合计 376 项。
 M4-E 管理员内容治理已接入管理台、OIDC/RBAC/step-up、审批、幂等、operation/审计
 和双层 AES-256-GCM 导出，但默认关闭；真实 Magpie 网关正文采集、WORM/KMS、HA、备份恢复、
 浏览器 E2E 和生产验收未完成。
@@ -404,7 +404,7 @@ tests:
 & 'D:\Environment\node-v26.12.1\node.exe' --test enterprise\local-mcp\test\*.test.mjs
 ```
 
-当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业九套回归合计 363 项。测试只使用精确文件路径、
+当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业九套回归合计 376 项。测试只使用精确文件路径、
 临时目录和隔离子进程，不读取真实 usage、管理员会话、Agent 配置或生产 Secret。
 
 生产阻断项：helper/server、stdio bridge、Codex 配置映射和一键配置编排核心已实现，但尚未接入本地 helper 安装器、生产启动器/Windows ACL/DPAPI/token 轮换、真实 Codex 客户端和管理台员工产品流；真实 OIDC、审批服务、Secret Broker、
@@ -552,8 +552,8 @@ C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 
 - M3-A 已通过 11 项 resource-service 核心单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
   单元/Mock 集成测试；M3-C-1 已通过 resource-service 15 项（11 核心 + 4 控制面）和
   client-sync 26 项（18 核心 + 8 传输）单元/Mock 集成测试；M3-C-2 已通过 admin-service
-  123 项测试中的 5 项新增用例；M5-A 已通过 security-service 17 项隔离测试（企业全量
-  363 项）。仍须在真实
+  123 项测试中的 5 项新增用例；M5-A/M5-B 已通过 security-service 30 项隔离测试（企业全量
+  376 项）；M5-B 仍为受控模拟执行，真实网关阻断/吊销、真实工单和管理 UI 未完成。仍须在真实
   Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
   MCP 单副本限制，并接入 admin-service 真实审批、可写管理台和 OIDC 组织分配后再做

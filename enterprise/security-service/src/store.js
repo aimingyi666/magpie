@@ -9,8 +9,22 @@ import {
   sha256Text,
   validateDetectionEvent,
 } from "./events.js";
+import {
+  ResponseActionValidationError,
+  emptyExecution,
+  failedExecution,
+  normalizeExecution,
+  operationMatchesEvent,
+  responseActionId,
+  responseAuditEntry,
+  simulatedResponseExecutor,
+  transitionConflict,
+  validateResponseActionRecord,
+  validateResponseAuditChain,
+  validateResponseIdempotencyRecord,
+} from "./response-actions.js";
 
-export const SECURITY_STORE_SCHEMA_VERSION = 1;
+export const SECURITY_STORE_SCHEMA_VERSION = 2;
 const FINDING_ID_PATTERN = /^sdf_[a-f0-9]{24}$/;
 const AGGREGATE_ID_PATTERN = /^sag_[a-f0-9]{24}$/;
 const DEDUPE_KEY_PATTERN = /^sdk_[a-f0-9]{24}$/;
@@ -23,6 +37,9 @@ const STATE_FIELDS = new Set([
   "findings",
   "aggregates",
   "suppressions",
+  "responseActions",
+  "responseAudits",
+  "responseIdempotency",
   "stats",
 ]);
 const EVENT_RECORD_FIELDS = new Set(["event", "fingerprint", "receivedAt"]);
@@ -180,6 +197,9 @@ function emptyStore() {
     findings: {},
     aggregates: {},
     suppressions: {},
+    responseActions: {},
+    responseAudits: {},
+    responseIdempotency: {},
     stats: {
       acceptedEvents: 0,
       duplicateEvents: 0,
@@ -366,7 +386,160 @@ function validateSuppression(dedupeKey, suppression) {
   }
 }
 
-function validateLoadedState(data, limits) {
+function responseSourceContext(action, state) {
+  if (action.source.type === "finding") {
+    const record = state.findings[action.source.id];
+    return record ? { finding: record.finding, aggregate: null } : null;
+  }
+  const aggregate = state.aggregates[action.source.id];
+  if (!aggregate) return null;
+  const record = state.findings[aggregate.lastFindingId];
+  return record ? { finding: record.finding, aggregate } : null;
+}
+
+function targetMatchesSource(action, context) {
+  if (!context) return false;
+  const { finding, aggregate } = context;
+  if (finding.organizationId !== action.organizationId
+      || (aggregate && aggregate.organizationId !== action.organizationId)) {
+    return false;
+  }
+  if (action.target.type === "ip_hash") {
+    return finding.ruleId === "sec.source.untrusted_ip"
+      && finding.evidence.ipHash === action.target.id;
+  }
+  if (action.target.type === "gateway_key") return false;
+  return finding.subject.type === action.target.type
+    && finding.subject.id === action.target.id;
+}
+
+function validateResponseState(data, limits) {
+  if (Object.keys(data.responseActions).length > limits.maxResponseActions) {
+    throw new SecurityStoreError(
+      "security_store_invalid",
+      "security store exceeds the configured response action limit",
+    );
+  }
+  const auditsByAction = new Map();
+  for (const [actionId, rawAction] of Object.entries(data.responseActions)) {
+    let action;
+    try {
+      action = validateResponseActionRecord(rawAction);
+    } catch {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response action ${actionId} is invalid`,
+      );
+    }
+    if (action.actionId !== actionId) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response action ${actionId} has a mismatched id`,
+      );
+    }
+    const context = responseSourceContext(action, data);
+    if (!targetMatchesSource(action, context)) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response action ${actionId} does not match its source`,
+      );
+    }
+    data.responseActions[actionId] = action;
+  }
+
+  for (const [actionId, audits] of Object.entries(data.responseAudits)) {
+    const action = data.responseActions[actionId];
+    if (!action) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response audits ${actionId} do not reference a stored action`,
+      );
+    }
+    try {
+      validateResponseAuditChain(action, audits);
+    } catch {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response audits ${actionId} are invalid`,
+      );
+    }
+    auditsByAction.set(actionId, audits);
+  }
+  for (const actionId of Object.keys(data.responseActions)) {
+    if (!auditsByAction.has(actionId)) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response action ${actionId} has no audit chain`,
+      );
+    }
+  }
+
+  const operationsByAction = new Map();
+  for (const [keyHash, rawRecord] of Object.entries(data.responseIdempotency)) {
+    let record;
+    try {
+      record = validateResponseIdempotencyRecord(keyHash, rawRecord);
+    } catch {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response idempotency record ${keyHash} is invalid`,
+      );
+    }
+    if (!data.responseActions[record.actionId]) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response idempotency record ${keyHash} references a missing action`,
+      );
+    }
+    const records = operationsByAction.get(record.actionId) || [];
+    records.push(record);
+    operationsByAction.set(record.actionId, records);
+  }
+  for (const [actionId, action] of Object.entries(data.responseActions)) {
+    const records = operationsByAction.get(actionId) || [];
+    const audits = auditsByAction.get(actionId);
+    if (records.length !== audits.length) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response action ${actionId} idempotency records do not match its audit chain`,
+      );
+    }
+    const used = new Set();
+    for (const record of records) {
+      const index = audits.findIndex((audit, candidateIndex) => (
+        !used.has(candidateIndex)
+        && operationMatchesEvent(record.operation, audit.event)
+      ));
+      if (index < 0 || audits[index].at !== record.createdAt) {
+        throw new SecurityStoreError(
+          "security_store_invalid",
+          `response action ${actionId} idempotency operation does not match its audit chain`,
+        );
+      }
+      if (record.operation === "create" && record.keyHash !== action.idempotencyKeyHash) {
+        throw new SecurityStoreError(
+          "security_store_invalid",
+          `response action ${actionId} create idempotency key does not match the action`,
+        );
+      }
+      used.add(index);
+    }
+    const last = audits.at(-1);
+    const lastRecord = records.find((record) => (
+      record.createdAt === last.at
+      && operationMatchesEvent(record.operation, last.event)
+    ));
+    if (!lastRecord || lastRecord.requestDigest !== action.requestDigest) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        `response action ${actionId} request digest does not match its final audit`,
+      );
+    }
+  }
+  return data;
+}
+
+function validateLoadedStateV2(data, limits) {
   if (!plainObject(data)) {
     throw new SecurityStoreError("security_store_invalid", "security store must be an object");
   }
@@ -379,7 +552,16 @@ function validateLoadedState(data, limits) {
   if (Object.keys(data).some((key) => !STATE_FIELDS.has(key))) {
     throw new SecurityStoreError("security_store_invalid", "security store has unknown fields");
   }
-  for (const key of ["events", "findings", "aggregates", "suppressions", "stats"]) {
+  for (const key of [
+    "events",
+    "findings",
+    "aggregates",
+    "suppressions",
+    "responseActions",
+    "responseAudits",
+    "responseIdempotency",
+    "stats",
+  ]) {
     if (!plainObject(data[key])) {
       throw new SecurityStoreError("security_store_invalid", `security store ${key} is invalid`);
     }
@@ -450,7 +632,23 @@ function validateLoadedState(data, limits) {
       );
     }
   }
+  validateResponseState(data, limits);
   return data;
+}
+
+function validateLoadedState(data, limits) {
+  if (plainObject(data) && data.version === 1) {
+    const migrated = {
+      ...data,
+      version: SECURITY_STORE_SCHEMA_VERSION,
+      responseActions: {},
+      responseAudits: {},
+      responseIdempotency: {},
+    };
+    validateLoadedStateV2(migrated, limits);
+    return { state: migrated, migrated: true };
+  }
+  return { state: validateLoadedStateV2(data, limits), migrated: false };
 }
 
 function matchesFinding(finding, filters) {
@@ -467,8 +665,10 @@ export class SecurityStore {
     this.path = path.resolve(String(storePath));
     this.maxEvents = limits.maxEvents ?? 1_000_000;
     this.maxFindings = limits.maxFindings ?? 2_000_000;
+    this.maxResponseActions = limits.maxResponseActions ?? 200_000;
     this.maxStoreBytes = limits.maxStoreBytes ?? 536_870_912;
     this.now = typeof limits.now === "function" ? limits.now : Date.now;
+    this.executor = limits.executor || simulatedResponseExecutor;
     this.state = emptyStore();
     this.queue = Promise.resolve();
     this.initialized = false;
@@ -498,7 +698,9 @@ export class SecurityStore {
     } catch {
       throw new SecurityStoreError("security_store_invalid", "security store is not valid JSON");
     }
-    this.state = validateLoadedState(parsed, this);
+    const loaded = validateLoadedState(parsed, this);
+    this.state = loaded.state;
+    if (loaded.migrated) await this.#persist(this.state);
     this.initialized = true;
     return this;
   }
@@ -693,6 +895,527 @@ export class SecurityStore {
     });
   }
 
+  #responseTime(value) {
+    const now = value instanceof Date
+      ? value
+      : new Date(value === undefined ? this.now() : value);
+    if (!Number.isFinite(now.getTime())) {
+      throw new ResponseActionValidationError(400, "invalid_evaluation_time", "Time is invalid");
+    }
+    return now.toISOString();
+  }
+
+  #responseState() {
+    return {
+      ...this.state,
+      responseActions: { ...this.state.responseActions },
+      responseAudits: { ...this.state.responseAudits },
+      responseIdempotency: { ...this.state.responseIdempotency },
+    };
+  }
+
+  #responseAction(actionId, organizationId) {
+    const action = this.state.responseActions[actionId];
+    if (!action || action.organizationId !== organizationId) {
+      throw new ResponseActionValidationError(
+        404,
+        "response_action_not_found",
+        "Response action not found",
+      );
+    }
+    return action;
+  }
+
+  #responseReplay(keyHash, requestDigest, operation, organizationId) {
+    const record = this.state.responseIdempotency[keyHash];
+    if (!record) return null;
+    if (record.operation !== operation || record.requestDigest !== requestDigest) {
+      transitionConflict(
+        "The Idempotency-Key was already used for a different request",
+        "response_idempotency_conflict",
+      );
+    }
+    const action = this.state.responseActions[record.actionId];
+    if (!action || action.organizationId !== organizationId) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        "response idempotency state is inconsistent",
+      );
+    }
+    const audits = this.state.responseAudits[record.actionId] || [];
+    const auditIndex = audits.findIndex((audit) => (
+      audit.at === record.createdAt
+      && operationMatchesEvent(record.operation, audit.event)
+    ));
+    if (auditIndex < 0) {
+      throw new SecurityStoreError(
+        "security_store_invalid",
+        "response idempotency state has no matching audit",
+      );
+    }
+    const audit = audits[auditIndex];
+    const snapshot = {
+      ...action,
+      status: audit.status,
+      updatedAt: audit.at,
+      revision: auditIndex + 1,
+      requestDigest: record.requestDigest,
+      lastRequestId: audit.requestId,
+    };
+    if (record.operation === "create") {
+      snapshot.authorization = null;
+      snapshot.startsAt = "";
+      snapshot.execution = emptyExecution();
+    } else if (record.operation === "approve") {
+      snapshot.startsAt = "";
+      snapshot.execution = emptyExecution();
+    } else if (record.operation === "activate") {
+      snapshot.startsAt = audit.event === "activated" ? audit.at : "";
+      snapshot.execution = {
+        activation: action.execution.activation,
+        reversion: null,
+      };
+    } else if (record.operation === "revert") {
+      snapshot.startsAt = action.startsAt;
+      snapshot.execution = {
+        activation: action.execution.activation,
+        reversion: audit.event === "reverted" ? action.execution.reversion : null,
+      };
+    } else {
+      snapshot.startsAt = "";
+      snapshot.execution = emptyExecution();
+    }
+    return {
+      action: structuredClone(snapshot),
+      replayed: true,
+    };
+  }
+
+  #appendResponseAudit(state, input) {
+    const chain = state.responseAudits[input.actionId] || [];
+    const audit = responseAuditEntry({
+      ...input,
+      sequence: chain.length + 1,
+      previousHash: chain.at(-1)?.hash || "0".repeat(64),
+    });
+    state.responseAudits[input.actionId] = [...chain, audit];
+  }
+
+  #recordResponseIdempotency(state, input) {
+    state.responseIdempotency[input.keyHash] = {
+      keyHash: input.keyHash,
+      actionId: input.actionId,
+      operation: input.operation,
+      requestDigest: input.requestDigest,
+      createdAt: input.at,
+    };
+  }
+
+  #assertResponseSource(action) {
+    const context = responseSourceContext(action, this.state);
+    if (!context || context.finding.organizationId !== action.organizationId) {
+      throw new ResponseActionValidationError(
+        400,
+        "response_action_source_invalid",
+        "The source finding or aggregate does not exist in the organization",
+      );
+    }
+    if (!targetMatchesSource(action, context)) {
+      throw new ResponseActionValidationError(
+        400,
+        action.target.type === "gateway_key"
+          ? "response_action_target_unverifiable"
+          : "response_action_target_mismatch",
+        action.target.type === "gateway_key"
+          ? "A gateway_key target cannot be verified from the current finding evidence"
+          : "The response action target does not match the source finding",
+      );
+    }
+  }
+
+  #assertResponseOperationInput(input) {
+    if (!/^[a-f0-9]{64}$/.test(input.idempotencyKeyHash || "")
+        || !/^[a-f0-9]{64}$/.test(input.requestDigest || "")) {
+      throw new ResponseActionValidationError(
+        400,
+        "invalid_response_action_operation",
+        "Response action operation hashes are invalid",
+      );
+    }
+    if (typeof input.requestId !== "string"
+        || !/^req_[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/.test(input.requestId)) {
+      throw new ResponseActionValidationError(
+        400,
+        "invalid_response_action_operation",
+        "Response action request id is invalid",
+      );
+    }
+  }
+
+  createResponseAction(request, input) {
+    return this.#enqueue(async () => {
+      this.#assertResponseOperationInput(input);
+      const at = this.#responseTime(input.now);
+      const replay = this.#responseReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "create",
+        request.organizationId,
+      );
+      if (replay) return replay;
+      if (Object.keys(this.state.responseActions).length >= this.maxResponseActions) {
+        throw new SecurityStoreError(
+          "security_response_action_capacity_exceeded",
+          "The configured response action capacity has been reached",
+          507,
+        );
+      }
+      const actionId = responseActionId({
+        ...request,
+        idempotencyKeyHash: input.idempotencyKeyHash,
+      });
+      if (this.state.responseActions[actionId]) {
+        transitionConflict(
+          "The response action id is already in use",
+          "response_action_conflict",
+        );
+      }
+      const action = {
+        schemaVersion: 1,
+        actionId,
+        status: "requested",
+        actionType: request.actionType,
+        source: { ...request.source },
+        organizationId: request.organizationId,
+        target: { ...request.target },
+        reason: request.reason,
+        requestedBySubjectId: request.requestedBySubjectId,
+        requestedAt: at,
+        updatedAt: at,
+        revision: 1,
+        startsAt: "",
+        expiresAt: new Date(
+          Date.parse(at) + request.durationSeconds * 1000,
+        ).toISOString(),
+        authorization: null,
+        execution: emptyExecution(),
+        idempotencyKeyHash: input.idempotencyKeyHash,
+        requestDigest: input.requestDigest,
+        lastRequestId: input.requestId,
+      };
+      this.#assertResponseSource(action);
+
+      const state = this.#responseState();
+      state.responseActions[actionId] = action;
+      state.responseAudits[actionId] = [];
+      this.#appendResponseAudit(state, {
+        actionId,
+        event: "requested",
+        status: "requested",
+        actorSubjectId: request.requestedBySubjectId,
+        reason: request.reason,
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordResponseIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        actionId,
+        operation: "create",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { action: structuredClone(action), replayed: false };
+    });
+  }
+
+  approveResponseAction(actionId, approval, input) {
+    return this.#enqueue(async () => {
+      this.#assertResponseOperationInput(input);
+      const at = this.#responseTime(input.now);
+      const replay = this.#responseReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "approve",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const action = this.#responseAction(actionId, input.organizationId);
+      if (action.status !== "requested") {
+        transitionConflict("Only a requested response action can be approved");
+      }
+      if (approval.actorSubjectId === action.requestedBySubjectId) {
+        transitionConflict(
+          "The requester cannot approve their own response action",
+          "response_action_self_approval",
+        );
+      }
+      if (approval.authorization.approvedAt > at) {
+        transitionConflict(
+          "The authorization approval time is in the future",
+          "response_authorization_not_yet_valid",
+        );
+      }
+      if (approval.authorization.approvedAt < action.requestedAt) {
+        transitionConflict(
+          "The authorization approval time precedes the response action request",
+          "response_authorization_before_request",
+        );
+      }
+      if (approval.authorization.expiresAt <= at) {
+        transitionConflict(
+          "The authorization has expired",
+          "response_authorization_expired",
+        );
+      }
+      if (action.expiresAt <= at) {
+        transitionConflict(
+          "The response action has expired",
+          "response_action_expired",
+        );
+      }
+
+      const state = this.#responseState();
+      const next = {
+        ...action,
+        status: "approved",
+        updatedAt: at,
+        revision: action.revision + 1,
+        authorization: structuredClone(approval.authorization),
+        requestDigest: input.requestDigest,
+        lastRequestId: input.requestId,
+      };
+      state.responseActions[actionId] = next;
+      this.#appendResponseAudit(state, {
+        actionId,
+        event: "approved",
+        status: "approved",
+        actorSubjectId: approval.actorSubjectId,
+        reason: approval.reason,
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordResponseIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        actionId,
+        operation: "approve",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { action: structuredClone(next), replayed: false };
+    });
+  }
+
+  activateResponseAction(actionId, actor, input) {
+    return this.#enqueue(async () => {
+      this.#assertResponseOperationInput(input);
+      const at = this.#responseTime(input.now);
+      const replay = this.#responseReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "activate",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const action = this.#responseAction(actionId, input.organizationId);
+      if (action.status !== "approved") {
+        transitionConflict("Only an approved response action can be activated");
+      }
+      if (action.authorization.expiresAt <= at) {
+        transitionConflict(
+          "The authorization has expired",
+          "response_authorization_expired",
+        );
+      }
+      if (action.expiresAt <= at) {
+        transitionConflict(
+          "The response action has expired",
+          "response_action_expired",
+        );
+      }
+
+      let execution;
+      let status;
+      let event;
+      let startsAt;
+      try {
+        const result = await this.executor.activate(structuredClone(action), {
+          now: at,
+          requestId: input.requestId,
+        });
+        execution = normalizeExecution(result, "succeeded", at);
+        status = "active";
+        event = "activated";
+        startsAt = at;
+      } catch (error) {
+        execution = failedExecution(error?.code || "response_executor_failed", at);
+        status = "failed";
+        event = "activation_failed";
+        startsAt = "";
+      }
+
+      const state = this.#responseState();
+      const next = {
+        ...action,
+        status,
+        updatedAt: at,
+        revision: action.revision + 1,
+        startsAt,
+        execution: {
+          ...action.execution,
+          activation: execution,
+        },
+        requestDigest: input.requestDigest,
+        lastRequestId: input.requestId,
+      };
+      state.responseActions[actionId] = next;
+      this.#appendResponseAudit(state, {
+        actionId,
+        event,
+        status,
+        actorSubjectId: actor.actorSubjectId,
+        reason: actor.reason,
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordResponseIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        actionId,
+        operation: "activate",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { action: structuredClone(next), replayed: false };
+    });
+  }
+
+  revertResponseAction(actionId, actor, input) {
+    return this.#enqueue(async () => {
+      this.#assertResponseOperationInput(input);
+      const at = this.#responseTime(input.now);
+      const replay = this.#responseReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "revert",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const action = this.#responseAction(actionId, input.organizationId);
+      if (action.status !== "active") {
+        transitionConflict("Only an active response action can be reverted");
+      }
+
+      let status = "active";
+      let event = "revert_failed";
+      let reversion = null;
+      try {
+        const result = await this.executor.revert(structuredClone(action), {
+          now: at,
+          requestId: input.requestId,
+        });
+        reversion = normalizeExecution(result, "succeeded", at);
+        status = "reverted";
+        event = "reverted";
+      } catch {
+        status = "active";
+        event = "revert_failed";
+      }
+
+      const state = this.#responseState();
+      const next = {
+        ...action,
+        status,
+        updatedAt: at,
+        revision: action.revision + 1,
+        execution: {
+          ...action.execution,
+          reversion,
+        },
+        requestDigest: input.requestDigest,
+        lastRequestId: input.requestId,
+      };
+      state.responseActions[actionId] = next;
+      this.#appendResponseAudit(state, {
+        actionId,
+        event,
+        status,
+        actorSubjectId: actor.actorSubjectId,
+        reason: actor.reason,
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordResponseIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        actionId,
+        operation: "revert",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { action: structuredClone(next), replayed: false };
+    });
+  }
+
+  expireResponseAction(actionId, actor, input) {
+    return this.#enqueue(async () => {
+      this.#assertResponseOperationInput(input);
+      const at = this.#responseTime(input.now);
+      const replay = this.#responseReplay(
+        input.idempotencyKeyHash,
+        input.requestDigest,
+        "expire",
+        input.organizationId,
+      );
+      if (replay) return replay;
+      const action = this.#responseAction(actionId, input.organizationId);
+      if (!["requested", "approved"].includes(action.status)) {
+        transitionConflict("Only a pending response action can expire");
+      }
+      if (at < action.expiresAt) {
+        transitionConflict(
+          "The response action has not reached its expiration time",
+          "response_action_not_expired",
+        );
+      }
+
+      const state = this.#responseState();
+      const next = {
+        ...action,
+        status: "expired",
+        updatedAt: at,
+        revision: action.revision + 1,
+        requestDigest: input.requestDigest,
+        lastRequestId: input.requestId,
+      };
+      state.responseActions[actionId] = next;
+      this.#appendResponseAudit(state, {
+        actionId,
+        event: "expired",
+        status: "expired",
+        actorSubjectId: actor.actorSubjectId,
+        reason: actor.reason,
+        at,
+        requestId: input.requestId,
+      });
+      this.#recordResponseIdempotency(state, {
+        keyHash: input.idempotencyKeyHash,
+        actionId,
+        operation: "expire",
+        requestDigest: input.requestDigest,
+        at,
+      });
+      await this.#persist(state);
+      this.state = state;
+      return { action: structuredClone(next), replayed: false };
+    });
+  }
+
   read(operation) {
     return this.#enqueue(async () => operation(structuredClone(this.state)));
   }
@@ -705,12 +1428,17 @@ export class SecurityStore {
         findingCount: Object.keys(state.findings).length,
         aggregateCount: Object.keys(state.aggregates).length,
         suppressionCount: Object.keys(state.suppressions).length,
+        responseActionCount: Object.keys(state.responseActions).length,
+        responseAuditCount: Object.values(state.responseAudits)
+          .reduce((total, audits) => total + audits.length, 0),
+        responseIdempotencyCount: Object.keys(state.responseIdempotency).length,
         activeSuppressionCount: Object.values(state.suppressions)
           .filter((item) => Date.parse(item.suppressedUntil) > now).length,
         stats: { ...state.stats },
         limits: {
           maxEvents: this.maxEvents,
           maxFindings: this.maxFindings,
+          maxResponseActions: this.maxResponseActions,
         },
       };
     });
@@ -752,5 +1480,41 @@ export class SecurityStore {
       ))
       .sort((left, right) => right.lastDetectedAt.localeCompare(left.lastDetectedAt))
       .slice(0, limit));
+  }
+
+  getResponseAction(actionId, organizationId) {
+    return this.read((state) => {
+      const action = state.responseActions[actionId];
+      return action && action.organizationId === organizationId
+        ? action
+        : null;
+    });
+  }
+
+  listResponseActions(filters = {}) {
+    const limit = Math.min(Math.max(Number(filters.limit) || 100, 1), 500);
+    return this.read((state) => Object.values(state.responseActions)
+      .filter((action) => (
+        (!filters.organizationId || action.organizationId === filters.organizationId)
+        && (!filters.status || action.status === filters.status)
+        && (!filters.actionType || action.actionType === filters.actionType)
+        && (!filters.sourceType || action.source.type === filters.sourceType)
+        && (!filters.sourceId || action.source.id === filters.sourceId)
+        && (!filters.targetType || action.target.type === filters.targetType)
+        && (!filters.targetId || action.target.id === filters.targetId)
+      ))
+      .sort((left, right) => {
+        const byTime = right.updatedAt.localeCompare(left.updatedAt);
+        return byTime || left.actionId.localeCompare(right.actionId);
+      })
+      .slice(0, limit));
+  }
+
+  listResponseAudits(actionId, organizationId) {
+    return this.read((state) => {
+      const action = state.responseActions[actionId];
+      if (!action || action.organizationId !== organizationId) return null;
+      return [...(state.responseAudits[actionId] || [])];
+    });
   }
 }

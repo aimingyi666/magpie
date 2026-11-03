@@ -272,6 +272,10 @@ services:
       retries: 3
       start_period: 10s
 
+  # M5-A detection rules plus the M5-B approval-gated response-action state
+  # machine and controlled simulation adapter. This service remains
+  # internal-only. Real gateway enforcement, vendor ticket creation, the admin
+  # UI, production SIEM, HA and production acceptance are not yet implemented.
   security:
     profiles: ["security"]
     build:
@@ -289,6 +293,7 @@ services:
       SECURITY_PORT: 3450
       SECURITY_INGEST_TOKEN: ${SECURITY_INGEST_TOKEN:-}
       SECURITY_READ_TOKEN: ${SECURITY_READ_TOKEN:-}
+      SECURITY_CONTROL_TOKEN: ${SECURITY_CONTROL_TOKEN:-}
       SECURITY_STORE_PATH: ${SECURITY_STORE_PATH:-/data/security-store.json}
       SECURITY_TRUSTED_REGIONS: ${SECURITY_TRUSTED_REGIONS:-}
       SECURITY_TRUSTED_SOURCE_IP_HASHES: ${SECURITY_TRUSTED_SOURCE_IP_HASHES:-}
@@ -303,6 +308,7 @@ services:
       SECURITY_MAX_BODY_BYTES: ${SECURITY_MAX_BODY_BYTES:-65536}
       SECURITY_MAX_EVENTS: ${SECURITY_MAX_EVENTS:-1000000}
       SECURITY_MAX_FINDINGS: ${SECURITY_MAX_FINDINGS:-2000000}
+      SECURITY_MAX_RESPONSE_ACTIONS: ${SECURITY_MAX_RESPONSE_ACTIONS:-200000}
       SECURITY_MAX_STORE_BYTES: ${SECURITY_MAX_STORE_BYTES:-536870912}
     volumes:
       - security-data:/data

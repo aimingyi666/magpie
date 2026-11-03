@@ -60,8 +60,11 @@ function sourceHashes(env, name) {
 export function loadConfig(env = process.env) {
   const ingestToken = secret(env, "SECURITY_INGEST_TOKEN");
   const readToken = secret(env, "SECURITY_READ_TOKEN");
-  if (ingestToken === readToken) {
-    throw new Error("SECURITY_INGEST_TOKEN and SECURITY_READ_TOKEN must differ");
+  const controlToken = secret(env, "SECURITY_CONTROL_TOKEN");
+  if (new Set([ingestToken, readToken, controlToken]).size !== 3) {
+    throw new Error(
+      "SECURITY_INGEST_TOKEN, SECURITY_READ_TOKEN and SECURITY_CONTROL_TOKEN must differ",
+    );
   }
   const budgetWarningRatio = number(env, "SECURITY_BUDGET_WARNING_RATIO", 0.9, 0.01, 1);
   const budgetCriticalRatio = number(
@@ -76,10 +79,18 @@ export function loadConfig(env = process.env) {
     port: integer(env, "SECURITY_PORT", 3450, 1, 65535),
     ingestToken,
     readToken,
+    controlToken,
     storePath: path.resolve(String(env.SECURITY_STORE_PATH || "security-store.json").trim()),
     maxBodyBytes: integer(env, "SECURITY_MAX_BODY_BYTES", 65_536, 1_024, 1_048_576),
     maxEvents: integer(env, "SECURITY_MAX_EVENTS", 1_000_000, 1, 10_000_000),
     maxFindings: integer(env, "SECURITY_MAX_FINDINGS", 2_000_000, 1, 20_000_000),
+    maxResponseActions: integer(
+      env,
+      "SECURITY_MAX_RESPONSE_ACTIONS",
+      200_000,
+      1,
+      2_000_000,
+    ),
     maxStoreBytes: integer(
       env,
       "SECURITY_MAX_STORE_BYTES",

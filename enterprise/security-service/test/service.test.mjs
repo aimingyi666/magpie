@@ -10,6 +10,7 @@ import { createSecurityServer } from "../src/service.js";
 
 const INGEST_TOKEN = ["security", "ingest", "token", "fixture", "material"].join("-");
 const READ_TOKEN = ["security", "read", "token", "fixture", "material"].join("-");
+const CONTROL_TOKEN = ["security", "control", "token", "fixture", "material"].join("-");
 const IP_HASH = `sha256:${"a".repeat(64)}`;
 const OTHER_IP_HASH = `sha256:${"b".repeat(64)}`;
 const FIXED_NOW = Date.parse("2026-11-03T01:05:00.000Z");
@@ -24,10 +25,12 @@ function config(root, overrides = {}) {
     port: 0,
     ingestToken: INGEST_TOKEN,
     readToken: READ_TOKEN,
+    controlToken: CONTROL_TOKEN,
     storePath: path.join(root, "security-store.json"),
     maxBodyBytes: 16 * 1024,
     maxEvents: 1000,
     maxFindings: 2000,
+    maxResponseActions: 2000,
     maxStoreBytes: 4 * 1024 * 1024,
     rateLimitPerMinute: 10_000,
     policy: {
@@ -517,6 +520,7 @@ test("configuration fails closed for missing, short or shared tokens", () => {
     () => loadConfig({
       SECURITY_INGEST_TOKEN: "short",
       SECURITY_READ_TOKEN: READ_TOKEN,
+      SECURITY_CONTROL_TOKEN: CONTROL_TOKEN,
     }),
     /SECURITY_INGEST_TOKEN must be at least 32 characters/,
   );
@@ -524,17 +528,44 @@ test("configuration fails closed for missing, short or shared tokens", () => {
     () => loadConfig({
       SECURITY_INGEST_TOKEN: INGEST_TOKEN,
       SECURITY_READ_TOKEN: INGEST_TOKEN,
+      SECURITY_CONTROL_TOKEN: CONTROL_TOKEN,
+    }),
+    /must differ/,
+  );
+  assert.throws(
+    () => loadConfig({
+      SECURITY_INGEST_TOKEN: INGEST_TOKEN,
+      SECURITY_READ_TOKEN: READ_TOKEN,
+    }),
+    /SECURITY_CONTROL_TOKEN is required/,
+  );
+  assert.throws(
+    () => loadConfig({
+      SECURITY_INGEST_TOKEN: INGEST_TOKEN,
+      SECURITY_READ_TOKEN: READ_TOKEN,
+      SECURITY_CONTROL_TOKEN: "short",
+    }),
+    /SECURITY_CONTROL_TOKEN must be at least 32 characters/,
+  );
+  assert.throws(
+    () => loadConfig({
+      SECURITY_INGEST_TOKEN: INGEST_TOKEN,
+      SECURITY_READ_TOKEN: READ_TOKEN,
+      SECURITY_CONTROL_TOKEN: READ_TOKEN,
     }),
     /must differ/,
   );
   const configValue = loadConfig({
     SECURITY_INGEST_TOKEN: INGEST_TOKEN,
     SECURITY_READ_TOKEN: READ_TOKEN,
+    SECURITY_CONTROL_TOKEN: CONTROL_TOKEN,
     SECURITY_SUPPRESSION_SECONDS: "0",
     SECURITY_TRUSTED_SOURCE_IP_HASHES: `${IP_HASH},${OTHER_IP_HASH}`,
   });
   assert.equal(configValue.policy.suppressionWindowSeconds, 0);
   assert.equal(configValue.policy.trustedSourceIpHashes.length, 2);
+  assert.equal(configValue.controlToken, CONTROL_TOKEN);
+  assert.equal(configValue.maxResponseActions, 200_000);
   assert.match(configValue.storePath, /security-store\.json$/);
 });
 

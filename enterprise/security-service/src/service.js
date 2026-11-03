@@ -7,6 +7,20 @@ import {
   validateTimestamp,
 } from "./events.js";
 import { evaluateDetectionEvent } from "./evaluator.js";
+import {
+  RESPONSE_ACTION_STATUSES,
+  RESPONSE_ACTION_TYPES,
+  ResponseActionValidationError,
+  isResponseActionId,
+  normalizeActorRequest,
+  normalizeApprovalRequest,
+  normalizeIdempotencyKey,
+  normalizeResponseActionRequest,
+  publicResponseAction,
+  publicResponseAudit,
+  responseIdempotencyHash,
+  responseRequestDigest,
+} from "./response-actions.js";
 import { createDetectionPolicy, describeRules } from "./rules.js";
 import { SecurityStore, SecurityStoreError } from "./store.js";
 
@@ -14,6 +28,17 @@ const SCHEMA_VERSION = 1;
 const RULE_ID_PATTERN = /^sec\.[a-z0-9._-]+$/;
 const FILTER_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/;
 const SEVERITIES = new Set(["warning", "high", "critical"]);
+const RESPONSE_ACTION_TYPE_SET = new Set(RESPONSE_ACTION_TYPES);
+const RESPONSE_ACTION_STATUS_SET = new Set(RESPONSE_ACTION_STATUSES);
+const RESPONSE_SOURCE_TYPES = new Set(["finding", "aggregate"]);
+const RESPONSE_TARGET_TYPES = new Set([
+  "user",
+  "device",
+  "agent",
+  "service",
+  "gateway_key",
+  "ip_hash",
+]);
 const MAX_QUERY_LIMIT = 500;
 
 class SecurityApiError extends Error {
@@ -57,6 +82,7 @@ function jsonResponse(res, statusCode, value, reqId, headers = {}) {
 function errorResponse(res, reqId, error, logger) {
   const known = error instanceof SecurityApiError
     || error instanceof DetectionEventValidationError
+    || error instanceof ResponseActionValidationError
     || error instanceof SecurityStoreError;
   const normalized = known
     ? error
@@ -224,6 +250,68 @@ function publicIngestResult(eventId, result) {
   };
 }
 
+function controlOrganization(req) {
+  const value = String(req.headers["x-magpie-organization"] || "").trim();
+  if (!value || value.length > 128 || !FILTER_PATTERN.test(value)) {
+    throw new SecurityApiError(
+      400,
+      "invalid_organization",
+      "X-Magpie-Organization must be a valid organization id",
+    );
+  }
+  return value;
+}
+
+function idempotencyKey(req) {
+  return normalizeIdempotencyKey(String(req.headers["idempotency-key"] || "").trim());
+}
+
+function responseActionFilters(url) {
+  assertQueryKeys(url, new Set([
+    "status",
+    "actionType",
+    "sourceType",
+    "sourceId",
+    "targetType",
+    "targetId",
+    "limit",
+  ]));
+  const status = queryValue(url, "status", /^[a-z]+$/, 32);
+  if (status && !RESPONSE_ACTION_STATUS_SET.has(status)) {
+    throw new SecurityApiError(400, "invalid_query", "status is invalid");
+  }
+  const actionType = queryValue(url, "actionType", /^[a-z_]+$/, 32);
+  if (actionType && !RESPONSE_ACTION_TYPE_SET.has(actionType)) {
+    throw new SecurityApiError(400, "invalid_query", "actionType is invalid");
+  }
+  const sourceType = queryValue(url, "sourceType", /^[a-z]+$/, 16);
+  if (sourceType && !RESPONSE_SOURCE_TYPES.has(sourceType)) {
+    throw new SecurityApiError(400, "invalid_query", "sourceType is invalid");
+  }
+  const targetType = queryValue(url, "targetType", /^[a-z_]+$/, 32);
+  if (targetType && !RESPONSE_TARGET_TYPES.has(targetType)) {
+    throw new SecurityApiError(400, "invalid_query", "targetType is invalid");
+  }
+  return {
+    status,
+    actionType,
+    sourceType,
+    sourceId: queryValue(url, "sourceId", FILTER_PATTERN),
+    targetType,
+    targetId: queryValue(url, "targetId", FILTER_PATTERN),
+    limit: integerQuery(url, "limit", 100),
+  };
+}
+
+function responseActionResult(result) {
+  const action = publicResponseAction(result.action);
+  return {
+    action,
+    enforcement: action.enforcement,
+    replayed: result.replayed,
+  };
+}
+
 function routeOf(pathname) {
   if (pathname === "/healthz") return { name: "health" };
   if (pathname === "/api/v1/detection-events") return { name: "ingest", access: "write" };
@@ -232,6 +320,17 @@ function routeOf(pathname) {
   if (pathname === "/api/v1/findings") return { name: "findings", access: "read" };
   if (pathname === "/api/v1/aggregates") return { name: "aggregates", access: "read" };
   if (pathname === "/api/v1/suppressions") return { name: "suppressions", access: "read" };
+  if (pathname === "/api/v1/response-actions") {
+    return { name: "response-actions", access: "control" };
+  }
+  const responseActionMatch = /^\/api\/v1\/response-actions\/([^/]+)(?:\/(approve|activate|revert|expire|audit))?$/.exec(pathname);
+  if (responseActionMatch) {
+    return {
+      name: responseActionMatch[2] || "response-action",
+      actionId: responseActionMatch[1],
+      access: "control",
+    };
+  }
   return { name: "not_found" };
 }
 
@@ -262,8 +361,10 @@ export async function createSecurityServer(config, options = {}) {
   const store = options.store || new SecurityStore(config.storePath, {
     maxEvents: config.maxEvents,
     maxFindings: config.maxFindings,
+    maxResponseActions: config.maxResponseActions,
     maxStoreBytes: config.maxStoreBytes,
     now: clock,
+    executor: options.responseExecutor,
   });
   if (!options.store) await store.init();
   const logger = options.logger || (() => {});
@@ -295,14 +396,20 @@ export async function createSecurityServer(config, options = {}) {
       if (route.name === "not_found") {
         throw new SecurityApiError(404, "not_found", "Route not found");
       }
-      const expectedToken = route.access === "write" ? config.ingestToken : config.readToken;
+      const expectedToken = route.access === "write"
+        ? config.ingestToken
+        : route.access === "control"
+          ? config.controlToken
+          : config.readToken;
       if (!safeEqual(bearerToken(req), expectedToken)) {
         throw new SecurityApiError(
           401,
           "unauthorized",
           route.access === "write"
             ? "A valid ingest token is required"
-            : "A valid read token is required",
+            : route.access === "control"
+              ? "A valid control token is required"
+              : "A valid read token is required",
         );
       }
 
@@ -395,6 +502,172 @@ export async function createSecurityServer(config, options = {}) {
           schemaVersion: SCHEMA_VERSION,
           ok: true,
           suppressions,
+        }, reqId);
+        return;
+      }
+
+      if (route.name === "response-actions") {
+        const organizationId = controlOrganization(req);
+        if (req.method === "GET") {
+          const actions = await store.listResponseActions({
+            ...responseActionFilters(url),
+            organizationId,
+          });
+          jsonResponse(res, 200, {
+            schemaVersion: SCHEMA_VERSION,
+            ok: true,
+            actions: actions.map(publicResponseAction),
+          }, reqId);
+          return;
+        }
+        if (req.method !== "POST") {
+          throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+        }
+        assertQueryKeys(url, new Set());
+        const key = idempotencyKey(req);
+        const body = normalizeResponseActionRequest(
+          await readJsonBody(req, config.maxBodyBytes),
+        );
+        if (body.organizationId !== organizationId) {
+          throw new SecurityApiError(
+            403,
+            "organization_mismatch",
+            "X-Magpie-Organization does not match the request organization",
+          );
+        }
+        const result = await store.createResponseAction(body, {
+          idempotencyKeyHash: responseIdempotencyHash(key),
+          requestDigest: responseRequestDigest("create", organizationId, "", body),
+          requestId: reqId,
+          now: new Date(clock()),
+        });
+        jsonResponse(res, result.replayed ? 200 : 201, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          ...responseActionResult(result),
+        }, reqId);
+        return;
+      }
+
+      if ([
+        "response-action",
+        "approve",
+        "activate",
+        "revert",
+        "expire",
+        "audit",
+      ].includes(route.name)) {
+        if (!isResponseActionId(route.actionId)) {
+          throw new SecurityApiError(
+            400,
+            "invalid_response_action_id",
+            "Response action id is invalid",
+          );
+        }
+        const organizationId = controlOrganization(req);
+        if (route.name === "response-action") {
+          if (req.method !== "GET") {
+            throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+          }
+          assertQueryKeys(url, new Set());
+          const action = await store.getResponseAction(route.actionId, organizationId);
+          if (!action) {
+            throw new SecurityApiError(
+              404,
+              "response_action_not_found",
+              "Response action not found",
+            );
+          }
+          const publicAction = publicResponseAction(action);
+          jsonResponse(res, 200, {
+            schemaVersion: SCHEMA_VERSION,
+            ok: true,
+            action: publicAction,
+            enforcement: publicAction.enforcement,
+          }, reqId);
+          return;
+        }
+        if (route.name === "audit") {
+          if (req.method !== "GET") {
+            throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+          }
+          assertQueryKeys(url, new Set());
+          const audits = await store.listResponseAudits(route.actionId, organizationId);
+          if (!audits) {
+            throw new SecurityApiError(
+              404,
+              "response_action_not_found",
+              "Response action not found",
+            );
+          }
+          jsonResponse(res, 200, {
+            schemaVersion: SCHEMA_VERSION,
+            ok: true,
+            actionId: route.actionId,
+            audits: audits.map(publicResponseAudit),
+          }, reqId);
+          return;
+        }
+        if (req.method !== "POST") {
+          throw new SecurityApiError(405, "method_not_allowed", "Method not allowed");
+        }
+        assertQueryKeys(url, new Set());
+        const key = idempotencyKey(req);
+        const rawBody = await readJsonBody(req, config.maxBodyBytes);
+        let result;
+        if (route.name === "approve") {
+          const body = normalizeApprovalRequest(rawBody);
+          result = await store.approveResponseAction(route.actionId, body, {
+            idempotencyKeyHash: responseIdempotencyHash(key),
+            requestDigest: responseRequestDigest(
+              "approve",
+              organizationId,
+              route.actionId,
+              body,
+            ),
+            requestId: reqId,
+            now: new Date(clock()),
+            organizationId,
+          });
+        } else {
+          const body = normalizeActorRequest(rawBody);
+          const operation = route.name;
+          const operationInput = {
+            idempotencyKeyHash: responseIdempotencyHash(key),
+            requestDigest: responseRequestDigest(
+              operation,
+              organizationId,
+              route.actionId,
+              body,
+            ),
+            requestId: reqId,
+            now: new Date(clock()),
+            organizationId,
+          };
+          if (route.name === "activate") {
+            result = await store.activateResponseAction(
+              route.actionId,
+              body,
+              operationInput,
+            );
+          } else if (route.name === "revert") {
+            result = await store.revertResponseAction(
+              route.actionId,
+              body,
+              operationInput,
+            );
+          } else {
+            result = await store.expireResponseAction(
+              route.actionId,
+              body,
+              operationInput,
+            );
+          }
+        }
+        jsonResponse(res, 200, {
+          schemaVersion: SCHEMA_VERSION,
+          ok: true,
+          ...responseActionResult(result),
         }, reqId);
         return;
       }
