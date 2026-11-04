@@ -487,6 +487,13 @@ function renderBreakGlass(grants) {
   const target = document.querySelector("#break-glass-list");
   if (!target) return;
   clear(target);
+  const active=grants.filter((grant)=>grant.status==="active").length;
+  updateGovernanceBrief("security",{
+    value:String(active),
+    note:active>0
+      ? `${active} 项应急权限仍在生效，需要独立复核并跟踪到期。`
+      : "当前没有生效中的应急权限。",
+  });
   if (grants.length === 0) {
     target.append(node("p", "没有符合条件的应急授权。", "empty"));
     return;
@@ -601,6 +608,13 @@ function renderApprovals(approvals) {
   const target = document.querySelector("#approval-list");
   if (!target) return;
   clear(target);
+  const pending=approvals.filter((approval)=>["requested","pending_approval","in_progress","reserved"].includes(approval.status)).length;
+  updateGovernanceBrief("approvals",{
+    value:String(pending),
+    note:pending>0
+      ? `${pending} 项审批仍在流转，请按职责与组织范围处理。`
+      : "当前筛选范围内没有等待处理的审批。",
+  });
   const count = document.querySelector("#approval-count");
   if (count) count.textContent = String(approvals.length);
   if (approvals.length === 0) {
@@ -978,6 +992,15 @@ function renderOperations(operations) {
   const target = document.querySelector("#operation-list");
   if (!target) return;
   clear(target);
+  const needsReview=operations.filter((operation)=>[
+    "unknown","partial_success","dependency_invoked","pending_sync",
+  ].includes(operation.state)).length;
+  updateGovernanceBrief("operations",{
+    value:String(needsReview),
+    note:needsReview>0
+      ? `${needsReview} 项操作结果不完整，必须核对后才能视为成功。`
+      : "当前筛选范围内没有结果不完整、需要人工核对的操作。",
+  });
   if (operations.length === 0) {
     target.append(node("p", "没有符合条件的操作。", "empty"));
     return;
@@ -1291,6 +1314,12 @@ function renderAuditLogs(records) {
   const target = document.querySelector("#audit-list");
   if (!target) return;
   clear(target);
+  updateGovernanceBrief("audit",{
+    value:String(records.length),
+    note:records.length>0
+      ? `当前查询返回 ${records.length} 条审计元数据，内容字段按权限单独申请。`
+      : "当前筛选范围内没有审计元数据。",
+  });
   if (records.length === 0) {
     target.append(node("p", "没有符合条件的审计记录。", "empty"));
     return;
@@ -1976,8 +2005,18 @@ async function loadNotificationDeliveries() {
   setResult(form, "正在加载通知投递。", "pending");
   try {
     const payload = await api(`/api/v1/admin/notifications/deliveries?${params}`);
-    renderNotificationDeliveries(payload.deliveries || [], "#notification-delivery-list");
-    setResult(form, `${(payload.deliveries || []).length} 条投递记录已加载。`, "result");
+    const deliveries=payload.deliveries || [];
+    renderNotificationDeliveries(deliveries, "#notification-delivery-list");
+    const attention=deliveries.filter((delivery)=>[
+      "failed","retry_wait","dead_letter","leased","delivering",
+    ].includes(delivery.status)).length;
+    updateGovernanceBrief("notifications",{
+      value:String(attention),
+      note:attention>0
+        ? `${attention} 条投递失败、等待重试或仍在处理中，需要检查通道与重放。`
+        : "当前范围内没有积压、重试或死信。",
+    });
+    setResult(form, `${deliveries.length} 条投递记录已加载。`, "result");
   } catch (error) {
     showError(form, error);
   }
@@ -2002,6 +2041,13 @@ async function loadNotificationDeadLetters() {
       "#notification-dead-letter-list",
       Boolean(document.querySelector("#notification-replay-form")),
     );
+    const attention=Number(payload.count || deadLetters.length || 0);
+    updateGovernanceBrief("notifications",{
+      value:String(attention),
+      note:attention>0
+        ? `${attention} 条通知进入死信，至少 ${payload.criticalCount || 0} 条为紧急事件。`
+        : "当前没有死信。",
+    });
     setResult(form, `${deadLetters.length} 条死信已加载。`, "result");
   } catch (error) {
     showError(form, error);
@@ -2679,8 +2725,14 @@ document.addEventListener("click", (event) => {
   form.dataset.targetId = button.dataset.targetId || "";
   const selection = document.querySelector("#operation-write-selection");
   if (selection) {
-    selection.textContent = `${button.dataset.writeAction}，目标 `
-      + `${button.dataset.targetType}:${button.dataset.targetId}`;
+    const view=button.closest(".view");
+    const selectedCount=[...view.querySelectorAll(
+      "tbody tr:not([hidden]) [data-row-select]:checked",
+    )].length;
+    selection.textContent=(selectedCount>1 ? `已选择 ${selectedCount} 项；本次先处理 ` : "")
+      + `${button.dataset.writeAction}，目标 `
+      + `${button.dataset.targetType}:${button.dataset.targetId}。`
+      + (selectedCount>1 ? "提交后请按同一流程处理其余选项。" : "");
   }
   form.scrollIntoView({ behavior: "smooth", block: "center" });
   field(form, "reason")?.focus();
@@ -2842,6 +2894,36 @@ const consoleViews={overview:"运行总览",usage:"用量分析",users:"用户�
 const consoleTabs={overview:["今日运行","最近调用"],usage:["趋势","筛选"],users:["用户","组织"],models:["目录","策略"],approvals:["待审批","我的申请"],security:["授权","复核"],resources:["目录","同步"],notifications:["投递","通道","规则"]};
 const overviewFinding=document.querySelector("#screen-finding")?.textContent || "";
 const screenFindings={usage:"按时间、身份、Agent 和模型查看当前组织的调用。",users:"仅显示当前组织范围内的身份。",devices:"不展示设备令牌或网关密钥。",credentials:"仅展示网关密钥元数据。",models:"目录用于授权，策略变更需要完整证据链。",resources:"资源目录与客户端同步分开查看，内容本身不会显示。",approvals:"待审批、我发起的、已完成和已关闭分开处理。",security:"应急权限需要独立复核，不能由申请人自行批准。",operations:"操作记录只展示当前组织范围内的管理动作。",audit:"审计事件与导出分开查看，下载链接只使用一次。",notifications:"投递、通道和规则分开加载。",content:"内容检索、留存、删除、保全和导出分开处理。"};
+const governanceBriefs={
+  operations:{label:"待核对的管理动作",value:"0",note:"当前筛选范围内没有需要人工核对的操作。",next:"选择一个时间范围或动作类型重新查询；若没有结果，说明近期没有高风险写入。"},
+  audit:{label:"可见审计事件",value:"0",note:"当前筛选范围内没有审计元数据。",next:"扩大时间范围或清除筛选；导出操作会单独进入审批流程。"},
+  approvals:{label:"当前待审批",value:"0",note:"没有等待你处理的审批。",next:"从“我的申请”查看进行中的请求，或发起新的高风险操作审批。"},
+  security:{label:"生效中的应急权限",value:"0",note:"当前没有生效中的应急权限。",next:"只有最近完成二次认证的管理员可以发起，且必须由另一名管理员复核。"},
+  notifications:{label:"待关注投递",value:"0",note:"当前范围内没有积压、重试或死信。",next:"切换到“通道”检查连通性，或到“规则”确认事件路由。"},
+};
+function updateGovernanceBrief(name,patch){
+  const brief=governanceBriefs[name];
+  if(!brief)return;
+  Object.assign(brief,patch);
+  const strip=document.querySelector(`[data-governance-brief="${name}"]`);
+  if(!strip)return;
+  const value=strip.querySelector("[data-governance-value]");
+  const note=strip.querySelector("[data-governance-note]");
+  if(value)value.textContent=brief.value;
+  if(note)note.textContent=brief.note;
+}
+function renderGovernanceBrief(name){
+  const view=document.querySelector(`.view[data-screen="${name}"]`);
+  const brief=governanceBriefs[name];
+  if(!view||!brief||view.querySelector(`[data-governance-brief="${name}"]`))return;
+  const strip=document.createElement("div");
+  strip.className="governance-brief";
+  strip.dataset.governanceBrief=name;
+  strip.innerHTML=`<div class="governance-lead"><span>${brief.label}</span><strong data-governance-value>${brief.value}</strong><p data-governance-note>${brief.note}</p></div><div class="governance-next"><span>建议下一步</span><p>${brief.next}</p><button class="ghost" type="button" data-governance-action="${name}">${name==="notifications"?"检查通知通道":"调整查询条件"}</button></div>`;
+  view.prepend(strip);
+}
+for(const name of Object.keys(governanceBriefs))renderGovernanceBrief(name);
+document.addEventListener("click",event=>{const button=event.target.closest("[data-governance-action]");if(!button)return;const name=button.dataset.governanceAction;if(name==="notifications"){showConsoleView("notifications","通道");return;}const form=document.querySelector(`.view[data-screen="${name}"] form`);form?.querySelector("input,select,textarea")?.focus();});
 function attentionPending(){const count=document.querySelector('.nav-button[data-view="users"] .count');return Boolean(count && !count.hidden && Number(count.textContent)>0);}
 function primaryFor(name){if(name==="overview"&&attentionPending())return{label:"处理待关注用户",view:"users"};return{
   overview:{label:"查看用量",view:"usage"},
@@ -2861,7 +2943,7 @@ function primaryFor(name){if(name==="overview"&&attentionPending())return{label:
 function findingFor(name){if(name==="overview")return overviewFinding;if(name==="users"){const query=document.querySelector("#global-search")?.value.trim();if(query){const visible=[...document.querySelectorAll("#user-table tbody tr")].filter(row=>!row.hidden).length;return `找到 ${visible} 个匹配用户。`;}return screenFindings.users;}return screenFindings[name]||overviewFinding;}
 function applyConsoleTab(name,label){if(name==="overview"&&label==="最近调用")document.querySelector("#recent-calls")?.scrollIntoView({block:"start"});if(name==="overview"&&label==="今日运行")document.querySelector('[data-screen="overview"]')?.scrollIntoView({block:"start"});if(name==="usage"&&label==="筛选"){const details=document.querySelector("#usage-filter")?.closest("details");if(details)details.open=true;document.querySelector("#usage-filter")?.scrollIntoView({block:"start"});document.querySelector("#usage-filter input,#usage-filter select")?.focus();}if(name==="usage"&&label==="趋势")document.querySelector("#usage-chart")?.scrollIntoView({block:"start"});if(name==="users"&&label==="组织")document.querySelector("#org-heading")?.scrollIntoView({block:"start"});if(name==="users"&&label==="用户")document.querySelector("#user-table")?.scrollIntoView({block:"start"});if(name==="models"&&label==="策略"){document.querySelector("#model-catalog")?.setAttribute("hidden","");document.querySelector("#policy-panel")?.removeAttribute("hidden");document.querySelector(".policy-editor")?.setAttribute("open","");}if(name==="models"&&label==="目录"){document.querySelector("#model-catalog")?.removeAttribute("hidden");document.querySelector("#policy-panel")?.setAttribute("hidden","");}if(name==="approvals"){const form=document.querySelector("#approval-filter");const select=form?.querySelector('[name="view"]');if(select){select.value=label==="我的申请"?"requested":"pending";form.requestSubmit();}}if(name==="security"&&label==="复核")openSecurityPanel("review");if(name==="security"&&label==="授权")openSecurityPanel("create");if(name==="notifications")showNotificationPanel(label);if(name==="resources")showResourcePanel(label);}
 function showConsoleView(name,tabLabel){document.querySelectorAll(".view").forEach(view=>view.classList.toggle("active",view.dataset.screen===name));document.querySelectorAll(".nav-button").forEach(button=>button.setAttribute("aria-current",button.dataset.view===name?"page":"false"));const title=document.querySelector("#screen-title");if(title)title.textContent=consoleViews[name]||"系统管理控制台";const finding=document.querySelector("#screen-finding");if(finding)finding.textContent=findingFor(name);const action=primaryFor(name);const primary=document.querySelector("#primary-action");if(primary)primary.textContent=action.label;const tabs=consoleTabs[name]||[];const selected=tabs.includes(tabLabel)?tabLabel:tabs[0];const tabBar=document.querySelector("#context-tabs");if(tabBar)tabBar.innerHTML=tabs.map(item=>`<button class="tab" type="button" aria-selected="${item===selected}">${item}</button>`).join("");if(tabLabel)applyConsoleTab(name,selected);document.querySelector("#sidebar")?.classList.remove("open");}
-function runPrimaryAction(){const name=document.querySelector(".view.active")?.dataset.screen||"overview";const action=primaryFor(name);if(action.drawer==="approval"){openApprovalCreate();return;}if(action.drawer==="security"){openSecurityPanel("create");return;}if(action.drawer==="audit"){openAuditExport();return;}if(action.drawer){setActionDrawer(true);return;}if(action.tab)showConsoleView(name,action.tab);if(action.submit){const selected=document.querySelector("#context-tabs .tab[aria-selected=true]")?.textContent.trim();const notificationSubmit={"投递":"#notification-delivery-filter","通道":"#notification-channel-filter","规则":"#notification-rule-filter"};const selector=name==="notifications"&&notificationSubmit[selected]?notificationSubmit[selected]:action.submit;document.querySelector(selector)?.requestSubmit();return;}if(action.focus){const node=document.querySelector(action.focus);node?.scrollIntoView({block:"start"});node?.querySelector("input,select,textarea")?.focus();return;}if(!action.tab&&action.view)showConsoleView(action.view);}
+function runPrimaryAction(){const name=document.querySelector(".view.active")?.dataset.screen||"overview";const action=primaryFor(name);if(name==="devices"||name==="credentials"){const view=document.querySelector(`.view[data-screen="${name}"]`);const selected=[...view.querySelectorAll("tbody tr:not([hidden]) [data-row-select]:checked")];if(selected.length){const target=selected[0].closest("tr").querySelector("[data-write-action]");if(target){target.click();return;}}showConsoleView(name==="devices"?"credentials":"devices");return;}if(action.drawer==="approval"){openApprovalCreate();return;}if(action.drawer==="security"){openSecurityPanel("create");return;}if(action.drawer==="audit"){openAuditExport();return;}if(action.drawer){setActionDrawer(true);return;}if(action.tab)showConsoleView(name,action.tab);if(action.submit){const selected=document.querySelector("#context-tabs .tab[aria-selected=true]")?.textContent.trim();const notificationSubmit={"投递":"#notification-delivery-filter","通道":"#notification-channel-filter","规则":"#notification-rule-filter"};const selector=name==="notifications"&&notificationSubmit[selected]?notificationSubmit[selected]:action.submit;document.querySelector(selector)?.requestSubmit();return;}if(action.focus){const node=document.querySelector(action.focus);node?.scrollIntoView({block:"start"});node?.querySelector("input,select,textarea")?.focus();return;}if(!action.tab&&action.view)showConsoleView(action.view);}
 function setActionDrawer(open){
   const screen=document.querySelector(".view.active")?.dataset.screen;
   const opened=Boolean(open);
@@ -2898,3 +2980,15 @@ document.addEventListener("click",(event)=>{const target=event.target.closest("[
 showConsoleView("overview");
 
 document.querySelector("#global-search")?.addEventListener("input",(event)=>{const query=event.target.value.trim().toLowerCase();if(query)showConsoleView("users");document.querySelectorAll("#user-table tbody tr").forEach(row=>{row.hidden=Boolean(query)&&!row.textContent.toLowerCase().includes(query);});const visible=[...document.querySelectorAll("#user-table tbody tr")].filter(row=>!row.hidden).length;const finding=document.querySelector("#screen-finding");if(finding&&document.querySelector(".view.active")?.dataset.screen==="users")finding.textContent=query?`找到 ${visible} 个匹配用户。`:`仅显示当前组织范围内的身份。`;});
+
+function listPanel(node){return node.closest(".view")?.querySelector("[data-list-controls]")||null;}
+function visibleListRows(panel){return [...panel.closest(".view").querySelectorAll("tbody tr[data-device-row],tbody tr[data-credential-row]")].filter(row=>!row.hidden);}
+function syncListSelection(panel){const rows=visibleListRows(panel);const selected=rows.filter(row=>row.querySelector("[data-row-select]")?.checked);const all=panel.querySelector("[data-select-all]");if(all){all.checked=rows.length>0&&selected.length===rows.length;all.indeterminate=selected.length>0&&selected.length<rows.length;}const button=document.querySelector("#primary-action");if(button){const screen=panel.dataset.listControls==="devices"?"devices":"credentials";button.textContent=selected.length?`处理所选 ${selected.length} 项`:(screen==="devices"?"查看凭证":"查看设备");}}
+function filterList(panel){const query=panel.querySelector("[data-list-search]")?.value.trim().toLowerCase()||"";const status=panel.querySelector("[data-list-status]")?.value||"";const rows=[...panel.closest(".view").querySelectorAll("tbody tr[data-device-row],tbody tr[data-credential-row]")];let visible=0;for(const row of rows){const match=(!query||String(row.dataset.search||"").includes(query))&&(!status||row.dataset.status===status);row.hidden=!match;if(match)visible+=1;}const count=panel.querySelector("[data-list-count]");if(count)count.textContent=`${visible} ${panel.dataset.listControls==="devices"?"台设备":"个凭证"}`;syncListSelection(panel);}
+function syncPrimaryAction(){if(document.querySelector("#action-drawer")?.classList.contains("open"))return;const name=document.querySelector(".view.active")?.dataset.screen||"overview";const button=document.querySelector("#primary-action");if(!button)return;if(name==="devices"||name==="credentials"){const panel=document.querySelector(`[data-screen="${name}"] [data-list-controls]`);if(panel){syncListSelection(panel);return;}}button.textContent=primaryFor(name).label;}
+document.addEventListener("click",event=>{if(event.target.closest("[data-select-visible],#device-table [data-row-select],#credential-table [data-row-select]"))setTimeout(syncPrimaryAction,0);});
+document.addEventListener("input",event=>{if(!event.target.matches("[data-list-search]"))return;const panel=listPanel(event.target);if(panel)filterList(panel);});
+document.addEventListener("change",event=>{const panel=listPanel(event.target);if(!panel)return;if(event.target.matches("[data-list-status]")){filterList(panel);return;}if(event.target.matches("[data-select-all]")){for(const row of visibleListRows(panel)){const box=row.querySelector("[data-row-select]");if(box)box.checked=event.target.checked;}syncListSelection(panel);return;}if(event.target.matches("[data-row-select]"))syncListSelection(panel);});
+document.addEventListener("click",event=>{const select=event.target.closest("[data-select-visible]");if(!select)return;const panel=listPanel(select);const rows=visibleListRows(panel);const shouldSelect=rows.some(row=>!row.querySelector("[data-row-select]")?.checked);for(const row of rows){const box=row.querySelector("[data-row-select]");if(box)box.checked=shouldSelect;}syncListSelection(panel);});
+document.addEventListener("click",event=>{const cell=event.target.closest("#device-table tbody td,#credential-table tbody td");if(!cell||event.target.closest("button,input,label,a"))return;const box=cell.closest("tr").querySelector("[data-row-select]");if(!box)return;box.checked=!box.checked;syncListSelection(listPanel(cell));});
+document.addEventListener("click",event=>{const box=event.target.closest("#device-table [data-row-select],#credential-table [data-row-select]");if(!box)return;syncListSelection(listPanel(box));});

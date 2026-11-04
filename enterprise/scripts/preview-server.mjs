@@ -9,6 +9,7 @@ const dataDir = path.join(root, "data", "preview");
 const oidcBase = "http://127.0.0.1:3444";
 const authBase = "http://127.0.0.1:3446";
 const adminBase = "http://127.0.0.1:3445";
+const resourceBase = "http://127.0.0.1:3447";
 const portalBase = "http://127.0.0.1:3007";
 
 const secrets = {
@@ -17,6 +18,8 @@ const secrets = {
   stepUp: "preview-step-up-client-secret-not-for-production",
   auth: "preview-auth-service-token-not-for-production",
   portal: "preview-employee-portal-token-not-for-production",
+  resource: "preview-resource-service-token-not-for-production",
+  resourceSync: "preview-resource-sync-token-secret-not-for-production",
 };
 
 function listen(server, port) {
@@ -267,6 +270,7 @@ function credential(id, userId, deviceId, deviceName) {
 }
 
 async function seedFiles() {
+  await fs.rm(dataDir, { recursive: true, force: true });
   await fs.mkdir(dataDir, { recursive: true });
   const today = new Date().toISOString().slice(0, 10);
   const usage = {
@@ -301,12 +305,43 @@ async function seedFiles() {
   ];
   await fs.writeFile(usagePath, `${lines.map((line) => JSON.stringify(line)).join("\n")}\n`);
   const adminStorePath = path.join(dataDir, "admin-store.json");
-  let adminStore = {};
-  try {
-    adminStore = JSON.parse(await fs.readFile(adminStorePath, "utf8"));
-  } catch {
-    adminStore = {};
-  }
+  const adminStore = {
+    version: 1,
+    orgUnits: {},
+    userOrgUnits: {},
+    roleBindings: {},
+    adminSessions: {},
+    adminAuditLogs: [],
+    adminSystemAuditLogs: [],
+    adminOperations: {},
+    adminIdempotency: {},
+    approvalRequests: {},
+    approvalDecisions: {},
+    approvalConsumptions: {},
+    approvalCallbackEvents: {},
+    approvalCallbackNonces: {},
+    breakGlassGrants: {},
+    breakGlassReviews: {},
+    breakGlassReviewRequests: {},
+    stepUpAssertions: {},
+    notificationDeliveries: {},
+    notificationReplayRequests: {},
+    notificationChannels: {},
+    notificationChannelTests: {},
+    notificationChannelRequests: {},
+    notificationRules: {},
+    notificationRuleRequests: {},
+    notificationSuppressions: {},
+    notificationAggregates: {},
+    notificationEscalations: {},
+    adminExports: {},
+    adminExportTokens: {},
+    adminExportRequests: {},
+    adminContentReadRequests: {},
+    adminContentGovernanceRequests: {},
+    adminContentExports: {},
+    adminContentExportTokens: {},
+  };
   adminStore.orgUnits = {
     "org-engineering": {
       id: "org-engineering",
@@ -350,6 +385,126 @@ async function seedFiles() {
   return usagePath;
 }
 
+function previewDigest(value) {
+  return crypto.createHash("sha256").update(String(value)).digest("hex");
+}
+
+function previewFingerprint(value) {
+  return `sha256:${previewDigest(value)}`;
+}
+
+async function publishPreviewResource(service, {
+  kind,
+  name,
+  description,
+  assignments,
+  deliveryMode = "forced",
+  resourceVersion,
+  content,
+}) {
+  const actor = "preview-admin";
+  const createKey = previewDigest(crypto.randomUUID());
+  const created = await service.createResource(
+    {
+      kind,
+      name,
+      description,
+      publisher: "enterprise-platform",
+      deliveryMode,
+      assignments,
+      compatibility: { minClientVersion: "1.0.0" },
+      operationId: `op_create_${crypto.randomUUID()}`,
+      reason: "Preview resource catalog",
+    },
+    actor,
+    createKey,
+    previewFingerprint(JSON.stringify({ createKey, resourceVersion })),
+    "/api/v1/admin/resources",
+  );
+  const resource = created.responseBody.resource;
+  const releaseKey = previewDigest(crypto.randomUUID());
+  const candidate = await service.createRelease(
+    resource.id,
+    {
+      resourceVersion,
+      mediaType: "text/markdown",
+      contentBase64: Buffer.from(content).toString("base64"),
+      operationId: `op_release_${crypto.randomUUID()}`,
+      reason: "Preview immutable resource release",
+      expectedUpdatedAt: resource.updatedAt,
+    },
+    actor,
+    releaseKey,
+    previewFingerprint(JSON.stringify({ releaseKey, resourceVersion })),
+    `/api/v1/admin/resources/${resource.id}/releases`,
+  );
+  const release = candidate.responseBody.release;
+  const publishKey = previewDigest(crypto.randomUUID());
+  const published = await service.publishRelease(
+    resource.id,
+    {
+      releaseId: release.id,
+      approvalId: `apr_preview_${crypto.randomUUID()}`,
+      operationId: `op_publish_${crypto.randomUUID()}`,
+      reason: "Preview approved resource publication",
+      expectedUpdatedAt: candidate.responseBody.resource.updatedAt,
+    },
+    actor,
+    publishKey,
+    previewFingerprint(JSON.stringify({ publishKey, releaseId: release.id })),
+    `/api/v1/admin/resources/${resource.id}/publish`,
+  );
+  return published.responseBody;
+}
+
+async function seedResources(service, reportStore) {
+  const resources = await service.store.read((data) => Object.keys(data.resources).length);
+  if (resources > 0) return;
+  const published = [];
+  published.push(await publishPreviewResource(service, {
+    kind: "mcp",
+    name: "研发知识库 MCP",
+    description: "受控访问企业研发规范和组件文档。",
+    assignments: ["org-engineering"],
+    resourceVersion: "2026.11.4",
+    content: "# Engineering knowledge MCP\n\nUse the approved internal knowledge endpoint.\n",
+  }));
+  published.push(await publishPreviewResource(service, {
+    kind: "skill",
+    name: "代码评审规范",
+    description: "统一代码评审检查项和风险分级。",
+    assignments: ["org-architecture", "org-efficiency"],
+    deliveryMode: "recommended",
+    resourceVersion: "2026.11.3",
+    content: "# Code review standard\n\nCheck correctness, security, and rollback evidence.\n",
+  }));
+  published.push(await publishPreviewResource(service, {
+    kind: "instructions",
+    name: "企业 Agent 基线指令",
+    description: "适用于全公司的数据安全和输出规范。",
+    assignments: ["*"],
+    resourceVersion: "2026.11.2",
+    content: "# Enterprise agent baseline\n\nDo not disclose credentials or customer data.\n",
+  }));
+  const first = published[0];
+  const now = new Date().toISOString();
+  await reportStore.record({
+    userId: "usr_alice",
+    deviceId: "dev_alice",
+    revision: `sha256:${previewDigest(JSON.stringify(published.map((item) => item.resource.id)))}`,
+    clientVersion: "preview",
+    status: "synced",
+    installed: [{
+      resourceId: first.resource.id,
+      releaseId: first.release.id,
+      manifestDigest: first.release.manifestDigest,
+    }],
+    drift: [],
+    reportedAt: now,
+    receivedAt: now,
+  });
+}
+
 const usagePath = await seedFiles();
 Object.assign(process.env, {
   ADMIN_BIND: "127.0.0.1",
@@ -373,6 +528,16 @@ Object.assign(process.env, {
   ADMIN_STEP_UP_REDIRECT_URI: `${adminBase}/admin/oauth/step-up/callback`,
   ADMIN_MODELS: "deepseek/deepseek-chat,openai/gpt-4o,anthropic/claude-3-5-sonnet",
   ADMIN_USAGE_PATH: usagePath,
+  ADMIN_RESOURCE_SERVICE_URL: resourceBase,
+  ADMIN_RESOURCE_SERVICE_TOKEN: secrets.resource,
+  RESOURCE_SERVICE_TOKEN: secrets.resource,
+  RESOURCE_SYNC_TOKEN_SECRET: secrets.resourceSync,
+  RESOURCE_PORT: "3447",
+  RESOURCE_STORE_PATH: path.join(dataDir, "resource-store.json"),
+  RESOURCE_CONTENT_PATH: path.join(dataDir, "objects"),
+  RESOURCE_SYNC_REPORT_PATH: path.join(dataDir, "sync-reports.json"),
+  RESOURCE_SIGNING_PRIVATE_KEY_PATH: path.join(dataDir, "preview-signing-key.pem"),
+  RESOURCE_SIGNING_KEY_ID: "preview-resource-v1",
   EMPLOYEE_PORTAL_BIND: "127.0.0.1",
   EMPLOYEE_PORTAL_PORT: "3007",
   EMPLOYEE_PORTAL_PUBLIC_URL: portalBase,
@@ -389,17 +554,34 @@ await listen(auth, 3446);
 
 const { loadConfig } = await import("../admin-service/src/config.js");
 const { createEnterpriseAdminServer } = await import("../admin-service/src/service.js");
+const { loadConfig: loadResourceConfig } = await import("../resource-service/src/config.js");
+const { createResourceServer } = await import("../resource-service/src/service.js");
+const { publicKeyFingerprint } = await import("../resource-service/src/manifest.js");
 const { loadConfig: loadPortalConfig } = await import("../employee-portal/src/config.js");
 const { createEmployeePortalServer } = await import("../employee-portal/src/service.js");
 
+const resourceKeys = crypto.generateKeyPairSync("ed25519");
+const resourceConfig = loadResourceConfig(process.env);
 const adminConfig = loadConfig(process.env);
 const portalConfig = loadPortalConfig(process.env);
+const resource = await createResourceServer(resourceConfig, {
+  signing: {
+    privateKey: resourceKeys.privateKey,
+    publicKey: resourceKeys.publicKey,
+    keyId: resourceConfig.signingKeyId,
+    algorithm: "ed25519",
+    fingerprint: publicKeyFingerprint(resourceKeys.publicKey),
+  },
+});
+await seedResources(resource.service, resource.reportStore);
 const admin = await createEnterpriseAdminServer(adminConfig);
 const portal = await createEmployeePortalServer(portalConfig);
+await listen(resource.server, 3447);
 await listen(admin.server, 3445);
 await listen(portal.server, 3007);
 
 console.log("Magpie enterprise preview is running");
 console.log(`Admin console: ${adminBase}/admin`);
+console.log(`Resource service: ${resourceBase}`);
 console.log(`Employee portal: ${portalBase}/`);
 console.log("Preview login is automatic: admin@corp.example");

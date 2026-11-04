@@ -1420,20 +1420,84 @@ function adminPage(
       : rowAction("启用", "user.enable", "user", user.id, "users.disable");
     return `<tr><td><span class="person"><i class="avatar">${escapeHtml(String(user.name || user.email || "?").slice(0, 1).toUpperCase())}</i><span>${escapeHtml(user.name || user.email)}<small>${escapeHtml(user.email)}</small></span></span></td><td>${escapeHtml(user.orgUnit?.path || "未分配")}</td><td>${statusPill(user.status)}</td><td class="num">${escapeHtml(user.policy ? `v${user.policy.version}` : "缺失")}</td><td>${escapeHtml(evidence.label)}</td><td class="action">${action}</td></tr>`;
   }).join("") || `<tr><td colspan="6">当前范围内没有用户。</td></tr>`;
-  const deviceTable = table(
-    ["设备", "平台", "状态", "最近在线", "密钥编号", "操作"],
-    overview.devices.map((device) => [
-      device.name, device.platform, statusPill(device.status), device.lastSeenAt || "", device.gatewayKeyId || "", rowAction("吊销", "device.revoke", "device", device.id, "devices.revoke"),
-    ]),
-    { htmlColumns: [2, 5] },
-  );
-  const credentialTable = table(
-    ["密钥编号", "设备", "状态", "策略版本", "同步状态", "到期时间", "操作"],
-    overview.credentials.map((credential) => [
-      credential.id, credential.deviceName || credential.deviceId, statusPill(credential.status), `v${credential.policyVersion}`, statusPill(credential.policySyncState), credential.expiresAt || "", rowAction("轮换", "credential.rotate", "credential", credential.id, "credentials.rotate"),
-    ]),
-    { htmlColumns: [2, 4, 6] },
-  );
+  const activeDeviceCount = overview.devices.filter((device) => device.status === "active").length;
+  const activeCredentialCount = overview.credentials.filter((credential) => credential.status === "active").length;
+  const expiringCredentialCount = overview.credentials.filter((credential) => {
+    const expiresAt = Date.parse(String(credential.expiresAt || ""));
+    return Number.isFinite(expiresAt)
+      && expiresAt > Date.now()
+      && expiresAt <= Date.now() + 14 * 24 * 3600 * 1000;
+  }).length;
+  const deviceRows = overview.devices.map((device) => (
+    `<tr data-device-row data-status="${escapeHtml(device.status)}" data-search="${escapeHtml([
+      device.name,
+      device.platform,
+      device.status,
+      device.gatewayKeyId,
+    ].filter(Boolean).join(" ").toLowerCase())}">`
+    + '<td><label class="select-cell"><input type="checkbox" data-row-select '
+      + `aria-label="选择设备 ${escapeHtml(device.name || device.id)}"></label></td>`
+    + `<td><span class="cell-main">${escapeHtml(device.name || device.id)}</span>`
+      + `<span class="cell-sub">${escapeHtml(device.id)}</span></td>`
+    + `<td>${escapeHtml(device.platform || "—")}</td>`
+    + `<td>${statusPill(device.status)}</td>`
+    + `<td>${escapeHtml(device.lastSeenAt || "—")}</td>`
+    + `<td class="mono">${escapeHtml(device.gatewayKeyId || "—")}</td>`
+    + `<td class="action">${rowAction("吊销", "device.revoke", "device", device.id, "devices.revoke")}</td>`
+    + "</tr>"
+  )).join("");
+  const deviceTable = `<div class="list-summary">`
+    + `<div><span>设备总数</span><strong>${escapeHtml(overview.devices.length)}</strong></div>`
+    + `<div><span>正常在线</span><strong>${escapeHtml(activeDeviceCount)}</strong></div>`
+    + `<div><span>已停用或吊销</span><strong>${escapeHtml(overview.devices.length - activeDeviceCount)}</strong></div>`
+    + `<div><span>平台</span><strong>${escapeHtml(new Set(overview.devices.map((device) => device.platform).filter(Boolean)).size)}</strong></div>`
+    + `</div>`
+    + `<div class="list-toolbar" data-list-controls="devices">`
+    + `<label class="list-search"><span class="visually-hidden">搜索设备</span><input type="search" data-list-search placeholder="搜索设备、平台或密钥编号" aria-label="搜索设备"></label>`
+    + `<label><span class="visually-hidden">设备状态</span><select data-list-status aria-label="按设备状态筛选"><option value="">全部状态</option><option value="active">正常</option><option value="disabled">已停用</option><option value="revoked">已吊销</option></select></label>`
+    + `<span class="list-count" data-list-count>${escapeHtml(overview.devices.length)} 台设备</span>`
+    + `<button class="ghost" type="button" data-select-visible>选择当前结果</button>`
+    + `</div>`
+    + `<div class="table-wrap"><table class="table selectable-table" id="device-table"><thead><tr>`
+    + `<th class="select-cell"><input type="checkbox" data-select-all aria-label="选择全部设备"></th>`
+    + `<th>设备</th><th>平台</th><th>状态</th><th>最近在线</th><th>密钥编号</th><th class="action">操作</th>`
+    + `</tr></thead><tbody>${deviceRows || '<tr><td colspan="7"><div class="empty">当前范围内没有设备。</div></td></tr>'}</tbody></table></div>`;
+  const credentialRows = overview.credentials.map((credential) => (
+    `<tr data-credential-row data-status="${escapeHtml(credential.policySyncState || "unknown")}" data-search="${escapeHtml([
+      credential.id,
+      credential.deviceName,
+      credential.deviceId,
+      credential.status,
+      credential.policySyncState,
+    ].filter(Boolean).join(" ").toLowerCase())}">`
+    + '<td><label class="select-cell"><input type="checkbox" data-row-select '
+      + `aria-label="选择凭证 ${escapeHtml(credential.id)}"></label></td>`
+    + `<td class="mono">${escapeHtml(credential.id)}</td>`
+    + `<td><span class="cell-main">${escapeHtml(credential.deviceName || credential.deviceId || "—")}</span>`
+      + `<span class="cell-sub">${escapeHtml(credential.deviceId || "")}</span></td>`
+    + `<td>${statusPill(credential.status)}</td>`
+    + `<td>v${escapeHtml(credential.policyVersion)}</td>`
+    + `<td>${statusPill(credential.policySyncState)}</td>`
+    + `<td>${escapeHtml(credential.expiresAt || "—")}</td>`
+    + `<td class="action">${rowAction("轮换", "credential.rotate", "credential", credential.id, "credentials.rotate")}</td>`
+    + "</tr>"
+  )).join("");
+  const credentialTable = `<div class="list-summary">`
+    + `<div><span>凭证总数</span><strong>${escapeHtml(overview.credentials.length)}</strong></div>`
+    + `<div><span>有效密钥</span><strong>${escapeHtml(activeCredentialCount)}</strong></div>`
+    + `<div><span>14 天内到期</span><strong>${escapeHtml(expiringCredentialCount)}</strong></div>`
+    + `<div><span>等待同步</span><strong>${escapeHtml(overview.credentials.filter((credential) => credential.policySyncState !== "synced").length)}</strong></div>`
+    + `</div>`
+    + `<div class="list-toolbar" data-list-controls="credentials">`
+    + `<label class="list-search"><span class="visually-hidden">搜索凭证</span><input type="search" data-list-search placeholder="搜索密钥编号或设备" aria-label="搜索凭证"></label>`
+    + `<label><span class="visually-hidden">同步状态</span><select data-list-status aria-label="按同步状态筛选"><option value="">全部同步状态</option><option value="synced">已同步</option><option value="pending">等待同步</option><option value="unknown">未知</option></select></label>`
+    + `<span class="list-count" data-list-count>${escapeHtml(overview.credentials.length)} 个凭证</span>`
+    + `<button class="ghost" type="button" data-select-visible>选择当前结果</button>`
+    + `</div>`
+    + `<div class="table-wrap"><table class="table selectable-table" id="credential-table"><thead><tr>`
+    + `<th class="select-cell"><input type="checkbox" data-select-all aria-label="选择全部凭证"></th>`
+    + `<th>密钥编号</th><th>设备</th><th>状态</th><th>策略版本</th><th>同步状态</th><th>到期时间</th><th class="action">操作</th>`
+    + `</tr></thead><tbody>${credentialRows || '<tr><td colspan="8"><div class="empty">当前范围内没有凭证。</div></td></tr>'}</tbody></table></div>`;
   const modelTable = table(
     ["模型", "供应商", "显示名称"],
     overview.models.map((model) => [model.id, model.provider, model.displayName || ""]),

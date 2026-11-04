@@ -2321,6 +2321,22 @@ test("M2-B read-only data is attributed and filtered by organization scope", { t
   for (const expected of ["Usage overview", "Users", "Devices", "Models", "Credentials", "Alice", "Carol"]) {
     assert.ok(html.includes(expected), `page should include ${expected}`);
   }
+  for (const expected of [
+    'data-list-controls="devices"',
+    'data-list-controls="credentials"',
+    'id="device-table"',
+    'id="credential-table"',
+    "搜索设备",
+    "选择当前结果",
+  ]) {
+    assert.ok(html.includes(expected), `page should include list workspace control ${expected}`);
+  }
+  const appScript = await fetch(`${f.base}/admin/app.js`);
+  assert.equal(appScript.status, 200);
+  const appScriptText = await appScript.text();
+  assert.match(appScriptText, /renderGovernanceBrief/);
+  assert.match(appScriptText, /处理所选/);
+  assert.match(appScriptText, /function updateGovernanceBrief/);
   assert.ok(!html.includes(f.secrets.serviceToken));
   assert.ok(!html.includes(f.secrets.oidcClientSecret));
   assert.ok(!html.includes(jar.cookies.get(f.config.sessionCookieName) || "__no_cookie__"));
