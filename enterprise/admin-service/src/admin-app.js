@@ -10,6 +10,45 @@ let selectedNotificationChannel = null;
 let selectedNotificationRule = null;
 let selectedNotificationDeliveryId = "";
 let contentStreamCursor = "";
+let drawerReturnFocus = null;
+
+function confirmAction({ title, message, confirmLabel = "确认", tone = "danger" }) {
+  const dialog = document.querySelector("#confirm-dialog");
+  if (!dialog?.showModal) return Promise.resolve(window.confirm(message));
+  const titleNode = dialog.querySelector("#confirm-title");
+  const messageNode = dialog.querySelector("#confirm-message");
+  const accept = dialog.querySelector("#confirm-accept");
+  const cancel = dialog.querySelector("#confirm-cancel");
+  if (titleNode) titleNode.textContent = title;
+  if (messageNode) messageNode.textContent = message;
+  if (accept) {
+    accept.textContent = confirmLabel;
+    accept.className = tone === "danger" ? "danger" : "primary";
+  }
+  return new Promise((resolve) => {
+    const finish = (confirmed) => {
+      dialog.removeEventListener("close", onClose);
+      accept?.removeEventListener("click", onAccept);
+      cancel?.removeEventListener("click", onCancel);
+      if (dialog.open) dialog.close();
+      resolve(confirmed);
+    };
+    const onClose = () => finish(false);
+    const onAccept = () => finish(true);
+    const onCancel = () => finish(false);
+    dialog.addEventListener("close", onClose);
+    accept?.addEventListener("click", onAccept);
+    cancel?.addEventListener("click", onCancel);
+    dialog.showModal();
+    cancel?.focus();
+  });
+}
+
+function setMobileNavigation(open) {
+  document.querySelector("#sidebar")?.classList.toggle("open", open);
+  document.querySelector("#nav-scrim")?.classList.toggle("open", open);
+  document.querySelector("#open-nav")?.setAttribute("aria-expanded", String(open));
+}
 
 class ApiError extends Error {
   constructor(payload, status) {
@@ -732,6 +771,12 @@ async function revokeSelectedApproval(form) {
     setResult(form, "请先选择审批。", "error");
     return;
   }
+  const confirmed = await confirmAction({
+    title: "撤销这项审批？",
+    message: `审批 ${selectedApprovalId} 将立即失效，已预留的操作也不能继续使用。请确认撤销原因已经填写。`,
+    confirmLabel: "确认撤销",
+  });
+  if (!confirmed) return;
   setBusy(form, true);
   try {
     const response = await api(
@@ -2308,6 +2353,12 @@ async function runContentRetention(form) {
 
 async function deleteContent(form) {
   const contentRef = fieldValue(form, "contentRef");
+  const confirmed = await confirmAction({
+    title: "删除或脱敏这条内容？",
+    message: `内容引用 ${contentRef || "未填写"} 的删除不可逆。系统会保留删除证明，但原内容不会恢复。`,
+    confirmLabel: "确认删除",
+  });
+  if (!confirmed) return;
   const key = fieldValue(form, "idempotencyKey") || idempotencyKey();
   setBusy(form, true);
   setResult(form, `正在删除内容，幂等键 ${key}。`, "pending");
@@ -2505,6 +2556,12 @@ async function loadContentLegalHolds() {
 
 async function releaseContentLegalHold(form) {
   const holdId = fieldValue(form, "holdId");
+  const confirmed = await confirmAction({
+    title: "解除这项法律保全？",
+    message: `保全 ${holdId || "未填写"} 解除后，相关内容可能按留存策略到期清理。请确认已获得合规批准。`,
+    confirmLabel: "确认解除",
+  });
+  if (!confirmed) return;
   const key = idempotencyKey();
   setBusy(form, true);
   try {
@@ -2941,31 +2998,27 @@ function primaryFor(name){if(name==="overview"&&attentionPending())return{label:
   content:{label:"搜索内容",submit:"#content-stream-filter"},
 }[name]||{label:"查看用量",view:"usage"};}
 function findingFor(name){if(name==="overview")return overviewFinding;if(name==="users"){const query=document.querySelector("#global-search")?.value.trim();if(query){const visible=[...document.querySelectorAll("#user-table tbody tr")].filter(row=>!row.hidden).length;return `找到 ${visible} 个匹配用户。`;}return screenFindings.users;}return screenFindings[name]||overviewFinding;}
-function applyConsoleTab(name,label){if(name==="overview"&&label==="最近调用")document.querySelector("#recent-calls")?.scrollIntoView({block:"start"});if(name==="overview"&&label==="今日运行")document.querySelector('[data-screen="overview"]')?.scrollIntoView({block:"start"});if(name==="usage"&&label==="筛选"){const details=document.querySelector("#usage-filter")?.closest("details");if(details)details.open=true;document.querySelector("#usage-filter")?.scrollIntoView({block:"start"});document.querySelector("#usage-filter input,#usage-filter select")?.focus();}if(name==="usage"&&label==="趋势")document.querySelector("#usage-chart")?.scrollIntoView({block:"start"});if(name==="users"&&label==="组织")document.querySelector("#org-heading")?.scrollIntoView({block:"start"});if(name==="users"&&label==="用户")document.querySelector("#user-table")?.scrollIntoView({block:"start"});if(name==="models"&&label==="策略"){document.querySelector("#model-catalog")?.setAttribute("hidden","");document.querySelector("#policy-panel")?.removeAttribute("hidden");document.querySelector(".policy-editor")?.setAttribute("open","");}if(name==="models"&&label==="目录"){document.querySelector("#model-catalog")?.removeAttribute("hidden");document.querySelector("#policy-panel")?.setAttribute("hidden","");}if(name==="approvals"){const form=document.querySelector("#approval-filter");const select=form?.querySelector('[name="view"]');if(select){select.value=label==="我的申请"?"requested":"pending";form.requestSubmit();}}if(name==="security"&&label==="复核")openSecurityPanel("review");if(name==="security"&&label==="授权")openSecurityPanel("create");if(name==="notifications")showNotificationPanel(label);if(name==="resources")showResourcePanel(label);}
-function showConsoleView(name,tabLabel){document.querySelectorAll(".view").forEach(view=>view.classList.toggle("active",view.dataset.screen===name));document.querySelectorAll(".nav-button").forEach(button=>button.setAttribute("aria-current",button.dataset.view===name?"page":"false"));const title=document.querySelector("#screen-title");if(title)title.textContent=consoleViews[name]||"系统管理控制台";const finding=document.querySelector("#screen-finding");if(finding)finding.textContent=findingFor(name);const action=primaryFor(name);const primary=document.querySelector("#primary-action");if(primary)primary.textContent=action.label;const tabs=consoleTabs[name]||[];const selected=tabs.includes(tabLabel)?tabLabel:tabs[0];const tabBar=document.querySelector("#context-tabs");if(tabBar)tabBar.innerHTML=tabs.map(item=>`<button class="tab" type="button" aria-selected="${item===selected}">${item}</button>`).join("");if(tabLabel)applyConsoleTab(name,selected);document.querySelector("#sidebar")?.classList.remove("open");}
+function applyConsoleTab(name,label){if(name==="overview"&&label==="最近调用")document.querySelector("#recent-calls")?.scrollIntoView({block:"start"});if(name==="overview"&&label==="今日运行")document.querySelector('[data-screen="overview"]')?.scrollIntoView({block:"start"});if(name==="usage"&&label==="筛选"){const details=document.querySelector("#usage-filter")?.closest("details");if(details)details.open=true;document.querySelector("#usage-filter")?.scrollIntoView({block:"start"});document.querySelector("#usage-filter input,#usage-filter select")?.focus();}if(name==="usage"&&label==="趋势")document.querySelector("#usage-chart")?.scrollIntoView({block:"start"});if(name==="users"&&label==="组织")document.querySelector("#org-heading")?.scrollIntoView({block:"start"});if(name==="users"&&label==="用户")document.querySelector("#user-table")?.scrollIntoView({block:"start"});if(name==="models"&&label==="策略"){document.querySelector("#model-catalog")?.setAttribute("hidden","");document.querySelector("#policy-panel")?.removeAttribute("hidden");document.querySelector(".policy-editor")?.setAttribute("open","");}if(name==="models"&&label==="目录"){document.querySelector("#model-catalog")?.removeAttribute("hidden");document.querySelector("#policy-panel")?.setAttribute("hidden","");}if(name==="approvals"){const form=document.querySelector("#approval-filter");const select=form?.querySelector('[name="view"]');if(select){select.value=label==="我的申请"?"requested":"pending";form.requestSubmit();}}if(name==="security"&&label==="复核")document.querySelector("#break-glass-filter")?.scrollIntoView({block:"start"});if(name==="security"&&label==="授权")document.querySelector("#primary-action")?.focus();if(name==="notifications")showNotificationPanel(label);if(name==="resources")showResourcePanel(label);}
+function showConsoleView(name,tabLabel){document.querySelectorAll(".view").forEach(view=>view.classList.toggle("active",view.dataset.screen===name));document.querySelectorAll(".nav-button").forEach(button=>button.setAttribute("aria-current",button.dataset.view===name?"page":"false"));const title=document.querySelector("#screen-title");if(title)title.textContent=consoleViews[name]||"系统管理控制台";const finding=document.querySelector("#screen-finding");if(finding)finding.textContent=findingFor(name);const action=primaryFor(name);const primary=document.querySelector("#primary-action");if(primary)primary.textContent=action.label;const tabs=consoleTabs[name]||[];const selected=tabs.includes(tabLabel)?tabLabel:tabs[0];const tabBar=document.querySelector("#context-tabs");if(tabBar)tabBar.innerHTML=tabs.map(item=>`<button class="tab" type="button" aria-selected="${item===selected}">${item}</button>`).join("");setMobileNavigation(false);setActionDrawer(false);if(tabLabel)applyConsoleTab(name,selected);}
 function runPrimaryAction(){const name=document.querySelector(".view.active")?.dataset.screen||"overview";const action=primaryFor(name);if(name==="devices"||name==="credentials"){const view=document.querySelector(`.view[data-screen="${name}"]`);const selected=[...view.querySelectorAll("tbody tr:not([hidden]) [data-row-select]:checked")];if(selected.length){const target=selected[0].closest("tr").querySelector("[data-write-action]");if(target){target.click();return;}}showConsoleView(name==="devices"?"credentials":"devices");return;}if(action.drawer==="approval"){openApprovalCreate();return;}if(action.drawer==="security"){openSecurityPanel("create");return;}if(action.drawer==="audit"){openAuditExport();return;}if(action.drawer){setActionDrawer(true);return;}if(action.tab)showConsoleView(name,action.tab);if(action.submit){const selected=document.querySelector("#context-tabs .tab[aria-selected=true]")?.textContent.trim();const notificationSubmit={"投递":"#notification-delivery-filter","通道":"#notification-channel-filter","规则":"#notification-rule-filter"};const selector=name==="notifications"&&notificationSubmit[selected]?notificationSubmit[selected]:action.submit;document.querySelector(selector)?.requestSubmit();return;}if(action.focus){const node=document.querySelector(action.focus);node?.scrollIntoView({block:"start"});node?.querySelector("input,select,textarea")?.focus();return;}if(!action.tab&&action.view)showConsoleView(action.view);}
 function setActionDrawer(open){
-  const screen=document.querySelector(".view.active")?.dataset.screen;
+  const drawer=document.querySelector("#action-drawer");
+  if(!drawer)return;
   const opened=Boolean(open);
-  const drawerWork=["approvals","security","audit","operations"].includes(screen);
-  const approvalOpen=drawerWork&&opened;
+  const screen=document.querySelector(".view.active")?.dataset.screen;
+  const approvalOpen=["approvals","security","audit","operations"].includes(screen)&&opened;
+  if(opened&&!drawer.classList.contains("open"))drawerReturnFocus=document.activeElement;
   document.querySelector("#approval-host")?.toggleAttribute("hidden",!approvalOpen);
   document.querySelector("#operation-write-selection")?.toggleAttribute("hidden",!opened||approvalOpen);
   document.querySelector("#operation-write-form")?.toggleAttribute("hidden",!opened||approvalOpen);
-  if(!approvalOpen){
-    const title=document.querySelector("#action-drawer h2");
-    if(title) title.textContent="执行账户操作";
-  }
-  const openedClass = Boolean(open);
-  document.querySelector("#action-drawer")?.classList.toggle("open", openedClass);
-  document.querySelector("#drawer-scrim")?.classList.toggle("open", openedClass);
-  document.querySelector("#action-drawer")?.setAttribute("aria-hidden", String(!openedClass));
-  if (!openedClass) {
-    for (const id of ["#approval-create", "#approval-workspace", "#security-create", "#security-review", "#audit-export", "#operation-review"]) {
-      const panel = document.querySelector(id);
-      if (panel) panel.hidden = true;
-    }
-  }
+  if(!approvalOpen){const title=document.querySelector("#action-drawer h2");if(title)title.textContent="执行账户操作";}
+  drawer.classList.toggle("open",opened);
+  drawer.setAttribute("aria-hidden",String(!opened));
+  document.querySelector("#drawer-scrim")?.classList.toggle("open",opened);
+  document.body.classList.toggle("drawer-open",opened);
+  if(opened){drawer.querySelector("input:not([type=hidden]),select,textarea,button:not([disabled])")?.focus();return;}
+  for(const id of ["#approval-create","#approval-workspace","#security-create","#security-review","#audit-export","#operation-review"]){const panel=document.querySelector(id);if(panel)panel.hidden=true;}
+  const target=drawerReturnFocus;drawerReturnFocus=null;if(target?.isConnected&&target!==document.body)target.focus();
 }
 function parkApprovalPanels(){
   const host=document.querySelector("#approval-host");
@@ -2976,7 +3029,15 @@ function parkApprovalPanels(){
 }
 parkApprovalPanels();
 showResourcePanel("目录");
-document.addEventListener("click",(event)=>{const target=event.target.closest("[data-view],[data-goto],#primary-action,#open-nav,#refresh-page,#open-action,#close-drawer,#drawer-scrim,.row-action[data-write-action],#context-tabs .tab");if(!target)return;if(target.id==="refresh-page"){location.reload();return;}if(target.id==="open-nav"){document.querySelector("#sidebar")?.classList.add("open");return;}if(target.id==="open-action"||target.matches(".row-action[data-write-action]")){setActionDrawer(true);return;}if(target.id==="close-drawer"||target.id==="drawer-scrim"){setActionDrawer(false);return;}if(target.classList.contains("tab")){const name=document.querySelector(".view.active")?.dataset.screen;showConsoleView(name,target.textContent.trim());return;}if(target.id==="primary-action"){runPrimaryAction();return;}showConsoleView(target.dataset.view||target.dataset.goto);});
+document.addEventListener("click",(event)=>{const target=event.target.closest("[data-view],[data-goto],#primary-action,#open-nav,#nav-scrim,#refresh-page,#open-action,#close-drawer,#drawer-scrim,.row-action[data-write-action],#context-tabs .tab");if(!target)return;if(target.id==="refresh-page"){location.reload();return;}if(target.id==="open-nav"){setMobileNavigation(true);return;}if(target.id==="nav-scrim"){setMobileNavigation(false);return;}if(target.id==="open-action"||target.matches(".row-action[data-write-action]")){setActionDrawer(true);return;}if(target.id==="close-drawer"||target.id==="drawer-scrim"){setActionDrawer(false);return;}if(target.classList.contains("tab")){const name=document.querySelector(".view.active")?.dataset.screen;showConsoleView(name,target.textContent.trim());return;}if(target.id==="primary-action"){runPrimaryAction();return;}showConsoleView(target.dataset.view||target.dataset.goto);});
+document.addEventListener("keydown",(event)=>{
+  if(event.key!=="Escape")return;
+  if(document.querySelector("#confirm-dialog")?.open)return;
+  if(document.querySelector("#action-drawer")?.classList.contains("open")){setActionDrawer(false);return;}
+  if(document.querySelector("#sidebar")?.classList.contains("open"))setMobileNavigation(false);
+});
+document.querySelector("#open-nav")?.addEventListener("click",()=>setMobileNavigation(true));
+window.addEventListener("resize",()=>{if(window.innerWidth>980)setMobileNavigation(false);});
 showConsoleView("overview");
 
 document.querySelector("#global-search")?.addEventListener("input",(event)=>{const query=event.target.value.trim().toLowerCase();if(query)showConsoleView("users");document.querySelectorAll("#user-table tbody tr").forEach(row=>{row.hidden=Boolean(query)&&!row.textContent.toLowerCase().includes(query);});const visible=[...document.querySelectorAll("#user-table tbody tr")].filter(row=>!row.hidden).length;const finding=document.querySelector("#screen-finding");if(finding&&document.querySelector(".view.active")?.dataset.screen==="users")finding.textContent=query?`找到 ${visible} 个匹配用户。`:`仅显示当前组织范围内的身份。`;});
