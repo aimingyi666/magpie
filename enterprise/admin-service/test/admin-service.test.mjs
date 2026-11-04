@@ -2468,10 +2468,10 @@ test("C4-03a loads a pinned read-only model catalog and exposes only safe status
   const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
   assert.equal(page.status, 200);
   const html = await page.text();
-  assert.ok(html.includes("Read-only model catalog loaded for authorization."));
+  assert.ok(html.includes("模型目录已作为授权来源加载。"));
   assert.ok(html.includes(catalogDigest));
-  assert.ok(html.includes("2 models"));
-  assert.ok(html.includes("1 groups"));
+  assert.ok(html.includes("2 个模型"));
+  assert.ok(html.includes("1 个分组"));
   assert.ok(!html.includes(f.catalogPath));
 
   const data = await readAdminData(f);
@@ -2618,7 +2618,7 @@ test("policy management expands catalog selectors and reports credential sync st
   }
   assert.ok(html.includes('src="/admin/app.js"'));
   assert.ok(html.includes('name="csrf-token"'));
-  assert.ok(!html.includes("Applied and verified."));
+  assert.ok(!html.includes("已核验生效。"));
   const script = await fetch(`${f.base}/admin/app.js`);
   assert.equal(script.status, 200);
   assert.match(script.headers.get("content-type"), /^text\/javascript/);
@@ -2665,8 +2665,8 @@ test("admin page shows verified policy only with a complete evidence chain", {
   const page = await fetch(`${f.base}/admin/`, { headers: { cookie: jar.header() } });
   assert.equal(page.status, 200);
   const html = await page.text();
-  assert.ok(html.includes("Applied and verified."));
-  assert.ok(html.includes("Policy v2; 1 active credentials verified by independent readback."));
+  assert.ok(html.includes("已核验生效。"));
+  assert.ok(html.includes("策略 v2；1 个有效凭证已通过独立回读核验。"));
   assert.ok(html.includes("op_mock_policy_ready"));
   assert.ok(!html.includes("should-not-leak-gateway-key"));
   assert.ok(!html.includes("should-not-leak-token-hash"));
@@ -4815,16 +4815,16 @@ test("M2-D admin UI and operation listings expose scoped controls without inline
   assert.equal(page.status, 200);
   const html = await page.text();
   for (const expected of [
-    "Approved metadata export",
-    "Request matching approval",
-    "Create export",
-    "Load operations",
-    "Load audit metadata",
-    "Notifications",
-    "Register or edit a notification channel",
-    "Create or edit a notification rule",
-    "Replay selected dead letter",
-    "Load aggregation and escalation state",
+    "已批准的数据导出",
+    "匹配审批",
+    "创建导出",
+    "加载操作",
+    "加载审计记录",
+    "通知中心",
+    "登记或编辑通知通道",
+    "创建或编辑通知规则",
+    "重放所选死信",
+    "加载聚合与升级状态",
     'id="notification-channel-form"',
     'id="notification-delivery-filter"',
     'id="notification-rule-form"',
@@ -9447,7 +9447,7 @@ test("M4-E admin UI exposes content governance only for global content roles wit
   assert.equal(page.status, 200);
   const html = await page.text();
   for (const expected of [
-    "Audit content governance",
+    "data-audit-content-governance=\"enabled\"",
     'id="content-stream-filter"',
     'id="content-stream-list"',
     'id="content-stream-detail"',
@@ -9506,7 +9506,7 @@ test("M4-E admin UI exposes content governance only for global content roles wit
   });
   assert.equal(deniedPage.status, 200);
   const deniedHtml = await deniedPage.text();
-  assert.ok(deniedHtml.includes("Audit content governance"));
+  assert.ok(deniedHtml.includes('data-audit-content-governance="enabled"'));
   assert.ok(deniedHtml.includes("Your role cannot use audit content governance."));
   assert.ok(!deniedHtml.includes('id="content-stream-filter"'));
   assert.ok(!deniedHtml.includes('id="content-read-form"'));

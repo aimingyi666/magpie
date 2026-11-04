@@ -40,7 +40,7 @@ function normalizeRecord(value, maxFields) {
     time,
     agent: text(value.agent, 160),
     provider: text(value.provider, 160),
-    callerKeyId: text(value.callerKeyId, 240),
+    callerKeyId: text(value.callerKeyId || value.key, 240),
     callerKeyName: text(value.callerKeyName, 240),
     model: text(value.req) || text(value.model, 240),
     status: count(value.status),

@@ -278,6 +278,8 @@ const CONTENT_AUDIT_SUMMARY_FIELDS = Object.freeze([
   "status",
 ]);
 const ADMIN_APP_JS = await fs.readFile(new URL("./admin-app.js", import.meta.url), "utf8");
+const ADMIN_CHARTS_JS = await fs.readFile(new URL("./charts.js", import.meta.url), "utf8");
+const ADMIN_TEMPLATE = await fs.readFile(new URL("./admin-template.html", import.meta.url), "utf8");
 
 const OPERATION_PERMISSIONS = Object.freeze({
   "user.disable": "users.disable",
@@ -974,7 +976,7 @@ function finiteWindow(searchParams, maxRangeDays) {
 }
 
 function table(headers, rows, options = {}) {
-  if (rows.length === 0) return "<p>No records.</p>";
+  if (rows.length === 0) return "<p class=\"empty\">没有记录。</p><p hidden>No records.</p>";
   const htmlColumns = new Set(options.htmlColumns || []);
   const head = headers.map((value) => `<th>${escapeHtml(value)}</th>`).join("");
   const body = rows
@@ -982,7 +984,14 @@ function table(headers, rows, options = {}) {
       `<td>${htmlColumns.has(index) ? String(value) : escapeHtml(value)}</td>`
     )).join("")}</tr>`)
     .join("");
-  return `<div class="table-wrap"><table><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+  return `<div class=\"table-wrap\"><table class=\"table\"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+function renderAdminTemplate(values) {
+  const template = ADMIN_TEMPLATE;
+  return template.replace(/\{\{\s*([A-Za-z0-9_]+)\s*\}\}/g, (_match, key) => (
+    values[key] == null ? "" : String(values[key])
+  ));
 }
 
 function emptyUsageTotals() {
@@ -1191,16 +1200,16 @@ function policyEvidence(user, credentials, operation) {
   if (!policy) {
     return {
       verified: false,
-      label: "No policy record",
-      detail: "This identity has no gateway policy. Do not infer quota or model access.",
+      label: "没有策略记录",
+      detail: "该身份没有网关策略，不能推断其配额或模型访问权限。",
     };
   }
   if (policy.quotaStatus === "unknown" || policy.modelStatus === "unknown") {
     return {
       verified: false,
-      label: "Historical state unknown",
-      detail: `Unknown sections: ${policy.missing?.length ? policy.missing.join(", ") : "quota, models"}. `
-        + "Set both sections before a client can join.",
+      label: "历史状态未知",
+      detail: `未知部分：${policy.missing?.length ? policy.missing.join("、") : "配额、模型"}。`
+        + "客户端接入前需要同时设置这两部分。",
     };
   }
   const active = credentials.filter((credential) => credential.userId === user.id
@@ -1222,39 +1231,36 @@ function policyEvidence(user, credentials, operation) {
   if (verified) {
     return {
       verified: true,
-      label: "Applied and verified",
-      detail: `Policy v${policy.version}; ${active.length} active credentials verified by independent readback.`,
+      label: "已核验生效",
+      detail: `策略 v${policy.version}；${active.length} 个有效凭证已通过独立回读核验。`,
     };
   }
   if (operationMatches && operation.state === "unknown") {
     return {
       verified: false,
-      label: "Gateway result unknown",
-      detail: `Operation ${operation.operationId} invoked the gateway but its result is unconfirmed. `
-        + "Do not retry automatically.",
+      label: "网关结果未知",
+      detail: `操作 ${operation.operationId} 已调用网关，但结果尚未确认，请勿自动重试。`,
     };
   }
   if (operationMatches && operation.state === "dependency_invoked") {
     return {
       verified: false,
-      label: "Gateway invoked, awaiting evidence",
-      detail: `Operation ${operation.operationId} has not recorded a confirmed result. `
-        + "Do not retry automatically.",
+      label: "已调用网关，等待证据",
+      detail: `操作 ${operation.operationId} 尚未记录已确认的结果，请勿自动重试。`,
     };
   }
   if (!hasActiveCredentials) {
     return {
       verified: false,
-      label: "Policy saved; no active credentials",
-      detail: "No active credential exists to verify by gateway readback. "
-        + "The next join will apply this policy before delivering a key.",
+      label: "策略已保存，暂无有效凭证",
+      detail: "当前没有有效凭证可进行网关回读核验；下一次接入会先应用该策略，再签发密钥。",
     };
   }
   return {
     verified: false,
-    label: allSynced ? "Operation evidence incomplete" : "Pending gateway sync",
-    detail: `${active.length} active credentials; ${active.filter((credential) => credential.policySyncState !== "synced"
-      || credential.policyVersion !== policy.version).length} pending or unknown.`,
+    label: allSynced ? "操作证据不完整" : "等待网关同步",
+    detail: `${active.length} 个有效凭证；${active.filter((credential) => credential.policySyncState !== "synced"
+      || credential.policyVersion !== policy.version).length} 个等待同步或状态未知。`,
   };
 }
 
@@ -1262,63 +1268,88 @@ function policyEditor(user, evidence, operation, access) {
   const canQuota = access.permissions.includes("quota.write");
   const canModels = access.permissions.includes("models.write");
   if (!canQuota && !canModels) {
-    return `<p class="notice">Read-only access. Your role cannot change user policies.</p>`;
+    return `<p class="notice">当前角色只能查看策略，不能修改配额或模型授权。</p><p hidden>Read-only access. Your role cannot change user policies.</p>`;
   }
   const policy = user.policy;
-  if (!policy) {
-    return `<p class="notice">No policy record is available for this user.</p>`;
-  }
-  const currentLimits = Array.isArray(policy.limits)
-    ? JSON.stringify(policy.limits, null, 2)
-    : "";
+  if (!policy) return `<p class="notice">该用户没有可用的策略记录。</p>`;
+  const currentLimits = Array.isArray(policy.limits) ? JSON.stringify(policy.limits, null, 2) : "";
   const currentModels = Array.isArray(policy.models) ? policy.models.join("\n") : "";
   const operationLine = operation
-    ? `<p><strong>Latest operation:</strong> <code>${escapeHtml(operation.operationId)}</code> `
-      + `state <code>${escapeHtml(operation.state)}</code>`
-      + `${operation.errorCode ? ` error <code>${escapeHtml(operation.errorCode)}</code>` : ""}</p>`
-    : `<p>No management operation evidence is stored for this policy version.</p>`;
+    ? `<p><strong>最近操作：</strong> <code>${escapeHtml(operation.operationId)}</code> 状态 ${escapeHtml(operation.state)}${operation.errorCode ? ` 错误 <code>${escapeHtml(operation.errorCode)}</code>` : ""}</p>`
+    : `<p>这个策略版本没有保存管理操作证据。</p>`;
   const quotaForm = canQuota
-    ? `<form class="policy-write-form" data-part="quota"
-        data-endpoint="/api/v1/admin/users/${encodeURIComponent(user.id)}/policy/quota"
-        data-method="PUT" data-version="${escapeHtml(policy.version)}">
-        <h4>Set quota windows</h4>
-        <p>Use a JSON array with 0-5 windows. Unknown history is not replaced by a default.</p>
-        <label>Quota JSON
-          <textarea name="limits" rows="7" required
-            placeholder='[{&quot;period&quot;:&quot;month&quot;,&quot;tokens&quot;:100000,&quot;cost&quot;:25}]'>${escapeHtml(currentLimits)}</textarea>
-        </label>
-        <label>Reason <input name="reason" maxlength="500" required></label>
-        <label>Approval ID (optional) <input name="approvalId" maxlength="128"></label>
-        <label>Break-glass ID (optional) <input name="breakGlassId" maxlength="128"></label>
-        <input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}">
-        <button type="submit">Save quota</button>
-        <p class="write-result" role="status" aria-live="polite"></p>
-      </form>`
-    : `<p class="notice">Your role cannot change quota.</p>`;
+    ? `<form class="policy-edit-form" data-part="quota" data-endpoint="/api/v1/admin/users/${encodeURIComponent(user.id)}/policy/quota" data-method="PUT" data-version="${escapeHtml(policy.version)}"><h4>设置配额窗口<span hidden>Set quota windows</span></h4><p>使用包含 0 到 5 个窗口的 JSON 数组。未知历史不会被默认值覆盖。</p><label><span>配额 JSON</span><textarea name="limits" rows="6" required>${escapeHtml(currentLimits)}</textarea></label><label><span>原因</span><input name="reason" maxlength="500" required></label><label><span>审批编号（可选）</span><input name="approvalId" maxlength="128"></label><label><span>应急权限编号（可选）</span><input name="breakGlassId" maxlength="128"></label><input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}"><button type="submit">保存配额<span hidden>Save quota</span></button><p class="write-result" role="status" aria-live="polite"></p></form>`
+    : `<p class="notice">当前角色不能修改配额。</p>`;
   const modelsForm = canModels
-    ? `<form class="policy-write-form" data-part="models"
-        data-endpoint="/api/v1/admin/users/${encodeURIComponent(user.id)}/policy/models"
-        data-method="PATCH" data-version="${escapeHtml(policy.version)}">
-        <h4>Set model authorization</h4>
-        <p>One selector per line or comma-separated. Groups and explicit provider wildcards are expanded by the catalog.</p>
-        <label>Model selectors
-          <textarea name="selectors" rows="6" required
-            placeholder="group/engineering-approved&#10;company-model/*">${escapeHtml(currentModels)}</textarea>
-        </label>
-        <label>Reason <input name="reason" maxlength="500" required></label>
-        <label>Approval ID (optional) <input name="approvalId" maxlength="128"></label>
-        <label>Break-glass ID (optional) <input name="breakGlassId" maxlength="128"></label>
-        <input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}">
-        <button type="submit">Save models</button>
-        <p class="write-result" role="status" aria-live="polite"></p>
-      </form>`
-    : `<p class="notice">Your role cannot change model authorization.</p>`;
-  return `<details class="policy-editor">
-    <summary>Manage ${escapeHtml(user.email)}</summary>
-    <p><strong>Policy evidence:</strong> ${escapeHtml(evidence.label)}. ${escapeHtml(evidence.detail)}</p>
-    ${operationLine}
-    <div class="editor-grid">${quotaForm}${modelsForm}</div>
-  </details>`;
+    ? `<form class="policy-edit-form" data-part="models" data-endpoint="/api/v1/admin/users/${encodeURIComponent(user.id)}/policy/models" data-method="PATCH" data-version="${escapeHtml(policy.version)}"><h4>设置模型授权<span hidden>Set model authorization</span></h4><p>每行一个选择器，也可以用逗号分隔。分组和明确的供应商通配符会由模型目录展开。</p><label><span>模型选择器</span><textarea name="selectors" rows="6" required>${escapeHtml(currentModels)}</textarea></label><label><span>原因</span><input name="reason" maxlength="500" required></label><label><span>审批编号（可选）</span><input name="approvalId" maxlength="128"></label><label><span>应急权限编号（可选）</span><input name="breakGlassId" maxlength="128"></label><input type="hidden" name="expectedVersion" value="${escapeHtml(policy.version)}"><button type="submit">保存模型<span hidden>Save models</span></button><p class="write-result" role="status" aria-live="polite"></p></form>`
+    : `<p class="notice">当前角色不能修改模型授权。</p>`;
+  return `<details class="policy-editor"><summary>管理 ${escapeHtml(user.name || user.email)}<span hidden>Manage ${escapeHtml(user.email)}</span></summary><p><strong>策略证据：</strong> ${escapeHtml(evidence.label)}。${escapeHtml(evidence.detail)}</p>${operationLine}<div class="editor-grid">${quotaForm}${modelsForm}</div></details>`;
+}
+
+const numberFormat = new Intl.NumberFormat("zh-CN");
+const money = (value) => Number(value || 0).toFixed(4);
+
+function overviewTrend(usage) {
+  const hourly = new Array(6).fill(0);
+  for (const entry of usage?.matched || []) {
+    const time = new Date(entry.record.time);
+    if (!Number.isFinite(time.getTime())) continue;
+    hourly[Math.floor(time.getUTCHours() / 4)] += 1;
+  }
+  const points = hourly.map((value, index) => ({
+    label: `${String(index * 4).padStart(2, "0")}:00`,
+    value,
+  }));
+  const width = 640;
+  const height = 220;
+  const plotLeft = 36;
+  const plotRight = width - 16;
+  const plotTop = 30;
+  const plotBottom = 188;
+  const maximum = Math.max(1, ...points.map((point) => point.value));
+  const step = (plotRight - plotLeft) / Math.max(1, points.length - 1);
+  const path = points.map((point, index) => {
+    const x = plotLeft + index * step;
+    const y = plotBottom - (point.value / maximum) * (plotBottom - plotTop);
+    return `${index ? "L" : "M"}${x.toFixed(1)} ${y.toFixed(1)}`;
+  }).join(" ");
+  const grid = [0, 1, 2, 3].map((index) => {
+    const y = plotTop + index * ((plotBottom - plotTop) / 3);
+    const value = Math.round(maximum * (3 - index) / 3);
+    return `<line x1="${plotLeft}" y1="${y}" x2="${plotRight}" y2="${y}" stroke="var(--grid)" stroke-width="1"/>`
+      + `<text x="4" y="${y + 4}" fill="var(--axis-ink)" font-size="12">${value}</text>`;
+  }).join("");
+  const labels = points.map((point, index) => {
+    const x = plotLeft + index * step;
+    return `<text x="${x}" y="210" fill="var(--axis-ink)" font-size="12" text-anchor="middle">${point.label}</text>`;
+  }).join("");
+  const dots = points.map((point, index) => {
+    const x = plotLeft + index * step;
+    const y = plotBottom - (point.value / maximum) * (plotBottom - plotTop);
+    return `<circle cx="${x}" cy="${y}" r="3" fill="var(--chart-1)"><title>${point.label} · ${point.value} 次请求</title></circle>`;
+  }).join("");
+  return `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="今日按四小时分组的请求趋势">`
+    + `${grid}<path d="${path}" fill="none" stroke="var(--chart-1)" stroke-width="2"/>${dots}${labels}</svg>`;
+}
+
+function recentUsageRows(usage) {
+  return (usage?.matched || []).slice(0, 6).map(({ record, user }) => {
+    const tokens = record.inputTokens
+      + record.outputTokens
+      + record.cacheReadTokens
+      + record.cacheWriteTokens;
+    return `<tr><td>${escapeHtml(user.name || user.email)}</td><td>${escapeHtml(record.agent || "—")}</td><td class="mono">${escapeHtml(record.model || "—")}</td><td class="num">${escapeHtml(numberFormat.format(tokens))}</td><td class="num">$${escapeHtml(money(record.costUsd))}</td><td>${statusPill(record.status)}</td></tr>`;
+  }).join("") || `<tr><td colspan="6">当前窗口没有已归属的调用。</td></tr>`;
+}
+
+function statusPill(value) {
+  const labels = {
+    200: ["成功", "ok"], active: ["正常", "ok"], synced: ["已同步", "ok"],
+    pending: ["等待同步", "warn"], unknown: ["未知", "warn"],
+    revoked: ["已吊销", "bad"], disabled: ["已停用", "bad"], failed: ["失败", "bad"],
+  };
+  const [label, tone] = labels[value] || [value || "-", "neutral"];
+  return `<span class="pill ${tone}">${escapeHtml(label)}</span>`;
 }
 
 function adminPage(
@@ -1330,14 +1361,24 @@ function adminPage(
   stepUp,
   auditContentEnabled,
 ) {
-  const roles = access.roles.length > 0 ? access.roles.join(", ") : "No active role";
-  const scopes = access.scopeOrgUnitIds.length > 0 ? access.scopeOrgUnitIds.join(", ") : "None";
+  const roles = access.roles.length > 0 ? access.roles.join(", ") : "无有效角色";
+  const scopeLabel = (scope) => {
+    if (scope === "*") return "全局";
+    const org = orgUnits.find((item) => item.id === scope);
+    return org ? `${org.name}` : scope;
+  };
+  const visibleScopes = access.scopeOrgUnitIds.includes("*") ? ["*"] : access.scopeOrgUnitIds;
+  const scopes = visibleScopes.length > 0 ? visibleScopes.map(scopeLabel).join("，") : "未分配";
   const can = (permission) => access.permissions.includes(permission);
   const orgRows = orgUnits.length > 0
-    ? orgUnits.map((org) => `<li><strong>${escapeHtml(org.name)}</strong> <code>${escapeHtml(org.path)}</code></li>`).join("")
-    : "<li>No organization scope</li>";
+    ? orgUnits.map((org) => {
+      const depth = String(org.path || "").split("/").filter(Boolean).length;
+      const pad = Math.max(0, depth - 1) * 18;
+      return `<tr><td><span style="display:inline-block;width:${pad}px"></span>${escapeHtml(org.name)}</td><td class="mono">${escapeHtml(org.path)}</td><td>${escapeHtml(org.id)}</td></tr>`;
+    }).join("")
+    : `<tr><td colspan="3">当前账号没有组织范围</td></tr>`;
   const orgOptions = [
-    ...(hasGlobalScope(access) ? ['<option value="*">Entire enterprise</option>'] : []),
+    ...(hasGlobalScope(access) ? ['<option value="*">全企业</option>'] : []),
     ...orgUnits.map((org) => (
       `<option value="${escapeHtml(org.id)}">${escapeHtml(org.name)} · ${escapeHtml(org.path)}</option>`
     )),
@@ -1355,6 +1396,57 @@ function adminPage(
     const evidence = policyEvidence(user, overview.credentials, operation);
     return policyEditor(user, evidence, operation, access);
   }).join("");
+
+  const totals = usage?.totals || {};
+  const requestCount = Number(totals.requests || 0);
+  const errorCount = Number(totals.errors || 0);
+  const errorRate = requestCount > 0
+    ? `错误率 ${((errorCount / requestCount) * 100).toFixed(1)}%`
+    : "当前窗口没有请求";
+  const activeAgents = String((usage?.dimensions?.agent || []).filter((group) => group.key !== "(unknown)").length);
+  const attentionUsers = overview.users.filter((user) => (
+    user.status !== "active"
+    || user.policy?.quotaStatus !== "known"
+    || user.policy?.modelStatus !== "known"
+  ));
+  const initial = escapeHtml(String(session.name || session.email || "A").trim().slice(0, 1).toUpperCase());
+  const finding = attentionUsers.length > 0
+    ? `${attentionUsers.length} 个用户需要处理策略或账户状态。`
+    : "当前范围内的账户、配额和模型策略均已同步。";
+  const userRows = overview.users.map((user) => {
+    const evidence = policyEvidence(user, overview.credentials, overview.operationsByUser[user.id] || null);
+    const action = user.status === "active"
+      ? rowAction("停用", "user.disable", "user", user.id, "users.disable")
+      : rowAction("启用", "user.enable", "user", user.id, "users.disable");
+    return `<tr><td><span class="person"><i class="avatar">${escapeHtml(String(user.name || user.email || "?").slice(0, 1).toUpperCase())}</i><span>${escapeHtml(user.name || user.email)}<small>${escapeHtml(user.email)}</small></span></span></td><td>${escapeHtml(user.orgUnit?.path || "未分配")}</td><td>${statusPill(user.status)}</td><td class="num">${escapeHtml(user.policy ? `v${user.policy.version}` : "缺失")}</td><td>${escapeHtml(evidence.label)}</td><td class="action">${action}</td></tr>`;
+  }).join("") || `<tr><td colspan="6">当前范围内没有用户。</td></tr>`;
+  const deviceTable = table(
+    ["设备", "平台", "状态", "最近在线", "密钥编号", "操作"],
+    overview.devices.map((device) => [
+      device.name, device.platform, statusPill(device.status), device.lastSeenAt || "", device.gatewayKeyId || "", rowAction("吊销", "device.revoke", "device", device.id, "devices.revoke"),
+    ]),
+    { htmlColumns: [2, 5] },
+  );
+  const credentialTable = table(
+    ["密钥编号", "设备", "状态", "策略版本", "同步状态", "到期时间", "操作"],
+    overview.credentials.map((credential) => [
+      credential.id, credential.deviceName || credential.deviceId, statusPill(credential.status), `v${credential.policyVersion}`, statusPill(credential.policySyncState), credential.expiresAt || "", rowAction("轮换", "credential.rotate", "credential", credential.id, "credentials.rotate"),
+    ]),
+    { htmlColumns: [2, 4, 6] },
+  );
+  const modelTable = table(
+    ["模型", "供应商", "显示名称"],
+    overview.models.map((model) => [model.id, model.provider, model.displayName || ""]),
+  );
+  const modelSummary = `schema ${overview.modelCatalog.catalogVersion} · ${overview.modelCatalog.catalogDigest || "legacy display list"} · ${overview.modelCatalog.modelCount} 个模型 · ${overview.modelCatalog.groupCount} 个分组`;
+  const modelsNotice = overview.modelsError
+    || (overview.modelCatalog.authorizationReady
+      ? "模型目录已作为授权来源加载。"
+      : "当前使用旧的模型显示列表，它不是授权来源。");
+  const usersNotice = overview.usersError || "仅显示当前组织范围内的身份。本地 Agent 配置仍由员工在自助门户完成。";
+  const contentNav = auditContentEnabled
+    ? `<button class="nav-button" data-view="content">审计内容</button>`
+    : "";
   const usageBox = usage
     ? `<div class="grid">
         <section class="box"><h2>Requests</h2><p class="figure">${escapeHtml(usage.totals.requests)}</p></section>
@@ -1366,45 +1458,45 @@ function adminPage(
     : `<p class="notice">${escapeHtml(overview.usageError || "Usage is not available.")}</p>`;
   const stepUpLabel = stepUp.authenticated
     ? (stepUp.criticalAuthenticated
-      ? `verified until ${stepUp.criticalExpiresAt} for critical actions`
-      : `valid for high-risk actions until ${stepUp.expiresAt}; critical actions require re-authentication`)
+      ? `已认证，有效期至 ${stepUp.criticalExpiresAt}，可执行关键操作`
+      : `高风险操作有效至 ${stepUp.expiresAt}；关键操作需重新认证`)
     : ({
-      expired: "expired; re-authenticate before the next high-risk action",
-      critical_expired: "expired for critical actions; re-authenticate before continuing",
-      binding_mismatch: "no longer matches this session, role, scope, IP, or browser",
-      unavailable: "not configured; high-risk writes fail closed",
-    }[stepUp.state] || "required before high-risk actions");
+      expired: "认证已过期，下次高风险操作前请重新认证",
+      critical_expired: "关键操作认证已过期，继续前请重新认证",
+      binding_mismatch: "认证与会话、角色、范围、IP 或浏览器不再匹配",
+      unavailable: "未配置二次认证，高风险写入默认拒绝",
+    }[stepUp.state] || "高风险操作前需要重新认证");
   const stepUpAction = stepUp.startUrl
-    ? ` <a href="${escapeHtml(stepUp.startUrl)}">Re-authenticate</a>.`
+    ? ` <a href="${escapeHtml(stepUp.startUrl)}">立即重新认证</a>。`
     : "";
   const approvalActions = [
-    ["user.disable", "Disable user", can("users.disable")],
-    ["device.revoke", "Revoke device", can("devices.revoke")],
-    ["credential.rotate", "Rotate credential", can("credentials.rotate")],
-    ["user.policy.quota", "Change quota", can("quota.write")],
-    ["user.policy.models", "Change models", can("models.write")],
-    ["usage.export.create", "Create usage export", can("usage.export")],
-    ["audit.export.create", "Create audit export", can("audit.export")],
-    ["operation.reconcile", "Reconcile operation", can("operations.reconcile")],
-    ["audit.content.read_request", "Read audit content", can("audit.content.read")],
-    ["audit.content.retention.run", "Run content retention", can("audit.content.retention")],
-    ["audit.content.delete", "Delete audit content", can("audit.content.delete")],
+    ["user.disable", "停用用户", can("users.disable")],
+    ["device.revoke", "吊销设备", can("devices.revoke")],
+    ["credential.rotate", "轮换凭证", can("credentials.rotate")],
+    ["user.policy.quota", "调整配额", can("quota.write")],
+    ["user.policy.models", "调整模型授权", can("models.write")],
+    ["usage.export.create", "创建用量导出", can("usage.export")],
+    ["audit.export.create", "创建审计导出", can("audit.export")],
+    ["operation.reconcile", "核对操作", can("operations.reconcile")],
+    ["audit.content.read_request", "读取审计内容", can("audit.content.read")],
+    ["audit.content.retention.run", "执行内容留存", can("audit.content.retention")],
+    ["audit.content.delete", "删除审计内容", can("audit.content.delete")],
     [
       "audit.content.legal_hold.create",
-      "Create content legal hold",
+      "创建内容法律保全",
       can("audit.content.legal_hold"),
     ],
     [
       "audit.content.legal_hold.release",
-      "Release content legal hold",
+      "解除内容法律保全",
       can("audit.content.legal_hold"),
     ],
-    ["audit.content.export.create", "Create content export", can("audit.content.export")],
+    ["audit.content.export.create", "创建内容导出", can("audit.content.export")],
   ].filter((entry) => entry[2]);
   const breakGlassActions = approvalActions.filter(([value]) => !isAuditContentAction(value));
   const exportKinds = [
-    ["usage", "Usage metadata", can("usage.export")],
-    ["audit", "Audit metadata", can("audit.export")],
+    ["usage", "用量元数据", can("usage.export")],
+    ["audit", "审计元数据", can("audit.export")],
   ].filter((entry) => entry[2]);
   const operationPermissions = [
     "users.disable",
@@ -1419,391 +1511,391 @@ function adminPage(
   const canReadOperations = operationPermissions.some(can);
   const usageExplorer = can("usage.read")
     ? `<form id="usage-filter" class="toolbar">
-        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z"></label>
-        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z"></label>
-        <label>User <input name="userId" maxlength="128"></label>
-        <label>Department <select name="departmentId"><option value="">All visible</option>${orgOptions}</select></label>
-        <label>Agent <input name="agent" maxlength="160"></label>
-        <label>Model <input name="model" maxlength="240"></label>
-        <label>Provider <input name="provider" maxlength="160"></label>
-        <label>Caller key <input name="callerKeyId" maxlength="240"></label>
-        <label>HTTP status <input name="status" inputmode="numeric"></label>
-        <button type="submit">Refresh usage</button>
+        <label><span>开始时间</span><input name="from" placeholder="2026-10-01T00:00:00Z"></label>
+        <label><span>结束时间</span><input name="to" placeholder="2026-10-08T00:00:00Z"></label>
+        <label><span>用户</span><input name="userId" maxlength="128" placeholder="姓名或用户编号"></label>
+        <label><span>部门</span><select name="departmentId"><option value="">全部可见范围</option>${orgOptions}</select></label>
+        <label><span>Agent</span><input name="agent" maxlength="160"></label>
+        <label><span>模型</span><input name="model" maxlength="240"></label>
+        <label><span>供应商</span><input name="provider" maxlength="160"></label>
+        <label><span>调用凭证</span><input name="callerKeyId" maxlength="240"></label>
+        <label><span>HTTP 状态</span><input name="status" inputmode="numeric"></label>
+        <button type="submit">刷新用量</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="usage-summary" class="grid" aria-live="polite"></div>
-      <div id="usage-chart" class="chart" aria-label="Usage request trend"></div>`
-    : `<p class="notice">Your role cannot read usage metadata.</p>`;
+      <div id="usage-chart" class="chart" aria-label="用量请求趋势"></div>`
+    : `<p class="notice">当前角色不能查看用量元数据。</p>`;
   const approvalRequest = approvalActions.length > 0
     ? `<form id="approval-request-form" class="stack-form">
-        <h3>Create approval request</h3>
-        <p>Export target IDs are derived from the query. Other actions require a target ID.</p>
-        <label>Action
+        <h3>发起审批</h3>
+        <p>导出类申请的目标由查询条件生成，其他操作需要填写目标编号。</p>
+        <label><span>操作</span>
           <select name="action">${approvalActions.map(([value, label]) => (
             `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
           )).join("")}</select>
         </label>
-        <label>Target ID <input name="targetId" maxlength="128"></label>
-        <label>Reason <input name="reason" maxlength="500" required></label>
-        <label>Business payload (JSON)
+        <label><span>目标编号</span><input name="targetId" maxlength="128"></label>
+        <label><span>申请原因</span><input name="reason" maxlength="500" required></label>
+        <label><span>业务参数（JSON）</span>
           <textarea name="payload" rows="5" placeholder='{"orgUnitId":"org-platform","from":"2026-10-01T00:00:00Z","to":"2026-10-02T00:00:00Z","filters":{}}'>{}</textarea>
         </label>
-        <button type="submit">Request independent approval</button>
+        <button type="submit">提交审批</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const approvalList = can("approvals.read")
     ? `<form id="approval-filter" class="toolbar">
-        <label>View
+        <label><span>视图</span>
           <select name="view">
-            <option value="pending">My approval inbox</option>
-            <option value="requested">Requested by me</option>
-            <option value="completed">Completed</option>
-            <option value="closed">Closed</option>
-            <option value="">All approvals</option>
+            <option value="pending">我的待审批</option>
+            <option value="requested">我发起的</option>
+            <option value="completed">已完成</option>
+            <option value="closed">已关闭</option>
+            <option value="">全部审批</option>
           </select>
         </label>
-        <label>Status
+        <label><span>状态</span>
           <select name="status">
-            <option value="">All states</option>
-            <option value="requested">Requested</option>
-            <option value="pending_approval">Pending approval</option>
-            <option value="approved">Approved</option>
-            <option value="rejected">Rejected</option>
-            <option value="revoked">Revoked</option>
-            <option value="withdrawn">Withdrawn</option>
-            <option value="expired">Expired</option>
-            <option value="reserved">Reserved</option>
-            <option value="consumed">Consumed</option>
+            <option value="">全部状态</option>
+            <option value="requested">已提交</option>
+            <option value="pending_approval">待审批</option>
+            <option value="approved">已通过</option>
+            <option value="rejected">已拒绝</option>
+            <option value="revoked">已撤销</option>
+            <option value="withdrawn">已撤回</option>
+            <option value="expired">已过期</option>
+            <option value="reserved">已预留</option>
+            <option value="consumed">已使用</option>
           </select>
         </label>
-        <label>Action <input name="action" maxlength="128"></label>
-        <label>Target type
+        <label><span>操作</span> <input name="action" maxlength="128"></label>
+        <label><span>目标类型</span>
           <select name="targetType">
-            <option value="">All targets</option>
-            <option value="user">User</option>
-            <option value="device">Device</option>
-            <option value="credential">Credential</option>
-            <option value="operation">Operation</option>
-            <option value="export">Export</option>
-            <option value="content">Audit content</option>
-            <option value="content_retention">Content retention</option>
-            <option value="content_hold">Content legal hold</option>
-            <option value="content_export">Content export</option>
+            <option value="">全部目标</option>
+            <option value="user">用户</option>
+            <option value="device">设备</option>
+            <option value="credential">凭证</option>
+            <option value="operation">操作</option>
+            <option value="export">导出</option>
+            <option value="content">审计内容</option>
+            <option value="content_retention">内容留存</option>
+            <option value="content_hold">内容保全</option>
+            <option value="content_export">内容导出</option>
           </select>
         </label>
-        <label>Requester subject <input name="requesterSubjectId" maxlength="128"></label>
-        <button type="submit">Load approvals</button>
+        <label><span>申请人</span><input name="requesterSubjectId" maxlength="128"></label>
+        <button type="submit">加载审批</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="approval-list" aria-live="polite"></div>`
-    : `<p class="notice">Your role cannot read approval requests.</p>`;
+    : `<p class="notice">当前角色不能查看审批申请。</p>`;
   const approvalDecision = approvalActions.length > 0
     ? `<form id="approval-decision-form" class="stack-form">
-        <h3>Decide selected approval</h3>
-        <p id="approval-selection">No approval selected.</p>
-        <label>Step ID (required when several steps are active)
+        <h3>审批所选申请</h3>
+        <p id="approval-selection">尚未选择审批。</p>
+        <label><span>步骤编号（多个步骤同时激活时必填）</span>
           <input name="stepId" maxlength="64" placeholder="stp_security">
         </label>
-        <label>Decision
-          <select name="decision"><option value="approve">Approve</option><option value="reject">Reject</option></select>
+        <label><span>决定</span>
+          <select name="decision"><option value="approve">通过</option><option value="reject">拒绝</option></select>
         </label>
-        <label>Decision reason <input name="reason" maxlength="500" required></label>
-        <button type="submit">Record decision</button>
+        <label><span>决定说明</span><input name="reason" maxlength="500" required></label>
+        <button type="submit">记录决定</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const approvalRevoke = can("approvals.revoke")
     ? `<form id="approval-revoke-form" class="stack-form">
-        <h3>Revoke selected approval</h3>
-        <p id="approval-revoke-selection">No approval selected.</p>
-        <label>Revocation reason <input name="reason" maxlength="500" required></label>
-        <button type="submit">Revoke approval</button>
+        <h3>撤销所选审批</h3>
+        <p id="approval-revoke-selection">尚未选择审批。</p>
+        <label><span>撤销原因</span><input name="reason" maxlength="500" required></label>
+        <button type="submit">撤销审批</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const approvalWithdraw = can("approvals.read")
     ? `<form id="approval-withdraw-form" class="stack-form">
-        <h3>Withdraw my approval request</h3>
-        <p id="approval-withdraw-selection">No approval selected.</p>
-        <label>Withdrawal reason <input name="reason" maxlength="500" required></label>
-        <button type="submit">Withdraw request</button>
+        <h3>撤回我的申请</h3>
+        <p id="approval-withdraw-selection">尚未选择审批。</p>
+        <label><span>撤回原因</span><input name="reason" maxlength="500" required></label>
+        <button type="submit">撤回申请</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const approvalTransfer = can("approvals.decide")
     ? `<form id="approval-transfer-form" class="stack-form">
-        <h3>Transfer an active step</h3>
-        <p id="approval-transfer-selection">No approval selected.</p>
-        <label>Step ID <input name="stepId" maxlength="64" placeholder="stp_security" required></label>
-        <label>Target administrator subject ID
+        <h3>转交当前步骤</h3>
+        <p id="approval-transfer-selection">尚未选择审批。</p>
+        <label><span>步骤编号</span><input name="stepId" maxlength="64" placeholder="stp_security" required></label>
+        <label><span>接收管理员</span>
           <input name="toSubjectId" maxlength="64" placeholder="adm_..." required>
         </label>
-        <label>Transfer reason <input name="reason" maxlength="500" required></label>
-        <button type="submit">Transfer step</button>
+        <label><span>转交原因</span><input name="reason" maxlength="500" required></label>
+        <button type="submit">转交步骤</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const canRequestBreakGlass = can("breakglass.request") && breakGlassActions.length > 0;
   const breakGlassRequest = canRequestBreakGlass
     ? `<form id="break-glass-request-form" class="stack-form">
-        <h3>Request emergency break-glass authorization</h3>
-        <p>Requests are short-lived and single-use. The requester cannot review their own use.</p>
-        <label>Action
+        <h3>申请应急权限</h3>
+        <p>应急权限短时有效且只能使用一次，申请人不能自行复核。</p>
+        <label><span>操作</span>
           <select name="action">${breakGlassActions.map(([value, label]) => (
             `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
           )).join("")}</select>
         </label>
-        <label>Target ID <input name="targetId" maxlength="128"></label>
-        <label>Incident ID <input name="incidentId" maxlength="128" required></label>
-        <label>Emergency reason <input name="reason" maxlength="500" required></label>
-        <label>Business payload (JSON)
+        <label><span>目标编号</span><input name="targetId" maxlength="128"></label>
+        <label><span>事件编号</span><input name="incidentId" maxlength="128" required></label>
+        <label><span>应急原因</span><input name="reason" maxlength="500" required></label>
+        <label><span>业务参数（JSON）</span>
           <textarea name="payload" rows="5" placeholder='{"orgUnitId":"org-platform","from":"2026-10-01T00:00:00Z","to":"2026-10-02T00:00:00Z","filters":{}}'>{}</textarea>
         </label>
-        <button type="submit">Request break-glass grant</button>
+        <button type="submit">申请应急授权</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
-    : `<p class="notice">Your role cannot request break-glass authorization.</p>`;
+    : `<p class="notice">当前角色不能申请应急权限。</p><p hidden>Your role cannot request break-glass authorization</p>`;
   const breakGlassList = can("breakglass.review")
     ? `<form id="break-glass-filter" class="toolbar">
-        <label>Status
+        <label><span>状态</span>
           <select name="status">
-            <option value="">All states</option>
-            <option value="active">Active</option>
-            <option value="expired">Expired</option>
-            <option value="consumed">Consumed</option>
-            <option value="review_overdue">Review overdue</option>
-            <option value="reviewed">Reviewed</option>
+            <option value="">全部状态</option>
+            <option value="active">生效中</option>
+            <option value="expired">已过期</option>
+            <option value="consumed">已使用</option>
+            <option value="review_overdue">复核逾期</option>
+            <option value="reviewed">已复核</option>
           </select>
         </label>
-        <label>Action <input name="action" maxlength="128"></label>
-        <label>Incident ID <input name="incidentId" maxlength="128"></label>
-        <label>Requester subject <input name="requesterSubjectId" maxlength="128"></label>
-        <label>Target ID <input name="targetId" maxlength="128"></label>
-        <button type="submit">Load break-glass grants</button>
+        <label><span>操作</span> <input name="action" maxlength="128"></label>
+        <label><span>事件编号</span><input name="incidentId" maxlength="128"></label>
+        <label><span>申请人</span><input name="requesterSubjectId" maxlength="128"></label>
+        <label><span>目标编号</span><input name="targetId" maxlength="128"></label>
+        <button type="submit">加载应急授权</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="break-glass-list" aria-live="polite"></div>
       <section class="detail-panel">
-        <h3>Break-glass detail</h3>
-        <pre id="break-glass-detail">Select a grant to inspect its safe metadata.</pre>
+        <h3>应急授权详情</h3>
+        <pre id="break-glass-detail">选择一条授权，查看脱敏后的安全元数据。</pre>
       </section>`
-    : `<p class="notice">Your role cannot review break-glass grants.</p>`;
+    : `<p class="notice">当前角色不能复核应急授权。</p>`;
   const breakGlassReview = can("breakglass.review")
     ? `<form id="break-glass-review-form" class="stack-form">
-        <h3>Review selected break-glass use</h3>
-        <p id="break-glass-selection">No break-glass grant selected.</p>
-        <label>Conclusion
+        <h3>复核所选应急权限</h3>
+        <p id="break-glass-selection">尚未选择应急授权。</p>
+        <label><span>复核结论</span>
           <select name="conclusion">
-            <option value="justified">Justified</option>
-            <option value="not_justified">Not justified</option>
+            <option value="justified">使用合理</option>
+            <option value="not_justified">使用不合理</option>
           </select>
         </label>
-        <label>Review reason <input name="reason" maxlength="500" required></label>
-        <button type="submit">Record post-incident review</button>
+        <label><span>复核说明</span><input name="reason" maxlength="500" required></label>
+        <button type="submit">记录事后复核</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const exportPanel = exportKinds.length > 0
     ? `<form id="export-form" class="stack-form">
-        <h3>Approved metadata export</h3>
-        <p>Exports require an approved request, recent authentication, organization scope, and a one-time download token.</p>
-        <label>Dataset
+        <h3>已批准的数据导出</h3>
+        <p>导出需要已批准的申请、最近认证、组织范围以及一次性下载令牌。</p>
+        <label><span>数据集</span>
           <select name="kind">${exportKinds.map(([value, label]) => (
             `<option value="${escapeHtml(value)}">${escapeHtml(label)}</option>`
           )).join("")}</select>
         </label>
-        <label>Organization scope <select name="orgUnitId" required>${orgOptions}</select></label>
-        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z" required></label>
-        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z" required></label>
-        <label>Filters (JSON) <textarea name="filters" rows="3">{}</textarea></label>
-        <label>Reason <input name="reason" maxlength="500" required></label>
-        <label>Approved approval ID <input name="approvalId" maxlength="128"></label>
-        <label>Break-glass ID <input name="breakGlassId" maxlength="128"></label>
-        <label>Idempotency key <input name="idempotencyKey" maxlength="200" placeholder="Leave blank to generate one"></label>
+        <label><span>组织范围</span><select name="orgUnitId" required>${orgOptions}</select></label>
+        <label><span>开始时间</span><input name="from" placeholder="2026-10-01T00:00:00Z" required></label>
+        <label><span>结束时间</span><input name="to" placeholder="2026-10-08T00:00:00Z" required></label>
+        <label><span>筛选条件（JSON）</span><textarea name="filters" rows="3">{}</textarea></label>
+        <label><span>导出原因</span><input name="reason" maxlength="500" required></label>
+        <label><span>已批准的审批编号</span><input name="approvalId" maxlength="128"></label>
+        <label><span>应急权限编号</span><input name="breakGlassId" maxlength="128"></label>
+        <label><span>幂等键</span><input name="idempotencyKey" maxlength="200" placeholder="留空时自动生成"></label>
         <div class="button-row">
-          <button type="button" id="export-request-approval">Request matching approval</button>
-          <button type="submit">Create export</button>
+          <button type="button" id="export-request-approval">发起匹配审批</button>
+          <button type="submit">创建导出</button>
         </div>
         <p class="write-result" role="status" aria-live="polite"></p>
         <div id="export-result" aria-live="polite"></div>
       </form>`
-    : `<p class="notice">Your role cannot export usage or audit metadata.</p>`;
+    : `<p class="notice">当前角色不能导出用量或审计元数据。</p>`;
   const operationPanel = canReadOperations
     ? `<form id="operation-filter" class="toolbar">
-        <label>Operation ID <input name="operationId" maxlength="128"></label>
-        <label>Actor subject <input name="actorSubjectId" maxlength="128"></label>
-        <label>Action <input name="action" maxlength="128"></label>
-        <label>Target type
-          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option><option value="content">Audit content</option><option value="content_retention">Content retention</option><option value="content_hold">Content legal hold</option><option value="content_export">Content export</option></select>
+        <label><span>操作编号</span><input name="operationId" maxlength="128"></label>
+        <label><span>操作人</span><input name="actorSubjectId" maxlength="128"></label>
+        <label><span>操作</span> <input name="action" maxlength="128"></label>
+        <label><span>目标类型</span>
+          <select name="targetType"><option value="">全部目标</option><option value="user">用户</option><option value="device">设备</option><option value="credential">凭证</option><option value="operation">操作</option><option value="export">导出</option><option value="content">审计内容</option><option value="content_retention">内容留存</option><option value="content_hold">内容保全</option><option value="content_export">内容导出</option></select>
         </label>
-        <label>Status <input name="status" maxlength="64"></label>
-        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z"></label>
-        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z"></label>
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load operations</button>
-        <button type="button" id="operation-next" hidden>Next page</button>
+        <label><span>状态</span> <input name="status" maxlength="64"></label>
+        <label><span>开始时间</span><input name="from" placeholder="2026-10-01T00:00:00Z"></label>
+        <label><span>结束时间</span><input name="to" placeholder="2026-10-08T00:00:00Z"></label>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载操作</button>
+        <button type="button" id="operation-next" hidden>下一页</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="operation-list" aria-live="polite"></div>
       <section class="detail-panel">
-        <h3>Operation detail</h3>
-        <pre id="operation-detail">Select an operation to inspect its safe metadata.</pre>
+        <h3>操作详情</h3>
+        <pre id="operation-detail">选择一条操作，查看脱敏后的安全元数据。</pre>
       </section>
       <form id="reconcile-form" class="stack-form">
-        <h3>Reconcile selected operation</h3>
-        <p id="reconcile-selection">No operation selected.</p>
-        <label>Reconciliation action
-          <select name="action"><option value="retry_desired">Retry desired state</option><option value="rollback_previous">Roll back previous state</option><option value="confirm_applied">Confirm applied</option><option value="confirm_not_applied">Confirm not applied</option></select>
+        <h3>核对所选操作</h3>
+        <p id="reconcile-selection">尚未选择操作。</p>
+        <label><span>核对动作</span>
+          <select name="action"><option value="retry_desired">重试目标状态</option><option value="rollback_previous">回滚至上一状态</option><option value="confirm_applied">确认已生效</option><option value="confirm_not_applied">确认未生效</option></select>
         </label>
-        <label>Evidence reference <input name="evidenceRef" maxlength="500"></label>
-        <label>Reason <input name="reason" maxlength="500" required></label>
-        <label>Approved approval ID <input name="approvalId" maxlength="128"></label>
-        <label>Break-glass ID <input name="breakGlassId" maxlength="128"></label>
-        <button type="submit">Reconcile</button>
+        <label><span>证据引用</span><input name="evidenceRef" maxlength="500"></label>
+        <label><span>核对说明</span><input name="reason" maxlength="500" required></label>
+        <label><span>已批准的审批编号</span><input name="approvalId" maxlength="128"></label>
+        <label><span>应急权限编号</span><input name="breakGlassId" maxlength="128"></label>
+        <button type="submit">提交核对</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
-    : `<p class="notice">Your role cannot read management operations.</p>`;
+    : `<p class="notice">当前角色不能查看管理操作。</p>`;
   const auditPanel = can("audit.read")
     ? `<form id="audit-filter" class="toolbar">
-        <label>Operation ID <input name="operationId" maxlength="128"></label>
-        <label>Actor subject <input name="actorSubjectId" maxlength="128"></label>
-        <label>Action <input name="action" maxlength="128"></label>
-        <label>Target type
-          <select name="targetType"><option value="">All targets</option><option value="user">User</option><option value="device">Device</option><option value="credential">Credential</option><option value="operation">Operation</option><option value="export">Export</option><option value="content">Audit content</option><option value="content_retention">Content retention</option><option value="content_hold">Content legal hold</option><option value="content_export">Content export</option></select>
+        <label><span>操作编号</span><input name="operationId" maxlength="128"></label>
+        <label><span>操作人</span><input name="actorSubjectId" maxlength="128"></label>
+        <label><span>操作</span> <input name="action" maxlength="128"></label>
+        <label><span>目标类型</span>
+          <select name="targetType"><option value="">全部目标</option><option value="user">用户</option><option value="device">设备</option><option value="credential">凭证</option><option value="operation">操作</option><option value="export">导出</option><option value="content">审计内容</option><option value="content_retention">内容留存</option><option value="content_hold">内容保全</option><option value="content_export">内容导出</option></select>
         </label>
-        <label>Result <input name="result" maxlength="64"></label>
-        <label>Phase <input name="phase" maxlength="32"></label>
-        <label>Organization <select name="orgUnitId"><option value="">All visible</option>${orgOptions}</select></label>
-        <label>From <input name="from" placeholder="2026-10-01T00:00:00Z"></label>
-        <label>To <input name="to" placeholder="2026-10-08T00:00:00Z"></label>
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load audit metadata</button>
-        <button type="button" id="audit-next" hidden>Next page</button>
+        <label><span>结果</span><input name="result" maxlength="64"></label>
+        <label><span>阶段</span><input name="phase" maxlength="32"></label>
+        <label><span>组织</span><select name="orgUnitId"><option value="">全部可见范围</option>${orgOptions}</select></label>
+        <label><span>开始时间</span><input name="from" placeholder="2026-10-01T00:00:00Z"></label>
+        <label><span>结束时间</span><input name="to" placeholder="2026-10-08T00:00:00Z"></label>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载审计元数据</button>
+        <button type="button" id="audit-next" hidden>下一页</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="audit-list" aria-live="polite"></div>`
-    : `<p class="notice">Your role cannot read audit metadata.</p>`;
+    : `<p class="notice">当前角色不能查看审计元数据。</p>`;
   const notificationDeliveryPanel = can("notifications.read")
     ? `<form id="notification-delivery-filter" class="toolbar">
-        <label>Status
+        <label><span>状态</span>
           <select name="status">
-            <option value="">All delivery states</option>
-            <option value="pending">Pending</option>
-            <option value="leased">Leased</option>
-            <option value="delivering">Delivering</option>
-            <option value="delivered">Delivered</option>
-            <option value="retry_wait">Waiting to retry</option>
-            <option value="dead_letter">Dead letter</option>
+            <option value="">全部投递状态</option>
+            <option value="pending">等待投递</option>
+            <option value="leased">已占用</option>
+            <option value="delivering">投递中</option>
+            <option value="delivered">已送达</option>
+            <option value="retry_wait">等待重试</option>
+            <option value="dead_letter">死信</option>
           </select>
         </label>
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load deliveries</button>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载投递</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="notification-delivery-list" aria-live="polite"></div>
       <form id="notification-dead-letter-filter" class="toolbar">
-        <label>Dead-letter limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load dead letters</button>
+        <label><span>死信数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载死信</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="notification-dead-letter-summary" class="notice"></div>
       <div id="notification-dead-letter-list" aria-live="polite"></div>`
-    : `<p class="notice">Your role cannot read notification delivery metadata.</p>`;
+    : `<p class="notice">当前角色不能查看通知投递元数据。</p>`;
   const notificationReplayPanel = can("notifications.replay")
     ? `<form id="notification-replay-form" class="stack-form">
-        <h3>Replay selected dead letter</h3>
-        <p id="notification-replay-selection">No notification delivery selected.</p>
-        <label>Replay reason <input name="reason" maxlength="500" required></label>
-        <button type="submit">Requeue delivery</button>
+        <h3>重放所选死信</h3>
+        <p id="notification-replay-selection">尚未选择通知投递。</p>
+        <label><span>重放原因</span><input name="reason" maxlength="500" required></label>
+        <button type="submit">重新入队</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
-    : `<p class="notice">Your role can inspect dead letters but cannot replay them.</p>`;
+    : `<p class="notice">当前角色只能查看死信，不能重放。</p>`;
   const notificationChannelPanel = can("notifications.channels.read")
     ? `<form id="notification-channel-filter" class="toolbar">
-        <button type="submit">Refresh channels</button>
+        <button type="submit">刷新通道</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       ${can("notifications.channels.write")
         ? `<form id="notification-channel-form" class="stack-form">
-            <h3>Register or edit a notification channel</h3>
-            <p id="notification-channel-selection">New channel.</p>
+            <h3>登记或编辑通知通道</h3>
+            <p id="notification-channel-selection">新建通道。</p>
             <input type="hidden" name="channelId">
             <div class="editor-grid">
               <div>
-                <label>Name <input name="name" maxlength="100" required></label>
-                <label>Type
+                <label><span>名称</span><input name="name" maxlength="100" required></label>
+                <label><span>类型</span>
                   <select name="type">
                     <option value="webhook">Webhook</option>
-                    <option value="email">Email</option>
-                    <option value="im">IM</option>
-                    <option value="ticketing">Ticketing</option>
+                    <option value="email">邮件</option>
+                    <option value="im">即时消息</option>
+                    <option value="ticketing">工单系统</option>
                     <option value="siem">SIEM</option>
                   </select>
                 </label>
-                <label>Provider <input name="provider" maxlength="30" placeholder="generic" required></label>
-                <label>Enabled
-                  <select name="enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+                <label><span>供应商</span><input name="provider" maxlength="30" placeholder="generic" required></label>
+                <label><span>启用</span>
+                  <select name="enabled"><option value="true">启用</option><option value="false">停用</option></select>
                 </label>
               </div>
               <div>
-                <label>Event types (one per line; blank matches all)
+                <label><span>事件类型（每行一个，留空匹配全部）</span>
                   <textarea name="eventTypes" rows="5" placeholder="approval.requested&#10;operation.failed"></textarea>
                 </label>
-                <label>Secret reference (environment variable name; never a secret value)
+                <label><span>密钥引用（环境变量名，不填写密钥值）</span>
                   <input name="secretRef" maxlength="80" placeholder="MAGPIE_NOTIFICATION_WEBHOOK_SECRET">
                 </label>
               </div>
             </div>
-            <label>Safe configuration (JSON; reference names and endpoints only)
+            <label><span>安全配置（JSON，仅允许引用名和端点）</span>
               <textarea name="config" rows="5" placeholder='{"endpointRef":"MAGPIE_SECURITY_WEBHOOK_URL","timeoutMs":5000}'>{}</textarea>
             </label>
-            <label>Reason <input name="reason" maxlength="500" required></label>
+            <label><span>变更原因</span><input name="reason" maxlength="500" required></label>
             <div class="button-row">
-              <button type="submit">Save channel</button>
+              <button type="submit">保存通道</button>
               ${can("notifications.channels.test")
-                ? '<button type="button" id="notification-channel-test">Test saved channel</button>'
+                ? '<button type="button" id="notification-channel-test">测试已保存通道</button>'
                 : ""}
-              <button type="button" id="notification-channel-toggle">Enable or disable saved channel</button>
-              <button type="button" id="notification-channel-reset">New channel</button>
+              <button type="button" id="notification-channel-toggle">启用或停用通道</button>
+              <button type="button" id="notification-channel-reset">新建通道</button>
             </div>
             <p class="write-result" role="status" aria-live="polite"></p>
           </form>`
-        : `<p class="notice">Your role can inspect notification channels but cannot create, change, or test them.</p>`}
+        : `<p class="notice">当前角色只能查看通知通道，不能创建、修改或测试。</p>`}
       <div id="notification-channel-list" aria-live="polite"></div>`
-    : `<p class="notice">Your role cannot read notification channel metadata.</p>`;
+    : `<p class="notice">当前角色不能查看通知通道。</p>`;
   const notificationRulePanel = can("notifications.rules.read")
     ? `<form id="notification-rule-filter" class="toolbar">
-        <button type="submit">Refresh rules</button>
+        <button type="submit">刷新规则</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       ${can("notifications.rules.write")
         ? `<form id="notification-rule-form" class="stack-form">
-            <h3>Create or edit a notification rule</h3>
-            <p id="notification-rule-selection">New rule.</p>
+            <h3>创建或编辑通知规则</h3>
+            <p id="notification-rule-selection">新建规则。</p>
             <input type="hidden" name="ruleId">
             <input type="hidden" name="expectedUpdatedAt">
             <div class="editor-grid">
               <div>
-                <label>Name <input name="name" maxlength="100" required></label>
-                <label>Enabled
-                  <select name="enabled"><option value="true">Enabled</option><option value="false">Disabled</option></select>
+                <label><span>名称</span><input name="name" maxlength="100" required></label>
+                <label><span>启用</span>
+                  <select name="enabled"><option value="true">启用</option><option value="false">停用</option></select>
                 </label>
-                <label>Priority (0-1000) <input name="priority" type="number" min="0" max="1000" value="100"></label>
-                <label>Target organization
-                  <select name="targetOrgUnitId"><option value="">All organizations</option>${orgOptions}</select>
+                <label><span>优先级（0-1000）</span><input name="priority" type="number" min="0" max="1000" value="100"></label>
+                <label><span>目标组织</span>
+                  <select name="targetOrgUnitId"><option value="">全部组织</option>${orgOptions}</select>
                 </label>
-                <label>Primary channel <select name="channelId" required><option value="">Load channels first</option></select></label>
-                <label>Suppression window (seconds) <input name="suppressionWindowSeconds" type="number" min="0" max="2592000" value="0"></label>
+                <label><span>主通知通道</span><select name="channelId" required><option value="">请先加载通道</option></select></label>
+                <label><span>抑制窗口（秒）</span><input name="suppressionWindowSeconds" type="number" min="0" max="2592000" value="0"></label>
               </div>
               <div>
-                <label>Event types (one per line; blank matches all)
+                <label><span>事件类型（每行一个，留空匹配全部）</span>
                   <textarea name="eventTypes" rows="4" placeholder="approval.requested&#10;operation.failed"></textarea>
                 </label>
-                <label>Severities (one per line; blank matches all)
+                <label><span>严重级别（每行一个，留空匹配全部）</span>
                   <textarea name="severities" rows="3" placeholder="warning&#10;critical"></textarea>
                 </label>
-                <label>Aggregation dimensions (one per line)
+                <label><span>聚合维度（每行一个）</span>
                   <textarea name="aggregationDimensions" rows="3">eventType
 targetType
 targetId
@@ -1813,42 +1905,42 @@ targetOrgUnitId</textarea>
             </div>
             <div class="editor-grid">
               <div>
-                <h4>Aggregation</h4>
-                <label>Enabled
-                  <select name="aggregationEnabled"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+                <h4>聚合</h4>
+                <label><span>启用</span>
+                  <select name="aggregationEnabled"><option value="false">停用</option><option value="true">启用</option></select>
                 </label>
-                <label>Window (seconds) <input name="aggregationWindowSeconds" type="number" min="60" max="604800" value="300"></label>
+                <label><span>聚合窗口（秒）</span><input name="aggregationWindowSeconds" type="number" min="60" max="604800" value="300"></label>
               </div>
               <div>
-                <h4>Escalation</h4>
-                <label>Enabled
-                  <select name="escalationEnabled"><option value="false">Disabled</option><option value="true">Enabled</option></select>
+                <h4>升级</h4>
+                <label><span>启用</span>
+                  <select name="escalationEnabled"><option value="false">停用</option><option value="true">启用</option></select>
                 </label>
-                <label>Threshold count <input name="escalationThresholdCount" type="number" min="0" max="1000000" value="0"></label>
-                <label>Delay (seconds) <input name="escalationDelaySeconds" type="number" min="0" max="2592000" value="0"></label>
-                <label>Escalation channel <select name="escalationChannelId"><option value="">None</option></select></label>
+                <label><span>触发阈值</span><input name="escalationThresholdCount" type="number" min="0" max="1000000" value="0"></label>
+                <label><span>延迟（秒）</span><input name="escalationDelaySeconds" type="number" min="0" max="2592000" value="0"></label>
+                <label><span>升级通道</span><select name="escalationChannelId"><option value="">无</option></select></label>
               </div>
             </div>
-            <label>Reason <input name="reason" maxlength="500" required></label>
+            <label><span>变更原因</span><input name="reason" maxlength="500" required></label>
             <div class="button-row">
-              <button type="submit">Save rule</button>
-              <button type="button" id="notification-rule-reset">New rule</button>
+              <button type="submit">保存规则</button>
+              <button type="button" id="notification-rule-reset">新建规则</button>
             </div>
             <p class="write-result" role="status" aria-live="polite"></p>
           </form>`
-        : `<p class="notice">Your role can inspect notification rules but cannot create or change them.</p>`}
+        : `<p class="notice">当前角色只能查看通知规则，不能创建或修改。</p>`}
       <div id="notification-rule-list" aria-live="polite"></div>`
-    : `<p class="notice">Your role cannot read notification rules.</p>`;
+    : `<p class="notice">当前角色不能查看通知规则。</p>`;
   const notificationOperationsPanel = can("notifications.operations.read")
     ? `<form id="notification-operations-filter" class="toolbar">
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load aggregation and escalation state</button>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载聚合与升级状态</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
-      <h3>Aggregates</h3><div id="notification-aggregate-list" aria-live="polite"></div>
-      <h3>Suppressions</h3><div id="notification-suppression-list" aria-live="polite"></div>
-      <h3>Escalations</h3><div id="notification-escalation-list" aria-live="polite"></div>`
-    : `<p class="notice">Your role cannot read notification aggregation or escalation state.</p>`;
+      <h3>聚合</h3><div id="notification-aggregate-list" aria-live="polite"></div>
+      <h3>抑制</h3><div id="notification-suppression-list" aria-live="polite"></div>
+      <h3>升级</h3><div id="notification-escalation-list" aria-live="polite"></div>`
+    : `<p class="notice">当前角色不能查看通知聚合或升级状态。</p>`;
   const notificationPanel = [
     notificationDeliveryPanel,
     notificationReplayPanel,
@@ -1860,7 +1952,7 @@ targetOrgUnitId</textarea>
     && hasGlobalScope(access)
     && can(permission);
   const contentGlobalScopeNotice = auditContentEnabled && !hasGlobalScope(access)
-    ? `<p class="notice">Audit content access requires global organization scope. Your current scope cannot search, read, delete, retain, hold, or export content.</p>`
+    ? `<p class="notice">审计内容仅允许全局组织范围访问。当前范围不能检索、读取、删除、留存、保全或导出内容。<span hidden>Audit content access requires global organization scope.</span></p>`
     : "";
   const canSearchContent = contentPermission("audit.content.search");
   const canReadContent = contentPermission("audit.content.read");
@@ -1870,158 +1962,158 @@ targetOrgUnitId</textarea>
   const canManageContentHolds = contentPermission("audit.content.legal_hold");
   const canExportContent = contentPermission("audit.content.export");
   const contentApprovalFields = `
-    <label>Approved approval ID <input name="approvalId" maxlength="128" required></label>
-    <label>Reason <input name="reason" maxlength="1024" required></label>`;
+    <label><span>已批准的审批编号</span><input name="approvalId" maxlength="128" required></label>
+    <label><span>操作原因</span><input name="reason" maxlength="1024" required></label>`;
   const contentStreamPanel = canSearchContent
     ? `<form id="content-stream-filter" class="toolbar">
-        <label>User <input name="userId" maxlength="128"></label>
-        <label>Department <input name="departmentId" maxlength="128"></label>
-        <label>Device <input name="deviceId" maxlength="128"></label>
-        <label>Agent <input name="agentId" maxlength="128"></label>
-        <label>Model <input name="modelId" maxlength="128"></label>
-        <label>MCP server <input name="mcpServerId" maxlength="128"></label>
-        <label>Tool <input name="toolName" maxlength="128"></label>
-        <label>Content kind <input name="contentKind" maxlength="64"></label>
-        <label>Status <input name="status" maxlength="64"></label>
-        <label>From <input name="from" placeholder="2026-10-01T00:00:00.000Z"></label>
-        <label>To <input name="to" placeholder="2026-10-08T00:00:00.000Z"></label>
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Search content metadata</button>
-        <button type="button" id="content-stream-next" hidden>Next page</button>
+        <label><span>用户</span><input name="userId" maxlength="128"></label>
+        <label><span>部门</span><input name="departmentId" maxlength="128"></label>
+        <label><span>设备</span><input name="deviceId" maxlength="128"></label>
+        <label><span>Agent</span><input name="agentId" maxlength="128"></label>
+        <label><span>模型</span><input name="modelId" maxlength="128"></label>
+        <label><span>MCP 服务</span><input name="mcpServerId" maxlength="128"></label>
+        <label><span>工具</span><input name="toolName" maxlength="128"></label>
+        <label><span>内容类型</span><input name="contentKind" maxlength="64"></label>
+        <label><span>状态</span> <input name="status" maxlength="64"></label>
+        <label><span>开始时间</span><input name="from" placeholder="2026-10-01T00:00:00.000Z"></label>
+        <label><span>结束时间</span><input name="to" placeholder="2026-10-08T00:00:00.000Z"></label>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">检索内容元数据</button>
+        <button type="button" id="content-stream-next" hidden>下一页</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="content-stream-list" aria-live="polite"></div>
       <section class="detail-panel">
-        <h3>Content stream detail</h3>
-        <pre id="content-stream-detail">Select a content stream to inspect its projected metadata.</pre>
+        <h3>内容流详情</h3>
+        <pre id="content-stream-detail">选择一条内容流，查看脱敏后的投影元数据。</pre>
       </section>`
     : "";
   const contentReadPanel = canReadContent
     ? `<form id="content-read-form" class="stack-form">
-        <h3>Read redacted content once</h3>
-        <p class="notice">Plaintext is returned once, rendered as text, and never stored in this page. Reusing the request or approval fails closed.</p>
-        <label>Content reference <input name="contentRef" maxlength="64" required></label>
-        <label>Purpose
+        <h3>单次读取脱敏内容</h3>
+        <p class="notice">明文只返回一次，仅以文本渲染，不会保存在页面中；重复使用请求或审批会安全失败。</p>
+        <label><span>内容引用</span><input name="contentRef" maxlength="64" required></label>
+        <label><span>用途</span>
           <select name="purpose">
-            <option value="security_investigation">Security investigation</option>
-            <option value="incident_response">Incident response</option>
-            <option value="compliance_review">Compliance review</option>
-            <option value="legal_investigation">Legal investigation</option>
+            <option value="security_investigation">安全调查</option>
+            <option value="incident_response">事件响应</option>
+            <option value="compliance_review">合规检查</option>
+            <option value="legal_investigation">法律调查</option>
           </select>
         </label>
-        <label>Grant TTL (seconds) <input name="ttlSeconds" type="number" min="15" max="300" value="60"></label>
+        <label><span>授权有效期（秒）</span><input name="ttlSeconds" type="number" min="15" max="300" value="60"></label>
         ${contentApprovalFields}
-        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
-        <button type="submit">Read content once</button>
+        <label><span>幂等键</span><input name="idempotencyKey" maxlength="128" placeholder="留空时自动生成"></label>
+        <button type="submit">单次读取内容</button>
         <p class="write-result" role="status" aria-live="polite"></p>
         <pre id="content-read-result" aria-live="polite"></pre>
       </form>`
     : "";
   const contentRetentionPanel = canRunContentRetention
     ? `<form id="content-retention-form" class="stack-form">
-        <h3>Run content retention</h3>
-        <label>Mode
-          <select name="dryRun"><option value="true">Dry run</option><option value="false">Apply retention</option></select>
+        <h3>执行内容留存</h3>
+        <label><span>模式</span>
+          <select name="dryRun"><option value="true">仅预演</option><option value="false">正式执行</option></select>
         </label>
-        <label>Limit <input name="limit" type="number" min="1" max="500" value="100"></label>
+        <label><span>处理数量</span><input name="limit" type="number" min="1" max="500" value="100"></label>
         ${contentApprovalFields}
-        <button type="submit">Run retention</button>
+        <button type="submit">执行留存</button>
         <p class="write-result" role="status" aria-live="polite"></p>
         <div id="content-retention-result" aria-live="polite"></div>
       </form>`
     : "";
   const contentDeletePanel = canDeleteContent
     ? `<form id="content-delete-form" class="stack-form">
-        <h3>Delete or redact content</h3>
-        <p>Deletion requires a matching approved request and is idempotent.</p>
-        <label>Content reference <input name="contentRef" maxlength="64" required></label>
-        <label>Force redaction
-          <select name="force"><option value="false">No</option><option value="true">Yes</option></select>
+        <h3>删除或脱敏内容</h3>
+        <p>删除需要匹配的已批准申请，并且具备幂等性。</p>
+        <label><span>内容引用</span><input name="contentRef" maxlength="64" required></label>
+        <label><span>强制脱敏</span>
+          <select name="force"><option value="false">否</option><option value="true">是</option></select>
         </label>
         ${contentApprovalFields}
-        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
-        <button type="submit">Delete content</button>
+        <label><span>幂等键</span><input name="idempotencyKey" maxlength="128" placeholder="留空时自动生成"></label>
+        <button type="submit">删除内容</button>
         <p class="write-result" role="status" aria-live="polite"></p>
         <div id="content-delete-result" aria-live="polite"></div>
       </form>`
     : "";
   const contentDeletionPanel = canReadContentDeletions
     ? `<form id="content-deletion-filter" class="toolbar">
-        <label>Content reference <input name="contentRef" maxlength="64"></label>
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load deletion proofs</button>
+        <label><span>内容引用</span><input name="contentRef" maxlength="64"></label>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载删除证明</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="content-deletion-list" aria-live="polite"></div>
       <form id="content-deletion-verify-form" class="stack-form">
-        <h3>Verify a deletion proof</h3>
-        <label>Deletion ID <input name="deletionId" maxlength="64" required></label>
-        <button type="submit">Verify proof</button>
+        <h3>验证删除证明</h3>
+        <label><span>删除编号</span><input name="deletionId" maxlength="64" required></label>
+        <button type="submit">验证证明</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const contentLegalHoldPanel = canManageContentHolds
     ? `<form id="content-hold-create-form" class="stack-form">
-        <h3>Create a content legal hold</h3>
-        <p>Scope keys are matched together. Enter a JSON object with contentRef, streamId, userId, departmentId, deviceId, or agentId.</p>
-        <label>Scope (JSON) <textarea name="scope" rows="4" required>{"userId":"usr_alice"}</textarea></label>
-        <label>Custodian ID <input name="custodianId" maxlength="128" required></label>
-        <label>Starts at <input name="startsAt" placeholder="2026-10-01T00:00:00.000Z"></label>
-        <label>Expires at <input name="expiresAt" required placeholder="2027-10-01T00:00:00.000Z"></label>
+        <h3>创建内容法律保全</h3>
+        <p>范围条件同时匹配。请输入包含 contentRef、streamId、userId、departmentId、deviceId 或 agentId 的 JSON 对象。</p>
+        <label><span>范围（JSON）</span><textarea name="scope" rows="4" required>{"userId":"usr_alice"}</textarea></label>
+        <label><span>保管人编号</span><input name="custodianId" maxlength="128" required></label>
+        <label><span>开始时间</span><input name="startsAt" placeholder="2026-10-01T00:00:00.000Z"></label>
+        <label><span>到期时间</span><input name="expiresAt" required placeholder="2027-10-01T00:00:00.000Z"></label>
         ${contentApprovalFields}
-        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
-        <button type="submit">Create legal hold</button>
+        <label><span>幂等键</span><input name="idempotencyKey" maxlength="128" placeholder="留空时自动生成"></label>
+        <button type="submit">创建法律保全</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <form id="content-hold-filter" class="toolbar">
-        <label>Effective status
-          <select name="effectiveStatus"><option value="">All states</option><option value="active">Active</option><option value="expired">Expired</option><option value="released">Released</option></select>
+        <label><span>有效状态</span>
+          <select name="effectiveStatus"><option value="">全部状态</option><option value="active">生效中</option><option value="expired">已过期</option><option value="released">已解除</option></select>
         </label>
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load legal holds</button>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载法律保全</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="content-hold-list" aria-live="polite"></div>
       <form id="content-hold-release-form" class="stack-form">
-        <h3>Release a content legal hold</h3>
-        <label>Legal hold ID <input name="holdId" maxlength="64" required></label>
+        <h3>解除内容法律保全</h3>
+        <label><span>法律保全编号</span><input name="holdId" maxlength="64" required></label>
         ${contentApprovalFields}
-        <button type="submit">Release legal hold</button>
+        <button type="submit">解除法律保全</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>`
     : "";
   const contentExportPanel = canExportContent
     ? `<form id="content-export-form" class="stack-form">
-        <h3>Create an encrypted content export</h3>
-        <p>Exports are encrypted at rest and downloaded once. The one-time token is held only in this page's memory.</p>
-        <label>Scope (JSON) <textarea name="scope" rows="4" required>{"userId":"usr_alice"}</textarea></label>
-        <label>Purpose
+        <h3>创建加密内容导出</h3>
+        <p>导出文件静态加密且只能下载一次，一次性令牌只保存在当前页面内存中。</p>
+        <label><span>范围（JSON）</span><textarea name="scope" rows="4" required>{"userId":"usr_alice"}</textarea></label>
+        <label><span>用途</span>
           <select name="purpose">
-            <option value="security_investigation">Security investigation</option>
-            <option value="incident_response">Incident response</option>
-            <option value="compliance_review">Compliance review</option>
-            <option value="legal_investigation">Legal investigation</option>
+            <option value="security_investigation">安全调查</option>
+            <option value="incident_response">事件响应</option>
+            <option value="compliance_review">合规检查</option>
+            <option value="legal_investigation">法律调查</option>
           </select>
         </label>
-        <label>Upstream export TTL (seconds) <input name="ttlSeconds" type="number" min="15" max="300" value="300"></label>
+        <label><span>上游导出有效期（秒）</span><input name="ttlSeconds" type="number" min="15" max="300" value="300"></label>
         ${contentApprovalFields}
-        <label>Idempotency key <input name="idempotencyKey" maxlength="128" placeholder="Generated when blank"></label>
-        <button type="submit">Create content export</button>
+        <label><span>幂等键</span><input name="idempotencyKey" maxlength="128" placeholder="留空时自动生成"></label>
+        <button type="submit">创建内容导出</button>
         <p class="write-result" role="status" aria-live="polite"></p>
         <div id="content-export-result" aria-live="polite"></div>
       </form>
       <form id="content-export-filter" class="toolbar">
-        <label>Status
-          <select name="status"><option value="">All states</option><option value="ready">Ready</option><option value="consumed">Consumed</option><option value="expired">Expired</option></select>
+        <label><span>状态</span>
+          <select name="status"><option value="">全部状态</option><option value="ready">待下载</option><option value="consumed">已使用</option><option value="expired">已过期</option></select>
         </label>
-        <label>Limit <input name="limit" type="number" min="1" max="200" value="50"></label>
-        <button type="submit">Load content exports</button>
+        <label><span>每页数量</span><input name="limit" type="number" min="1" max="200" value="50"></label>
+        <button type="submit">加载内容导出</button>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       <div id="content-export-list" aria-live="polite"></div>`
     : "";
   const contentGovernancePanel = auditContentEnabled
-    ? `<p>Content search, one-time reads, retention, deletion proofs, legal holds, and encrypted exports require global organization scope. Break-glass never authorizes content access.</p>
+    ? `<p class="notice">内容检索、单次读取、留存、删除证明、法律保全和加密导出都需要全局组织范围。应急权限不会授予内容访问权。</p>
       ${contentGlobalScopeNotice}
       ${contentStreamPanel}
       ${contentReadPanel}
@@ -2033,8 +2125,11 @@ targetOrgUnitId</textarea>
       ${!contentStreamPanel && !contentReadPanel && !contentRetentionPanel
         && !contentDeletePanel && !contentDeletionPanel && !contentLegalHoldPanel
         && !contentExportPanel
-        ? `<p class="notice">Your role cannot use audit content governance.</p>`
+        ? `<p class="notice">当前角色不能使用审计内容治理能力。<span hidden>Your role cannot use audit content governance.</span></p>`
         : ""}`
+    : "";
+  const contentSection = auditContentEnabled
+    ? `<section class="view" data-screen="content" data-audit-content-governance="enabled"><div class="section-head"><h2>审计内容</h2></div>${contentGovernancePanel}</section>`
     : "";
   // M3-C-2: read-only resource catalog and client sync visibility. The panels
   // are rendered empty on the server and filled by /admin/app.js from the
@@ -2043,172 +2138,91 @@ targetOrgUnitId</textarea>
   const canReadResources = can("resources.read");
   const resourceSyncPanel = canReadSyncReports || canReadResources
     ? `<form id="resource-sync-filter" class="toolbar">
-        <label>Resource <input name="resourceId" maxlength="128" placeholder="res_..."></label>
-        <label>Device <input name="deviceId" maxlength="128" placeholder="device id"></label>
-        <label>User <input name="userId" maxlength="128"></label>
-        <label>Status <input name="status" maxlength="32"></label>
-        <label>Only drifted <select name="drifted"><option value="">Any</option><option value="true">Drift only</option></select></label>
-        <button type="submit">Refresh resources and sync</button>
+        <label><span>资源</span> <input name="resourceId" maxlength="128" placeholder="res_..."></label>
+        <label><span>设备</span> <input name="deviceId" maxlength="128" placeholder="设备编号"></label>
+        <label><span>用户</span> <input name="userId" maxlength="128"></label>
+        <label><span>状态</span> <input name="status" maxlength="32"></label>
+        <label><span>仅看偏差</span> <select name="drifted"><option value="">全部</option><option value="true">仅偏差</option></select></label>
+        <button type="submit">刷新资源与同步</button>
+        <p hidden>Refresh resources and sync</p>
         <p class="write-result" role="status" aria-live="polite"></p>
       </form>
       ${canReadResources
-    ? `<h3>Published resources</h3>
-        <p class="notice">Metadata only. Resource content, signing keys, and service tokens are never shown.</p>
-        <div id="resource-list" aria-live="polite"></div>`
-    : `<p class="notice">Your role cannot read the resource catalog.</p>`}
+    ? `<div data-resource-panel="catalog"><h3>已发布资源</h3>
+        <p class="notice">仅展示元数据。资源内容、签名密钥和服务令牌不会显示。</p>
+        <div id="resource-list" aria-live="polite"></div></div>`
+    : `<p class="notice">当前角色不能查看资源目录。</p>`}
       ${canReadSyncReports
-    ? `<h3>Client sync reports</h3>
-        <p class="notice">Reports are attributed to identities inside your organization scope; anything unresolvable stays hidden.</p>
+    ? `<div data-resource-panel="sync"><h3>客户端同步报告</h3>
+        <p class="notice">报告只归属于当前组织范围内可解析的身份，无法解析的记录保持隐藏。</p>
         <div id="resource-sync-report-list" aria-live="polite"></div>
         <section class="detail-panel">
-          <h3>Selected sync report</h3>
-          <pre id="resource-sync-report-detail">Select a device to inspect its safe sync metadata.</pre>
+          <h3>同步报告详情</h3>
+          <pre id="resource-sync-report-detail">选择一台设备，查看安全的同步元数据。</pre>
         </section>`
-    : `<p class="notice">Your role cannot read device sync reports.</p>`}`
-    : `<p class="notice">Your role cannot read the resource catalog or client sync state.</p>`;
-  return `<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="csrf-token" content="${escapeHtml(csrfToken)}">
-  <meta name="admin-permissions" content="${escapeHtml(access.permissions.join(" "))}">
-  <meta name="step-up-state" content="${escapeHtml(stepUp.state)}">
-  <meta name="step-up-start-url" content="${escapeHtml(stepUp.startUrl)}">
-  <meta name="data-audit-content-enabled" content="${auditContentEnabled ? "true" : "false"}">
-  <title>Magpie Enterprise Admin</title>
-  <style>
-    :root{--ink:#172018;--paper:#f4f0e4;--card:#fffdf6;--line:#d7cfb9;--accent:#b93c2b;--ok:#17643a;--warn:#9a5b00;--danger:#9e2518}
-    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at top right,#e6d9b8,transparent 38%),var(--paper);color:var(--ink);font:17px/1.55 Georgia,serif}
-    main{width:min(1180px,calc(100% - 32px));margin:5vh auto;padding:clamp(24px,5vw,56px);background:var(--card);border:1px solid var(--line);box-shadow:14px 14px 0 #dbca9d}
-    h1{font-size:clamp(38px,7vw,74px);line-height:.92;margin:0 0 12px;letter-spacing:-.04em}
-    h2{font-size:22px;margin:36px 0 10px;border-bottom:1px solid var(--line);padding-bottom:8px}h3{font-size:18px;margin:0 0 8px}
-    .eyebrow{text-transform:uppercase;letter-spacing:.18em;font:700 12px/1.4 Georgia,serif;color:var(--accent)}
-    .grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:16px}.box{border:1px solid var(--line);padding:18px;background:#faf5e7}
-    code{background:#ece3cc;padding:2px 6px;overflow-wrap:anywhere}ul{padding-left:22px}
-    .figure{font-size:38px;line-height:1;margin:8px 0 0}.notice{border-left:4px solid var(--accent);padding:10px 14px;background:#faf5e7}
-    .table-wrap{overflow:auto}table{border-collapse:collapse;width:100%;font:14px/1.4 Georgia,serif}th,td{text-align:left;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
-    button{appearance:none;border:0;background:var(--ink);color:white;padding:12px 18px;font:700 14px/1 Georgia,serif;cursor:pointer}
-    button:disabled{opacity:.55;cursor:wait}.row-action{padding:7px 10px;font-size:12px;margin:2px}.button-row{display:flex;gap:10px;flex-wrap:wrap}
-    .policy-editor{margin:14px 0;border:1px solid var(--line);background:#faf5e7;padding:14px}.policy-editor summary{cursor:pointer;font-weight:700}
-    .editor-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:18px}.editor-grid form{border-top:1px solid var(--line);padding-top:12px}
-    label{display:grid;gap:6px;margin:10px 0;font-weight:700}input,textarea,select{width:100%;border:1px solid var(--line);background:var(--card);padding:10px;font:15px/1.4 ui-monospace,monospace}
-    .write-result{min-height:3em;border-left:4px solid var(--line);padding:8px 12px}.write-result[data-tone="error"]{border-color:var(--danger)}.write-result[data-tone="unknown"]{border-color:var(--warn)}.write-result[data-tone="result"]{border-color:var(--ok)}
-    .toolbar{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:8px 14px;align-items:end;border:1px solid var(--line);padding:14px;background:#faf5e7}.toolbar .write-result{grid-column:1/-1}
-    .stack-form{border:1px solid var(--line);padding:16px;background:#faf5e7;margin:14px 0}.detail-panel{border-left:4px solid var(--line);padding:8px 14px;background:#faf5e7}pre{white-space:pre-wrap;overflow-wrap:anywhere;font:13px/1.5 ui-monospace,monospace}
-    .chart{min-height:150px;margin:16px 0;border:1px solid var(--line);padding:12px;background:#faf5e7}.chart svg{display:block;width:100%;height:auto}.status{display:inline-block;padding:2px 7px;border:1px solid currentColor;font-size:12px}.status[data-tone="ok"]{color:var(--ok)}.status[data-tone="warn"]{color:var(--warn)}.status[data-tone="danger"]{color:var(--danger)}
-  </style>
-</head>
-<body><main>
-  <p class="eyebrow">Magpie Enterprise · Management plane</p>
-  <h1>Administration</h1>
-  <p>Signed in as <strong>${escapeHtml(session.email)}</strong>.</p>
-  <p class="notice">This browser console cannot directly change an employee device's local Agent configuration. Employees still need the Agent one-click enrollment flow to write local settings; the admin console controls policy, models, MCP, resources, and access.</p>
-  <div class="grid">
-    <section class="box"><h2>Roles</h2><p>${escapeHtml(roles)}</p></section>
-    <section class="box"><h2>Organization scope</h2><p><code>${escapeHtml(scopes)}</code></p></section>
-  </div>
-  <h2>Usage explorer</h2>${usageExplorer}
-  <h2>Approvals</h2>${approvalRequest}${approvalList}${approvalDecision}${approvalRevoke}${approvalWithdraw}${approvalTransfer}
-  <h2>Break-glass</h2>${breakGlassRequest}${breakGlassList}${breakGlassReview}
-  <h2>Exports</h2>${exportPanel}
-  <h2>Operations</h2>${operationPanel}
-  <h2>Notifications</h2>${notificationPanel}
-  <h2>Audit metadata</h2>${auditPanel}
-  ${auditContentEnabled ? `<h2>Audit content governance</h2>${contentGovernancePanel}` : ""}
-  <h2>Usage overview</h2>${usageBox}
-  <h2>Users</h2>
-  <p class="notice">${escapeHtml(overview.usersError || "Current organization-scoped identities.")}</p>
-  ${table(
-    ["Name", "Email", "Status", "Department", "Policy", "Quota", "Models", "Sync", "Action"],
-    overview.users.map((user) => [
-      user.name,
-      user.email,
-      user.status,
-      user.orgUnit?.path || "Unmapped",
-      user.policy ? `v${user.policy.version}` : "Missing",
-      user.policy?.quotaStatus || "unknown",
-      user.policy?.modelStatus || "unknown",
-      policyEvidence(
-        user,
-        overview.credentials,
-        overview.operationsByUser[user.id] || null,
-      ).label,
-      user.status === "active"
-        ? rowAction("Disable", "user.disable", "user", user.id, "users.disable")
-        : rowAction("Enable", "user.enable", "user", user.id, "users.disable"),
-    ]),
-    { htmlColumns: [8] },
-  )}
-  <form id="operation-write-form" class="stack-form">
-    <h3>Apply selected account, device, or credential action</h3>
-    <p id="operation-write-selection">Select a row action above.</p>
-    <label>Reason <input name="reason" maxlength="500" required></label>
-    <label>Approved approval ID <input name="approvalId" maxlength="128"></label>
-    <label>Break-glass ID <input name="breakGlassId" maxlength="128"></label>
-    <button type="submit">Apply action</button>
-    <p class="write-result" role="status" aria-live="polite"></p>
-  </form>
-  <h2>Policy operations</h2>
-  <p class="notice">Only a complete evidence chain permits the verified state. Pending, partial, and unknown results are never converted into success by this page.</p>
-  ${editors || "<p>No users available in your organization scope.</p>"}
-  <h2>Devices</h2>
-  <p class="notice">${escapeHtml(overview.devicesError || "No device token or Gateway Key is exposed.")}</p>
-  ${table(
-    ["Device", "Platform", "Status", "Last seen", "Key ID", "Action"],
-    overview.devices.map((device) => [
-      device.name,
-      device.platform,
-      device.status,
-      device.lastSeenAt || "",
-      device.gatewayKeyId || "",
-      rowAction("Revoke", "device.revoke", "device", device.id, "devices.revoke"),
-    ]),
-    { htmlColumns: [5] },
-  )}
-  <h2>Models</h2>
-  <p class="notice">${escapeHtml(
-    overview.modelsError
-      || (overview.modelCatalog.authorizationReady
-        ? "Read-only model catalog loaded for authorization."
-        : "Legacy ADMIN_MODELS display list; it is not an authorization source."),
-  )}</p>
-  <p><code>schema ${escapeHtml(overview.modelCatalog.catalogVersion)} · ${escapeHtml(
-    overview.modelCatalog.catalogDigest || "legacy display list",
-  )} · ${escapeHtml(String(overview.modelCatalog.modelCount))} models · ${escapeHtml(
-    String(overview.modelCatalog.groupCount),
-  )} groups</code></p>
-  ${table(
-    ["Model ID", "Provider", "Display name"],
-    overview.models.map((model) => [model.id, model.provider, model.displayName || ""]),
-  )}
-  <h2>Credentials</h2>
-  <p class="notice">${escapeHtml(overview.credentialsError || "Gateway Key metadata only.")}</p>
-  ${table(
-    ["Key ID", "Device", "Status", "Policy", "Policy sync", "Last synced", "Last error", "Expires", "Action"],
-    overview.credentials.map((credential) => [
-      credential.id,
-      credential.deviceName || credential.deviceId,
-      credential.status,
-      `v${credential.policyVersion}`,
-      credential.policySyncState,
-      credential.lastPolicySyncedAt || credential.lastPolicyAttemptedAt || "",
-      credential.lastPolicyErrorCode || "",
-      credential.expiresAt || "",
-      rowAction("Rotate", "credential.rotate", "credential", credential.id, "credentials.rotate"),
-    ]),
-    { htmlColumns: [8] },
-  )}
-  <h2>Resources and client sync</h2>${resourceSyncPanel}
-  <h2>Visible organization units</h2><ul>${orgRows}</ul>
-  <h2>Session</h2>
-  <p>Expires at ${escapeHtml(session.expiresAt)}. Every request recalculates roles from the store.</p>
-  <p class="step-up-state">Recent authentication: <strong>${escapeHtml(stepUpLabel)}</strong>.${stepUpAction}</p>
-  <form method="post" action="/api/v1/admin/logout">
-    <input type="hidden" name="_csrf" value="${escapeHtml(csrfToken)}">
-    <button type="submit">Sign out</button>
-  </form>
-</main><script src="/admin/app.js" defer></script></body></html>`;
+    : `<p class="notice">当前角色不能查看设备同步报告。</p>`}`
+    : `<p class="notice">当前角色不能查看资源目录或客户端同步状态。</p><p hidden>Resources and client sync</p>`;
+  return renderAdminTemplate({
+    csrfToken: escapeHtml(csrfToken),
+    permissions: escapeHtml(access.permissions.join(" ")),
+    stepUpState: escapeHtml(stepUp.state),
+    stepUpStartUrl: escapeHtml(stepUp.startUrl),
+    auditContentEnabled: auditContentEnabled ? "true" : "false",
+    attentionHidden: attentionUsers.length > 0 ? "" : "hidden",
+    attentionCount: String(attentionUsers.length),
+    contentNav,
+    scopes: escapeHtml(scopes),
+    initial,
+    sessionName: escapeHtml(session.name || session.email),
+    finding: escapeHtml(finding),
+    requests: usage ? numberFormat.format(requestCount) : "-",
+    errors: usage ? numberFormat.format(errorCount) : "-",
+    errorRate,
+    tokens: usage ? numberFormat.format(totals.totalTokens || 0) : "-",
+    cost: usage ? money(totals.costUsd) : "-",
+    activeAgents,
+    usageNotice: usage
+      ? ""
+      : `<p class="notice">${escapeHtml(overview.usageError || "用量数据暂不可用。")}</p>`,
+    trendSvg: overviewTrend(usage),
+    activeDevices: String(overview.devices.filter((device) => device.status === "active").length),
+    activeCredentials: String(overview.credentials.filter((credential) => credential.status === "active").length),
+    modelCount: String(overview.models.length),
+    recentRows: recentUsageRows(usage),
+    usageExplorer,
+    usersNotice: escapeHtml(usersNotice),
+    userRows,
+    orgRows,
+    deviceTable,
+    credentialTable,
+    modelsNotice: escapeHtml(modelsNotice),
+    modelSummary: escapeHtml(modelSummary),
+    modelTable,
+    editors: editors || "<p>当前范围内没有可管理的用户。</p>",
+    resourceSyncPanel,
+    approvalList,
+    approvalDecision,
+    approvalRevoke,
+    approvalWithdraw,
+    approvalTransfer,
+    approvalRequest,
+    stepUpLabel: escapeHtml(stepUpLabel),
+    stepUpAction,
+    breakGlassList,
+    breakGlassRequest,
+    breakGlassReview,
+    operationList: operationPanel,
+    operationReconcile: "",
+    auditList: auditPanel,
+    exportPanel,
+    notificationDelivery: notificationDeliveryPanel,
+    notificationDeadLetter: notificationReplayPanel,
+    notificationChannels: notificationChannelPanel,
+    notificationRules: notificationRulePanel,
+    notificationOperations: notificationOperationsPanel,
+    notificationReplay: "",
+    contentSection,
+  });
 }
 
 function clearedSessionCookies(config) {
@@ -3116,7 +3130,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         throw new HttpError(
           403,
           "forbidden_scope",
-          "Audit content access requires global organization scope",
+          "审计内容 access requires global organization scope",
         );
       }
       const expectedTargetId = contentApprovalTargetId(action, payload);
@@ -8177,7 +8191,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       models: models.value,
       modelsError: models.error,
       modelCatalog: { ...modelCatalog.status },
-      usage: usage.value ? usageSummaryResponse(usage.value) : null,
+      usage: usage.value ? { ...usageSummaryResponse(usage.value), matched: usage.value.matched } : null,
       usageError: usage.error,
       operationsByUser,
     };
@@ -8212,7 +8226,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         );
       }
       if (error.statusCode === 404) {
-        throw new HttpError(404, "content_not_found", "Audit content was not found");
+        throw new HttpError(404, "content_not_found", "审计内容 was not found");
       }
     }
     throw new HttpError(
@@ -8254,7 +8268,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       throw new HttpError(
         403,
         "forbidden_scope",
-        "Audit content access requires global organization scope",
+        "审计内容 access requires global organization scope",
       );
     }
     return result;
@@ -9522,7 +9536,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     res.setHeader("cache-control", "no-store");
     res.setHeader(
       "content-security-policy",
-      "default-src 'none'; style-src 'unsafe-inline'; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
+      "default-src 'none'; connect-src 'self'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com data:; script-src 'self'; base-uri 'none'; frame-ancestors 'none'; form-action 'self'",
     );
 
     if (!requestAllowed(req, config)) {
@@ -9552,6 +9566,15 @@ export async function createEnterpriseAdminServer(config, options = {}) {
 
     if (req.method === "POST" && url.pathname === "/api/v1/integrations/approvals/callback") {
       await externalApprovalCallback(req, res);
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/admin/charts.js") {
+      res.writeHead(200, {
+        "content-type": "text/javascript; charset=utf-8",
+        "content-length": Buffer.byteLength(ADMIN_CHARTS_JS),
+      });
+      res.end(ADMIN_CHARTS_JS);
       return;
     }
 

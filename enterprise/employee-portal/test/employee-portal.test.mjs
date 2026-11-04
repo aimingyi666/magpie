@@ -21,21 +21,25 @@ async function listen(server) {
 }
 
 async function close(server) {
-  try {
-    server.closeAllConnections?.();
-    server.destroy();
-  } catch {}
-  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (!server.listening) return;
+  server.closeAllConnections?.();
+  await new Promise((resolve, reject) => {
+    server.close((error) => (error ? reject(error) : resolve()));
+  });
 }
 
 // Force exit so undici fetch connections do not keep the process alive.
 process.on("exit", () => {});
 
 async function fetchJson(url, opts = {}) {
-  const res = await fetch(url, opts);
-  const text = await res.text();
-  try { res.body?.cancel?.(); } catch {}
-  return { status: res.status, body: JSON.parse(text) };
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(url, { ...opts, signal: controller.signal });
+    return { status: res.status, body: JSON.parse(await res.text()) };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function baseConfig(root, overrides = {}) {
@@ -227,6 +231,3 @@ test("healthz returns service info", async () => {
     fs.rmSync(root, { recursive: true, force: true });
   }
 });
-
-// Allow the process to exit even if undici keeps fetch connections alive.
-setImmediate(() => process.exit(0));
