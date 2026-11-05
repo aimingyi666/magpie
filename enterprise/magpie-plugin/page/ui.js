@@ -413,7 +413,27 @@ const ADMIN_MESSAGES = {
     tabProviders: "Providers",
     tabRouting: "Routing",
     tabGateway: "Gateway",
+    tabResources: "Resources",
     tabUsage: "Usage",
+    resTitle: "Resources",
+    resEmpty: "The enterprise has not published any resources.",
+    resCount: "{count} resources",
+    resUpdated: "updated {time}",
+    resDelivery: "delivery {mode}",
+    resScope: "scope {scope}",
+    resDetail: "Resource",
+    resReleases: "Releases",
+    resNoReleases: "This resource has no releases yet.",
+    resClose: "Close",
+    resVersion: "version {version}",
+    resPublished: "published {time}",
+    syncTitle: "Client sync",
+    syncEmpty: "No device has reported its sync state yet.",
+    syncCount: "{count} devices",
+    syncInstalled: "{count} installed",
+    syncDrift: "{count} drifted",
+    syncReported: "reported {time}",
+    syncUser: "user {user}",
     ovGateway: "Gateway",
     ovCalls: "Requests today",
     ovRecent: "Recent requests",
@@ -547,7 +567,27 @@ const ADMIN_MESSAGES = {
     tabProviders: "供应商",
     tabRouting: "路由",
     tabGateway: "网关",
+    tabResources: "资源",
     tabUsage: "用量",
+    resTitle: "企业资源",
+    resEmpty: "企业还没有发布任何资源。",
+    resCount: "{count} 个资源",
+    resUpdated: "更新于 {time}",
+    resDelivery: "下发方式 {mode}",
+    resScope: "范围 {scope}",
+    resDetail: "资源详情",
+    resReleases: "发布记录",
+    resNoReleases: "这个资源还没有发布记录。",
+    resClose: "关闭",
+    resVersion: "版本 {version}",
+    resPublished: "发布于 {time}",
+    syncTitle: "客户端同步",
+    syncEmpty: "还没有设备上报同步状态。",
+    syncCount: "{count} 台设备",
+    syncInstalled: "已安装 {count}",
+    syncDrift: "漂移 {count}",
+    syncReported: "上报于 {time}",
+    syncUser: "用户 {user}",
     ovGateway: "网关",
     ovCalls: "今日请求",
     ovRecent: "最近调用",
@@ -681,7 +721,27 @@ const ADMIN_MESSAGES = {
     tabProviders: "供應商",
     tabRouting: "路由",
     tabGateway: "閘道",
+    tabResources: "資源",
     tabUsage: "用量",
+    resTitle: "企業資源",
+    resEmpty: "企業還沒有發布任何資源。",
+    resCount: "{count} 個資源",
+    resUpdated: "更新於 {time}",
+    resDelivery: "下發方式 {mode}",
+    resScope: "範圍 {scope}",
+    resDetail: "資源詳情",
+    resReleases: "發布記錄",
+    resNoReleases: "這個資源還沒有發布記錄。",
+    resClose: "關閉",
+    resVersion: "版本 {version}",
+    resPublished: "發布於 {time}",
+    syncTitle: "用戶端同步",
+    syncEmpty: "還沒有裝置上報同步狀態。",
+    syncCount: "{count} 台裝置",
+    syncInstalled: "已安裝 {count}",
+    syncDrift: "漂移 {count}",
+    syncReported: "上報於 {time}",
+    syncUser: "使用者 {user}",
     ovGateway: "閘道",
     ovCalls: "今日請求",
     ovRecent: "最近呼叫",
@@ -815,7 +875,27 @@ const ADMIN_MESSAGES = {
     tabProviders: "プロバイダー",
     tabRouting: "ルーティング",
     tabGateway: "ゲートウェイ",
+    tabResources: "リソース",
     tabUsage: "使用量",
+    resTitle: "エンタープライズリソース",
+    resEmpty: "まだリソースが配布されていません。",
+    resCount: "{count} 件のリソース",
+    resUpdated: "{time} 更新",
+    resDelivery: "配布 {mode}",
+    resScope: "範囲 {scope}",
+    resDetail: "リソース詳細",
+    resReleases: "リリース",
+    resNoReleases: "このリソースにはまだリリースがありません。",
+    resClose: "閉じる",
+    resVersion: "バージョン {version}",
+    resPublished: "{time} 公開",
+    syncTitle: "クライアント同期",
+    syncEmpty: "同期状態を報告したデバイスはまだありません。",
+    syncCount: "{count} 台",
+    syncInstalled: "インストール済み {count}",
+    syncDrift: "ドリフト {count}",
+    syncReported: "{time} 報告",
+    syncUser: "ユーザー {user}",
     ovGateway: "ゲートウェイ",
     ovCalls: "本日のリクエスト",
     ovRecent: "最近の呼び出し",
@@ -949,7 +1029,27 @@ const ADMIN_MESSAGES = {
     tabProviders: "Anbieter",
     tabRouting: "Routing",
     tabGateway: "Gateway",
+    tabResources: "Ressourcen",
     tabUsage: "Nutzung",
+    resTitle: "Unternehmensressourcen",
+    resEmpty: "Das Unternehmen hat noch keine Ressourcen veröffentlicht.",
+    resCount: "{count} Ressourcen",
+    resUpdated: "aktualisiert {time}",
+    resDelivery: "Bereitstellung {mode}",
+    resScope: "Bereich {scope}",
+    resDetail: "Ressource",
+    resReleases: "Veröffentlichungen",
+    resNoReleases: "Diese Ressource hat noch keine Veröffentlichung.",
+    resClose: "Schließen",
+    resVersion: "Version {version}",
+    resPublished: "veröffentlicht {time}",
+    syncTitle: "Client-Synchronisierung",
+    syncEmpty: "Noch kein Gerät hat seinen Synchronisierungsstatus gemeldet.",
+    syncCount: "{count} Geräte",
+    syncInstalled: "{count} installiert",
+    syncDrift: "{count} abweichend",
+    syncReported: "gemeldet {time}",
+    syncUser: "Benutzer {user}",
     ovGateway: "Gateway",
     ovCalls: "Anfragen heute",
     ovRecent: "Letzte Aufrufe",
@@ -1628,6 +1728,133 @@ async function saveConsole(event) {
   }
 }
 
+// The resource catalog and each device's last sync report, read-only.
+// Publishing and rollback stay in the management service until their
+// approval path can be driven from this page.
+async function loadResources() {
+  let catalog = { resources: [] };
+  let reports = { reports: [] };
+  try {
+    catalog = await adminApi("/resources");
+  } catch (error) {
+    // A role may read devices without the resource catalog, or the
+    // reverse. Each list answers on its own; the other stays empty.
+    if (!(error instanceof AdminApiError) || error.status !== 403) throw error;
+  }
+  try {
+    reports = await adminApi("/resource-sync/reports");
+  } catch (error) {
+    if (!(error instanceof AdminApiError) || error.status !== 403) throw error;
+  }
+  renderAdminResources(catalog.resources || [], reports.reports || []);
+}
+
+function renderAdminResources(resources, reports) {
+  $("resDetail").hidden = true;
+  $("resCount").textContent = ta("resCount", { count: resources.length });
+  $("resList").replaceChildren(...resources.map(catalogResourceRow));
+  $("resEmpty").hidden = resources.length > 0;
+  $("resEmpty").textContent = ta("resEmpty");
+  $("syncCount").textContent = ta("syncCount", { count: reports.length });
+  $("syncList").replaceChildren(...reports.map(syncReportRow));
+  $("syncEmpty").hidden = reports.length > 0;
+  $("syncEmpty").textContent = ta("syncEmpty");
+}
+
+function catalogResourceRow(resource) {
+  const item = el("article", "resource resource-link");
+  const main = el("div", "resource-main");
+  main.append(el("span", "resource-title", resource.name || resource.id));
+  main.append(el("span", "resource-id", resource.id));
+  main.append(el("span", "resource-meta", [
+    resource.kind,
+    resource.deliveryMode ? ta("resDelivery", { mode: resource.deliveryMode }) : "",
+    resource.updatedAt ? ta("resUpdated", { time: formatTime(resource.updatedAt) }) : "",
+    (resource.assignments || []).length
+      ? ta("resScope", { scope: resource.assignments.join(", ") })
+      : "",
+  ].filter(Boolean).join(" · ")));
+  const tone = resource.status === "active" ? "ok" : "muted";
+  item.append(main, el("span", `status status-${tone}`, resource.status || resource.kind || ""));
+  item.addEventListener("click", () => openResource(resource));
+  return item;
+}
+
+// A resource's detail is its current release and its release history; the
+// content itself is not shown here, only its version, hash and time.
+async function openResource(resource) {
+  const panel = $("resDetail");
+  panel.hidden = false;
+  $("resDetailTitle").textContent = resource.name || resource.id;
+  $("resDetailClose").textContent = ta("resClose");
+  $("resReleasesTitle").textContent = ta("resReleases");
+  $("resDetailBody").replaceChildren(
+    detailLine(resource.kind || "", resource.id),
+    detailLine(
+      resource.deliveryMode ? ta("resDelivery", { mode: resource.deliveryMode }) : "",
+      (resource.assignments || []).join(", ") || "*",
+    ),
+    detailLine(
+      resource.status || "",
+      resource.updatedAt ? ta("resUpdated", { time: formatTime(resource.updatedAt) }) : "",
+    ),
+  );
+  $("resReleases").replaceChildren();
+  $("resReleasesEmpty").hidden = true;
+  try {
+    const payload = await adminApi(`/resources/${encodeURIComponent(resource.id)}`);
+    const releases = Array.isArray(payload.releases) ? payload.releases : [];
+    $("resReleases").replaceChildren(...releases.map(releaseRow));
+    $("resReleasesEmpty").hidden = releases.length > 0;
+    $("resReleasesEmpty").textContent = ta("resNoReleases");
+  } catch (error) {
+    $("resReleasesEmpty").hidden = false;
+    $("resReleasesEmpty").textContent = error.message || ta("adminUnreachable");
+  }
+}
+
+function detailLine(label, value) {
+  const line = el("div", "detail-line");
+  if (label) line.append(el("b", "", label));
+  if (value) line.append(el("span", "", value));
+  return line;
+}
+
+function releaseRow(release) {
+  const item = el("article", "resource");
+  const main = el("div", "resource-main");
+  main.append(el(
+    "span",
+    "resource-title",
+    ta("resVersion", { version: release.resourceVersion || release.id }),
+  ));
+  main.append(el("span", "resource-meta", [
+    release.status,
+    release.hash ? String(release.hash).slice(0, 12) : "",
+    release.publishedAt || release.createdAt
+      ? ta("resPublished", { time: formatTime(release.publishedAt || release.createdAt) })
+      : "",
+  ].filter(Boolean).join(" · ")));
+  item.append(main);
+  return item;
+}
+
+function syncReportRow(report) {
+  const item = el("article", "resource");
+  const main = el("div", "resource-main");
+  main.append(el("span", "resource-title", report.deviceId || ""));
+  main.append(el("span", "resource-id", report.userId ? ta("syncUser", { user: report.userId }) : ""));
+  main.append(el("span", "resource-meta", [
+    report.status,
+    ta("syncInstalled", { count: (report.installed || []).length }),
+    ta("syncDrift", { count: report.driftCount || 0 }),
+    report.reportedAt ? ta("syncReported", { time: formatTime(report.reportedAt) }) : "",
+  ].filter(Boolean).join(" · ")));
+  const tone = (report.driftCount || 0) > 0 ? "danger" : "ok";
+  item.append(main, el("span", `status status-${tone}`, report.status || ""));
+  return item;
+}
+
 function selectTab(name) {
   adminTab = name;
   for (const button of document.querySelectorAll("#adminTabs .tab")) {
@@ -1663,6 +1890,8 @@ async function loadAdminTab() {
           }
           return renderGateway({ ...data, devices });
         }
+      case "resources":
+        return loadResources();
       case "usage":
         return renderUsage(await adminApi("/requests?period=week&limit=100"));
       default:
@@ -2469,8 +2698,11 @@ function translateAdmin() {
     providers: "tabProviders",
     routing: "tabRouting",
     gateway: "tabGateway",
+    resources: "tabResources",
     usage: "tabUsage",
   };
+  $("resTitle").textContent = ta("resTitle");
+  $("syncTitle").textContent = ta("syncTitle");
   for (const button of document.querySelectorAll("#adminTabs .tab")) {
     button.textContent = ta(tabNames[button.dataset.tab] || button.dataset.tab);
   }
@@ -2547,6 +2779,7 @@ $("viewAdmin").addEventListener("click", () => setView("admin"));
 $("adminSignIn").addEventListener("click", startAdminLogin);
 $("adminSignOut").addEventListener("click", signOutAdmin);
 $("adminRefresh").addEventListener("click", () => loadAdmin());
+$("resDetailClose").addEventListener("click", () => { $("resDetail").hidden = true; });
 $("consoleForm").addEventListener("submit", saveConsole);
 $("providerAdd").addEventListener("click", () => openProviderForm(null));
 $("providerForm").addEventListener("submit", saveProvider);

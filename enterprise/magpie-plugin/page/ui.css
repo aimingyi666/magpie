@@ -1,61 +1,36 @@
+/* Every colour and the typeface come from the window. The bridge
+   (pagebridge.js) sets --magpie-* from the live theme, so this page follows
+   light/dark and the reader's font instead of carrying a palette of its
+   own. The fallbacks are the window's light values, for the first paint
+   before the bridge answers. */
 :root {
   color-scheme: light;
-  --page-bg: #f6f5f1;
-  --card-bg: #fffefb;
-  --fg: #20211f;
-  --muted: #6b6d67;
-  --line: #dedcd4;
-  --line-strong: #cac7bd;
-  --accent: #1f5e4b;
-  --accent-fg: #ffffff;
-  --accent-soft: #e5f0eb;
-  --ok: #247a55;
-  --warn: #946513;
-  --error: #a33b33;
-  --muted-dot: #858780;
-  --code-bg: #efede7;
-  --glow: rgba(31, 94, 75, .13);
-  --accent-shadow: rgba(31, 94, 75, .24);
-  --accent-border: #b8d2c6;
-  --ok-border: #aac9b8;
-  --warn-border: #dfcfa9;
-  --error-border: #dfb4ae;
-  --ok-wash: #e8f3ee;
-  --warn-wash: #f5ecda;
-  --muted-wash: #eceae5;
-  --card-surface: rgba(255, 254, 251, .94);
-  --resource-surface: rgba(255, 254, 251, .88);
-  --shadow: 0 14px 40px rgba(36, 35, 30, .07);
-}
-
-html[data-theme="dark"] {
-  color-scheme: dark;
-  --page-bg: #171816;
-  --card-bg: #20211e;
-  --fg: #eceae3;
-  --muted: #a8aa9f;
-  --line: #353630;
-  --line-strong: #464840;
-  --accent: #7cc5a5;
-  --accent-fg: #11261e;
-  --accent-soft: #263d34;
-  --ok: #7cc5a5;
-  --warn: #e2b866;
-  --error: #ef8e84;
-  --muted-dot: #8d9087;
-  --code-bg: #2a2b27;
-  --glow: rgba(124, 197, 165, .10);
-  --accent-shadow: rgba(0, 0, 0, .24);
-  --accent-border: #3f6657;
-  --ok-border: #476b5b;
-  --warn-border: #6d5a35;
-  --error-border: #70443f;
-  --ok-wash: #263d34;
-  --warn-wash: #3d3524;
-  --muted-wash: #2d2e2a;
-  --card-surface: rgba(32, 33, 30, .94);
-  --resource-surface: rgba(32, 33, 30, .88);
-  --shadow: 0 18px 50px rgba(0, 0, 0, .28);
+  --page-bg: var(--magpie-bg, #f4f4f6);
+  --card-bg: var(--magpie-card, #ffffff);
+  --fg: var(--magpie-fg, #1c1c21);
+  --muted: var(--magpie-muted, #85858d);
+  --line: var(--magpie-line, #e3e3e8);
+  --line-strong: var(--magpie-line, #e3e3e8);
+  --accent: var(--magpie-accent, #4f46e5);
+  --accent-fg: var(--magpie-accent-fg, #ffffff);
+  --accent-soft: var(--magpie-accent-soft, #eeedfd);
+  --ok: var(--magpie-green, #189a58);
+  --warn: var(--magpie-amber, #b45309);
+  --error: var(--magpie-red, #d64545);
+  --muted-dot: var(--magpie-faint, #b9b9c2);
+  --code-bg: color-mix(in srgb, var(--muted) 12%, var(--card-bg));
+  --glow: transparent;
+  --accent-shadow: transparent;
+  --accent-border: color-mix(in srgb, var(--accent) 32%, var(--line));
+  --ok-border: color-mix(in srgb, var(--ok) 32%, var(--line));
+  --warn-border: color-mix(in srgb, var(--warn) 32%, var(--line));
+  --error-border: color-mix(in srgb, var(--error) 32%, var(--line));
+  --ok-wash: color-mix(in srgb, var(--ok) 10%, var(--card-bg));
+  --warn-wash: color-mix(in srgb, var(--warn) 10%, var(--card-bg));
+  --muted-wash: color-mix(in srgb, var(--muted) 12%, var(--card-bg));
+  --card-surface: var(--magpie-card, #ffffff);
+  --resource-surface: var(--magpie-card, #ffffff);
+  --shadow: none;
 }
 
 * {
@@ -71,10 +46,8 @@ html {
 body {
   margin: 0;
   min-height: 100vh;
-  background:
-    radial-gradient(circle at 12% 0%, var(--glow), transparent 34rem),
-    var(--page-bg);
-  font: 14px/1.55 -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  background: var(--page-bg);
+  font: 13px/1.45 var(--magpie-font, -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif);
   -webkit-font-smoothing: antialiased;
 }
 
@@ -84,9 +57,10 @@ code {
 }
 
 .page {
-  width: min(100%, 980px);
+  width: 100%;
+  max-width: 1100px;
   margin: 0 auto;
-  padding: 38px 30px 54px;
+  padding: 18px 22px 28px;
 }
 
 .head {
@@ -102,11 +76,11 @@ code {
 }
 
 .eyebrow {
-  margin: 0 0 7px;
-  color: var(--accent);
+  margin: 0 0 4px;
+  color: var(--muted);
   font-size: 11px;
-  font-weight: 700;
-  letter-spacing: .15em;
+  font-weight: 600;
+  letter-spacing: .08em;
 }
 
 h1,
@@ -116,58 +90,48 @@ p {
 }
 
 h1 {
-  font-size: clamp(25px, 4vw, 38px);
-  font-weight: 650;
-  letter-spacing: -.035em;
-  line-height: 1.12;
+  font-size: 20px;
+  font-weight: 600;
+  letter-spacing: -.01em;
+  line-height: 1.3;
 }
 
 .subtitle {
   max-width: 38rem;
-  margin-top: 9px;
+  margin-top: 4px;
   color: var(--muted);
-  font-size: 14px;
+  font-size: 12.5px;
 }
 
 .primary {
   flex: none;
-  min-width: 116px;
-  margin-top: 7px;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  padding: 10px 18px;
+  border: 1px solid var(--accent);
+  border-radius: 6px;
+  padding: 5px 12px;
   background: var(--accent);
   color: var(--accent-fg);
-  font-weight: 650;
+  font-size: 12.5px;
+  font-weight: 600;
   cursor: pointer;
-  box-shadow: 0 8px 22px var(--accent-shadow);
-  transition: transform .14s ease, filter .14s ease, opacity .14s ease;
 }
 
 .primary:hover:not(:disabled) {
-  filter: brightness(1.06);
-  transform: translateY(-1px);
-}
-
-.primary:active:not(:disabled) {
-  transform: translateY(0);
+  filter: brightness(1.05);
 }
 
 .primary:disabled {
   opacity: .55;
   cursor: default;
-  box-shadow: none;
 }
 
 .notice {
-  margin: 22px 0 0;
+  margin: 14px 0 0;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border-radius: 8px;
+  padding: 8px 10px;
   background: var(--card-bg);
   color: var(--muted);
   white-space: pre-line;
-  box-shadow: 0 8px 28px rgba(20, 20, 18, .04);
 }
 
 .notice-info {
@@ -193,17 +157,16 @@ h1 {
 .cards {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 14px;
-  margin-top: 24px;
+  gap: 12px;
+  margin-top: 16px;
 }
 
 .card {
   min-width: 0;
   border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 18px 19px 19px;
+  border-radius: 12px;
+  padding: 14px 16px;
   background: var(--card-surface);
-  box-shadow: var(--shadow);
 }
 
 .card-head,
@@ -215,10 +178,9 @@ h1 {
 }
 
 h2 {
-  font-size: 12px;
-  font-weight: 700;
-  letter-spacing: .09em;
-  text-transform: uppercase;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0;
 }
 
 .badge {
@@ -248,10 +210,10 @@ h2 {
 
 .value {
   overflow-wrap: anywhere;
-  margin-top: 19px;
-  font-size: 20px;
-  font-weight: 620;
-  letter-spacing: -.015em;
+  margin-top: 8px;
+  font-size: 15px;
+  font-weight: 600;
+  letter-spacing: -.01em;
 }
 
 .note {
@@ -267,11 +229,11 @@ h2 {
 }
 
 .resources {
-  margin-top: 34px;
+  margin-top: 22px;
 }
 
 .resources-head {
-  padding: 0 2px 11px;
+  padding: 0 0 8px;
   border-bottom: 1px solid var(--line);
 }
 
@@ -292,10 +254,10 @@ h2 {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
   align-items: center;
-  gap: 16px;
+  gap: 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 12px 14px;
+  border-radius: 10px;
+  padding: 9px 11px;
   background: var(--resource-surface);
 }
 
@@ -312,13 +274,13 @@ h2 {
   padding: 1px 5px;
   background: var(--code-bg);
   color: var(--fg);
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 12.5px;
+  font-family: var(--magpie-code, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 11.5px;
 }
 
 .resource-title {
   overflow-wrap: anywhere;
-  font-size: 15px;
+  font-size: 13px;
   font-weight: 600;
   line-height: 1.35;
 }
@@ -385,11 +347,12 @@ h2 {
 }
 
 .empty {
-  margin-top: 16px;
+  margin-top: 10px;
   border: 1px dashed var(--line-strong);
-  border-radius: 12px;
-  padding: 25px 18px;
+  border-radius: 8px;
+  padding: 16px 12px;
   color: var(--muted);
+  font-size: 12.5px;
   text-align: center;
 }
 
@@ -407,18 +370,18 @@ h2 {
   display: inline-flex;
   gap: 2px;
   border: 1px solid var(--line);
-  border-radius: 999px;
-  padding: 3px;
+  border-radius: 8px;
+  padding: 2px;
   background: var(--muted-wash);
 }
 
 .view {
   border: 0;
-  border-radius: 999px;
-  padding: 7px 14px;
+  border-radius: 6px;
+  padding: 4px 10px;
   background: transparent;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -430,7 +393,6 @@ h2 {
 .view.is-on {
   background: var(--card-bg);
   color: var(--fg);
-  box-shadow: 0 1px 3px rgba(20, 20, 18, .12);
 }
 
 .view-panel {
@@ -446,13 +408,12 @@ h2 {
 .admin-gate {
   display: grid;
   justify-items: start;
-  gap: 12px;
-  margin-top: 24px;
+  gap: 10px;
+  margin-top: 16px;
   border: 1px solid var(--line);
-  border-radius: 16px;
-  padding: 24px 22px;
+  border-radius: 12px;
+  padding: 16px 18px;
   background: var(--card-surface);
-  box-shadow: var(--shadow);
 }
 
 .admin-gate h2 {
@@ -523,10 +484,10 @@ h2 {
 .tab {
   border: 0;
   border-bottom: 2px solid transparent;
-  padding: 9px 13px;
+  padding: 7px 10px;
   background: none;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
   font-weight: 600;
   cursor: pointer;
 }
@@ -597,11 +558,11 @@ h2 {
 
 .form {
   display: grid;
-  gap: 12px;
-  margin-top: 16px;
+  gap: 10px;
+  margin-top: 12px;
   border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 18px;
+  border-radius: 10px;
+  padding: 14px;
   background: var(--card-surface);
 }
 
@@ -637,20 +598,20 @@ h2 {
 .field select,
 .field textarea {
   width: 100%;
-  border: 1px solid var(--line-strong);
-  border-radius: 9px;
-  padding: 8px 10px;
-  background: var(--page-bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+  background: var(--card-bg);
   color: var(--fg);
   font: inherit;
-  font-size: 13.5px;
+  font-size: 12.5px;
 }
 
 .field textarea {
   min-height: 74px;
   resize: vertical;
-  font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-  font-size: 12.5px;
+  font-family: var(--magpie-code, ui-monospace, Menlo, Consolas, monospace);
+  font-size: 12px;
 }
 
 .check {
@@ -670,10 +631,10 @@ h2 {
 .detail {
   display: grid;
   gap: 6px;
-  margin-top: 14px;
+  margin-top: 12px;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px 16px;
+  border-radius: 10px;
+  padding: 10px 12px;
   background: var(--card-surface);
   font-size: 12.5px;
 }

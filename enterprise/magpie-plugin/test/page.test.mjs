@@ -8,6 +8,8 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const HTML = fs.readFileSync(path.join(ROOT, "page", "ui.html"), "utf8");
 const JS = fs.readFileSync(path.join(ROOT, "page", "ui.js"), "utf8");
 const CSS = fs.readFileSync(path.join(ROOT, "page", "ui.css"), "utf8");
+const INDEX = fs.readFileSync(path.join(ROOT, "page", "index.html"), "utf8");
+const APP = fs.readFileSync(path.join(ROOT, "page", "app.js"), "utf8");
 
 const LANGS = ["en", "zh", "zh-TW", "ja", "de"];
 
@@ -102,6 +104,61 @@ test("a route detail shows every attempt and its source", () => {
   assert.match(render, /route\.source/);
   assert.match(render, /ta\("detailTries"/);
   assert.match(render, /detailGroup/);
+});
+
+test("the page takes the window's look, not a palette of its own", () => {
+  // The page is drawn by the plugin's service, another origin, so it cannot
+  // read the window's stylesheet. index.html (which the window serves) hands
+  // the theme's tokens to the service, which writes them out as theme.css;
+  // ui.css reads them. A palette of the page's own would drift from the
+  // window the moment either theme changes.
+  assert.match(INDEX, /<script src="_magpie\/bridge\.js"><\/script>/);
+  assert.match(APP, /magpie\.theme\?\.tokens/);
+  assert.match(APP, /searchParams\.set\("tokens"/);
+  assert.match(HTML, /href="theme\.css"/);
+  assert.ok(
+    HTML.indexOf('href="theme.css"') < HTML.indexOf('href="ui.css"'),
+    "the window's tokens load before the page's own rules",
+  );
+  assert.doesNotMatch(HTML, /_magpie\/bridge\.js/, "the service cannot serve the window's bridge");
+  // The page still talks to its parent: hello asks for the theme, and a
+  // theme event repaints an open page when the reader switches light/dark.
+  assert.match(HTML, /<script src="theme-bridge\.js"><\/script>/);
+  assert.ok(
+    HTML.indexOf('src="theme-bridge.js"') < HTML.indexOf('src="ui.js"'),
+    "the theme bridge loads before the page's script",
+  );
+  const BRIDGE = fs.readFileSync(path.join(ROOT, "page", "theme-bridge.js"), "utf8");
+  assert.match(BRIDGE, /method: "hello"/);
+  assert.match(BRIDGE, /message\.event === "theme"/);
+  assert.match(BRIDGE, /--magpie-/);
+  for (const token of ["--magpie-bg", "--magpie-card", "--magpie-fg", "--magpie-line",
+    "--magpie-accent", "--magpie-muted", "--magpie-font"]) {
+    assert.match(CSS, new RegExp(`var\\(${token}`), `ui.css should read ${token}`);
+  }
+  assert.doesNotMatch(CSS, /html\[data-theme="dark"\]/, "the page keeps no dark palette");
+  assert.doesNotMatch(CSS, /#f6f5f1|#171816/, "the old cream palette should be gone");
+});
+
+test("the resources tab reads the catalog and each device's sync report", () => {
+  // The tab shows what an administrator can read in the client: the
+  // published catalog and the last sync report per device. Publishing and
+  // rollback are not here, so the page must not promise them.
+  for (const id of ["resTitle", "resCount", "resList", "resEmpty",
+    "resDetail", "resDetailTitle", "resReleases", "resReleasesEmpty",
+    "syncTitle", "syncCount", "syncList", "syncEmpty"]) {
+    assert.match(HTML, new RegExp(`id="${id}"`), `ui.html should contain #${id}`);
+  }
+  assert.match(HTML, /data-tab="resources"/);
+  assert.match(JS, /adminApi\("\/resources"\)/);
+  assert.match(JS, /adminApi\("\/resource-sync\/reports"\)/);
+  assert.match(JS, /function catalogResourceRow\(/);
+  assert.match(JS, /function syncReportRow\(/);
+  // A resource's row opens its releases; the detail reads one resource,
+  // never the whole catalog again.
+  assert.match(JS, /function openResource\(/);
+  assert.match(JS, /adminApi\(`\/resources\/\$\{encodeURIComponent\(resource\.id\)\}`\)/);
+  assert.match(JS, /function releaseRow\(/);
 });
 
 test("an attempt row names what served it, not just the route", () => {

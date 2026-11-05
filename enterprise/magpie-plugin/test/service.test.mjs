@@ -317,3 +317,41 @@ export function createEnterpriseSyncTransport() {
     if (first) await first.catch(() => {});
   }
 });
+
+test("the window's tokens become theme.css, and nothing else", async (t) => {
+  // The page is a different origin from the window, so the window's palette
+  // arrives as data. A value that could end its declaration or load another
+  // resource is dropped, and the stylesheet's own fallback stands.
+  useStateDir(t);
+  const service = await serve(t);
+  const tokens = {
+    bg: "#f4f4f6",
+    card: "#ffffff",
+    fg: "#1c1c21",
+    font: '-apple-system, "Segoe UI", sans-serif',
+    line: "#e3e3e8;}body{display:none",
+    accent: "url(https://example.com/x)",
+  };
+  const page = await request(
+    service.port,
+    `/?tokens=${encodeURIComponent(JSON.stringify(tokens))}`,
+  );
+  assert.equal(page.status, 200);
+  const css = await request(service.port, "/theme.css");
+  assert.equal(css.status, 200);
+  assert.match(css.body, /--magpie-bg:#f4f4f6/);
+  assert.match(css.body, /--magpie-font:-apple-system/);
+  assert.doesNotMatch(css.body, /url\(/);
+  assert.doesNotMatch(css.body, /body\{display/);
+});
+
+test("the page's own theme bridge is served beside it", async (t) => {
+  // The window serves _magpie/bridge.js only under its own origin; this
+  // page is drawn here, so it loads the part that listens for the theme.
+  useStateDir(t);
+  const service = await serve(t);
+  const bridge = await request(service.port, "/theme-bridge.js");
+  assert.equal(bridge.status, 200);
+  assert.match(String(bridge.headers["content-type"]), /javascript/);
+  assert.match(bridge.body, /method: "hello"/);
+});

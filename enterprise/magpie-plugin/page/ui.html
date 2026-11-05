@@ -6,7 +6,9 @@
 <meta name="magpie-enterprise-token" content="{{MAGPIE_TOKEN}}">
 <meta name="color-scheme" content="light dark">
 <title>Enterprise</title>
+<link rel="stylesheet" href="theme.css">
 <link rel="stylesheet" href="ui.css">
+<script src="theme-bridge.js"></script>
 <script src="ui.js" defer></script>
 </head>
 <body>
@@ -91,6 +93,7 @@
         <button class="tab" type="button" data-tab="providers">Providers</button>
         <button class="tab" type="button" data-tab="routing">Routing</button>
         <button class="tab" type="button" data-tab="gateway">Gateway</button>
+        <button class="tab" type="button" data-tab="resources">Resources</button>
         <button class="tab" type="button" data-tab="usage">Usage</button>
       </nav>
 
@@ -232,6 +235,36 @@
           </div>
           <div id="gwDevices" class="list"></div>
           <p id="gwDevicesEmpty" class="empty" hidden></p>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-panel="resources" hidden>
+        <section class="resources">
+          <div class="resources-head">
+            <h2 id="resTitle">Resources</h2>
+            <span id="resCount" class="count"></span>
+          </div>
+          <p id="resNote" class="note"></p>
+          <div id="resList" class="list"></div>
+          <p id="resEmpty" class="empty" hidden></p>
+          <section id="resDetail" class="detail" hidden>
+            <div class="resources-head">
+              <h3 id="resDetailTitle">Resource</h3>
+              <button id="resDetailClose" class="linkish" type="button">Close</button>
+            </div>
+            <div id="resDetailBody"></div>
+            <h4 id="resReleasesTitle">Releases</h4>
+            <div id="resReleases" class="list"></div>
+            <p id="resReleasesEmpty" class="empty" hidden></p>
+          </section>
+        </section>
+        <section class="resources" aria-labelledby="syncTitle">
+          <div class="resources-head">
+            <h2 id="syncTitle">Client sync</h2>
+            <span id="syncCount" class="count"></span>
+          </div>
+          <div id="syncList" class="list"></div>
+          <p id="syncEmpty" class="empty" hidden></p>
         </section>
       </section>
 

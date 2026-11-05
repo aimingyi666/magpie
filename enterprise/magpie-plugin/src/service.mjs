@@ -21,6 +21,9 @@ import {
   adminBaseUrl,
 } from "./admin.mjs";
 
+const ENTERPRISE_PROVIDERS_PATH = "/v1/enterprise/providers";
+const ENTERPRISE_PROVIDERS_TIMEOUT_MS = 15000;
+
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PAGE_DIR = path.join(PLUGIN_ROOT, "page");
 
@@ -129,12 +132,19 @@ async function handle(req, res, { accessToken, admin, host }) {
       return sendUi(res, url, accessToken);
     case "/ui.js":
       return sendFile(res, path.join(PAGE_DIR, "ui.js"), "text/javascript; charset=utf-8");
+    case "/theme-bridge.js":
+      return sendFile(res, path.join(PAGE_DIR, "theme-bridge.js"), "text/javascript; charset=utf-8");
     case "/ui.css":
       return sendFile(res, path.join(PAGE_DIR, "ui.css"), "text/css; charset=utf-8");
+    case "/theme.css":
+      return sendTheme(res);
     case "/icon.svg":
       return sendFile(res, path.join(PAGE_DIR, "icon.svg"), "image/svg+xml");
     case "/healthz":
       return sendJson(res, 200, { ok: true });
+    case ENTERPRISE_PROVIDERS_PATH:
+      if (req.method !== "GET") return sendError(res, 405, "method_not_allowed", "GET only");
+      return serveEnterpriseProviders(res);
     case "/v1/status":
       if (req.method !== "GET") return sendError(res, 405, "method_not_allowed", "GET only");
       if (!tokenAllowed(req, accessToken)) {
@@ -156,6 +166,64 @@ async function handle(req, res, { accessToken, admin, host }) {
       }
       return sendError(res, 404, "not_found", "no such route");
   }
+}
+
+// serveEnterpriseProviders answers the Providers panel. Magpie's Go
+// process calls it server-side; it uses the device credential on this
+// machine and asks admin-service over the device token. It returns
+// only the public projection (name, host, models, key state, ready/off)
+// and fails closed when the credential or the admin-service is missing.
+async function serveEnterpriseProviders(res) {
+  const dir = stateDirectory();
+  const credential = readCredential(dir);
+  if (credential.state !== "ok") {
+    return sendError(res, 409, "not_joined", "no enterprise device credential was found");
+  }
+  const adminBase = adminBaseUrl() || adminConfiguredFromState();
+  if (!adminBase) {
+    return sendError(res, 409, "admin_not_configured", "the management console address is not configured");
+  }
+  const deviceToken = credential.data.deviceToken;
+  let response;
+  try {
+    response = await fetch(new URL("/api/v1/client/enterprise/providers", adminBase), {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${deviceToken}`,
+      },
+      redirect: "error",
+      signal: AbortSignal.timeout(ENTERPRISE_PROVIDERS_TIMEOUT_MS),
+    });
+  } catch {
+    return sendError(res, 503, "admin_unavailable", "The management service is unreachable");
+  }
+  let payload = null;
+  try {
+    payload = await response.json();
+  } catch {
+    payload = null;
+  }
+  if (!response.ok) {
+    const code = payload?.error?.code && /^(invalid_device_token|device_disabled|device_token_expired|missing_device_token)$/.test(payload.error.code)
+      ? payload.error.code
+      : "admin_unavailable";
+    return sendError(res, code === "admin_unavailable" ? 502 : response.status, code, "The management service refused the request");
+  }
+  const providers = Array.isArray(payload?.providers) ? payload.providers : [];
+  const projected = providers.map((provider) => ({
+    id: String(provider?.id || ""),
+    name: String(provider?.name || ""),
+    host: String(provider?.host || ""),
+    models: Array.isArray(provider?.models) ? provider.models.map(String) : [],
+    modelCount: Number.isSafeInteger(provider?.modelCount) ? provider.modelCount : (Array.isArray(provider?.models) ? provider.models.length : 0),
+    keyState: String(provider?.keyState || "missing"),
+    keyMasked: String(provider?.keyMasked || ""),
+    ready: Boolean(provider?.ready),
+    off: Boolean(provider?.off),
+    revision: String(provider?.revision || ""),
+  })).filter((provider) => provider.id);
+  return sendJson(res, 200, { providers: projected });
 }
 
 // hostAllowed refuses a name that resolves to this machine: the service is
@@ -330,6 +398,14 @@ async function handleAdmin(req, res, url, { admin, host, port }) {
     // The employees' devices, as the gateway page lists them: the
     // management service scopes them to the administrator's organization.
     ["GET", /^\/devices$/, () => admin.request("GET", "/api/v1/admin/devices")],
+    // The resource catalog and each device's last sync report. Both are
+    // read-only here: publishing and rollback stay in the management
+    // service until they have an approval path this page can drive.
+    ["GET", /^\/resources$/, () => admin.request("GET", "/api/v1/admin/resources")],
+    ["GET", /^\/resources\/(res_[a-z0-9]{16,64})$/, (_body, m) =>
+      admin.request("GET", `/api/v1/admin/resources/${m[1]}`)],
+    ["GET", /^\/resource-sync\/reports$/, () =>
+      admin.request("GET", "/api/v1/admin/resource-sync/reports")],
     ["GET", /^\/requests$/, () => {
       const query = new URLSearchParams();
       for (const name of ["period", "offset", "limit", "day", "agent", "model", "provider", "callerKeyId"]) {
@@ -416,7 +492,42 @@ async function readRequestBody(req) {
   }
 }
 
+// The window draws the page's frame from another origin, so the page cannot
+// read its stylesheet. index.html hands the theme's tokens over on the way
+// in; they become theme.css, and ui.css reads them as --magpie-*.
+const THEME_TOKENS = [
+  "bg", "card", "fg", "fg-2", "muted", "faint", "line",
+  "accent", "accent-soft", "accent-fg", "green", "red", "amber", "font", "code",
+];
+
+// themeStyle turns the window's tokens into one :root rule. A value is a
+// colour, shadow or font list: anything that could end the declaration or
+// load another resource is dropped, and an unreadable payload means no rule
+// (the stylesheet's own fallbacks stand), never a half-written one.
+function themeStyle(raw) {
+  let tokens;
+  try {
+    tokens = JSON.parse(String(raw || ""));
+  } catch {
+    return "";
+  }
+  if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return "";
+  const rules = [];
+  for (const name of THEME_TOKENS) {
+    const value = tokens[name];
+    if (typeof value !== "string") continue;
+    const text = value.trim();
+    if (!text || text.length > 300) continue;
+    if (/[;{}<>\n\r]|url\s*\(|@import|\/\*/i.test(text)) continue;
+    rules.push(`--magpie-${name}:${text}`);
+  }
+  return rules.length ? `:root{${rules.join(";")}}` : "";
+}
+
+let lastThemeCss = "";
+
 function sendUi(res, url, accessToken) {
+  lastThemeCss = themeStyle(url.searchParams.get("tokens"));
   let html;
   try {
     html = fs.readFileSync(path.join(PAGE_DIR, "ui.html"), "utf8");
@@ -481,6 +592,19 @@ function sendFile(res, file, type) {
   }
   res.writeHead(200, {
     "content-type": type,
+    "content-length": data.length,
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+    "referrer-policy": "no-referrer",
+    "content-security-policy": PAGE_CSP,
+  });
+  res.end(data);
+}
+
+function sendTheme(res) {
+  const data = Buffer.from(lastThemeCss, "utf8");
+  res.writeHead(200, {
+    "content-type": "text/css; charset=utf-8",
     "content-length": data.length,
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",

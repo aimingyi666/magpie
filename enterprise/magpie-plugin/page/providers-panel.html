@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="color-scheme" content="light dark">
+<title>Enterprise providers</title>
+<script src="_magpie/bridge.js"></script>
+<script src="providers-panel.js" defer></script>
+</head>
+<body>
+<main>
+  <p id="note" class="muted" role="status"></p>
+  <ul id="list" class="ep-list"></ul>
+  <p id="empty" class="muted" hidden></p>
+</main>
+<style>
+.ep-list{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+.ep-item{display:flex;gap:10px;align-items:center;justify-content:space-between;padding:8px 10px;border:1px solid var(--magpie-line);border-radius:8px;background:var(--magpie-card)}
+.ep-main{min-width:0}
+.ep-name{font-weight:600;display:block}
+.ep-id{font-family:var(--magpie-code,ui-monospace,monospace);font-size:12px;color:var(--magpie-muted)}
+.ep-meta{color:var(--magpie-muted);font-size:12px;display:block;margin-top:2px}
+.ep-badge{white-space:nowrap;font-size:11px;padding:2px 6px;border-radius:999px;border:1px solid var(--magpie-line);background:var(--magpie-accent-soft)}
+.muted{color:var(--magpie-muted)}
+</style>
+</body>
+</html>
