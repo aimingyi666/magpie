@@ -178,3 +178,45 @@ jobs:
         run: |
           sh -n site/public/install.sh
           node --test site/*.test.mjs
+
+  # The enterprise services are Node packages of their own, and their tests
+  # were run by hand from an acceptance checklist. A regression in admin-service
+  # therefore reached main with nothing to fail on it (LESSONS: a test that
+  # nothing runs proves nothing). Every package runs here, in its own
+  # process, so one package's store and temp files cannot leak into the next.
+  enterprise:
+    name: enterprise (${{ matrix.package }})
+    strategy:
+      fail-fast: false
+      matrix:
+        package:
+          - admin-service
+          - audit-service
+          - auth-service
+          - client-sync
+          - gateway-control
+          - local-mcp
+          - magpie-plugin
+          - mcp-gateway
+          - resource-service
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Syntax check
+        run: |
+          for f in enterprise/${{ matrix.package }}/src/*.js \
+                     enterprise/${{ matrix.package }}/src/*.mjs \
+                     enterprise/${{ matrix.package }}/*.js \
+                     enterprise/${{ matrix.package }}/*.mjs; do
+            [ -e "$f" ] || continue
+            node --check "$f"
+          done
+
+      - name: Test
+        working-directory: enterprise/${{ matrix.package }}
+        run: node --test test/*.test.mjs
