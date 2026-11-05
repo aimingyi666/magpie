@@ -38,6 +38,8 @@ if ($status.Count -eq 0) {
 Section "G1 branches not merged into main"
 $divergent = @()
 foreach ($branch in @(git for-each-ref --format="%(refname:short)" refs/heads)) {
+  # a backup is a deliberate snapshot of a merge's before-state, not a line
+  if ($branch -like "backup/*") { continue }
   git merge-base --is-ancestor $branch main 2>$null
   if ($LASTEXITCODE -ne 0) { $divergent += $branch }
 }
