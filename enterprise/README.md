@@ -37,13 +37,15 @@ MCP 端点、工具级 allow/deny、健康检查、上游凭据隔离和元数�
 强制/推荐策略和漂移检测核心；M3-C-2 已把资源目录和设备同步报告以只读、按组织范围过滤的
 方式接入管理页，并把依赖失败稳定映射为 `503 resource_service_unavailable`。`gateway-control`
 已通过 15 项 Mock/故障测试；
-auth-service 已通过 26 项测试；admin-service 已通过 109 项测试（82 项管理服务集成测试 +
+auth-service 已通过 26 项测试；admin-service 已通过 119 项测试（92 项管理服务集成测试 +
 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
 已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 14 项
 单元/Mock 集成测试；client-sync 已通过 26 项单元/Mock 集成测试（18 核心 + 8 传输）；
 local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
 + 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 34 项
-隔离测试（20 项 L0/L1 事件管道 + 14 项内容审计核心）；当前八套合计 299 项通过、0 失败。
+隔离测试（20 项 L0/L1 事件管道 + 14 项内容审计核心）；magpie-plugin 已通过 30 项隔离
+测试（员工页、管理员页、PKCE、路由白名单与页面/翻译检查）；当前九套合计 339 项通过、
+0 失败，由 `.github/workflows/test.yml` 的 `enterprise` job 在 CI 上逐包执行。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -311,7 +313,10 @@ curl http://127.0.0.1:3445/healthz
 `ADMIN_STEP_UP_REDIRECT_URI`；可选设置 `ADMIN_STEP_UP_ALLOWED_ACR_VALUES` 和三个 TTL。
 管理员打开 `https://admin.ai.corp.example/admin/`，使用企业账号 + MFA 登录。
 `ADMIN_BOOTSTRAP_SUBJECTS`/`ADMIN_BOOTSTRAP_EMAILS` 只用于创建有到期时间的首个
-`super_admin`；正式角色绑定建立后应移除。
+`super_admin`；正式角色绑定建立后应移除。bootstrap 只会写自己创建的绑定：只要该管理员
+已有一条非 bootstrap 的正式角色绑定，bootstrap 就不再写入或续期，因此移除配置即刻生效，
+过期的正式绑定也不会被悄悄续上。首次创建和过期续期都会写入
+`bootstrap.binding.created` / `bootstrap.binding.refreshed` 系统审计。
 
 当前管理面能认证管理员、执行 CSRF/IP/会话保护、计算角色和组织范围，并提供最小管理页、
 `/api/v1/admin/me`、组织单元、用户、部门、设备、凭证、模型和用量只读视图。模型视图已改为

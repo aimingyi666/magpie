@@ -9057,6 +9057,106 @@ test("M4-C gateway failures fail closed: timeout, redirect, oversized and unavai
   assert.equal(off.body.error.code, "gateway_unavailable");
 });
 
+test("M4-C a lapsed bootstrap binding is refreshed by the next sign-in", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  let current = await me(f, jar);
+  assert.equal(current.response.status, 200);
+  assert.ok(current.body.roles.includes("super_admin"));
+
+  // Lapse the bootstrap window, as a day without a sign-in does.
+  await f.admin.store.mutate((data) => {
+    for (const binding of Object.values(data.roleBindings)) {
+      binding.validTo = new Date(Date.now() - 60_000).toISOString();
+    }
+  });
+
+  const fresh = await adminLogin(f, new CookieJar());
+  current = await me(f, fresh);
+  assert.equal(current.response.status, 200);
+  assert.ok(current.body.roles.includes("super_admin"));
+  const refreshed = await f.admin.store.read((data) => ({
+    validTo: Object.values(data.roleBindings).map((binding) => binding.validTo),
+    audit: data.adminSystemAuditLogs.filter((row) => row.action.startsWith("bootstrap.binding.")),
+  }));
+  assert.ok(refreshed.validTo.every((to) => Date.parse(to) > Date.now()));
+  // One record for the first sign-in that created it, one for the refresh.
+  assert.deepEqual(refreshed.audit.map((row) => row.action), [
+    "bootstrap.binding.created",
+    "bootstrap.binding.refreshed",
+  ]);
+  assert.ok(refreshed.audit[1].previousValidTo);
+});
+
+test("M4-C a formal role binding is never overridden by bootstrap", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  assert.ok(current.body.roles.includes("super_admin"));
+
+  // An operator wrote the real grant and dropped the bootstrap one, as the
+  // deployment guide says to do once the first sign-in is verified.
+  await f.admin.store.mutate((data) => {
+    for (const [id, binding] of Object.entries(data.roleBindings)) {
+      if (binding.createdBy === "bootstrap") delete data.roleBindings[id];
+    }
+    data.roleBindings["rb-formal"] = {
+      id: "rb-formal",
+      subjectType: "admin",
+      subjectId: current.body.user.id,
+      role: "department_admin",
+      scopeOrgUnitId: "org-platform",
+      validFrom: new Date(Date.now() - 60_000).toISOString(),
+      validTo: new Date(Date.now() + 3_600_000).toISOString(),
+      createdBy: "operator",
+      extraPermissions: [],
+    };
+  });
+
+  const next = await adminLogin(f, new CookieJar());
+  const after = await me(f, next);
+  assert.equal(after.response.status, 200);
+  assert.deepEqual(after.body.roles, ["department_admin"]);
+  assert.ok(!after.body.permissions.includes("system.write"));
+  const written = await f.admin.store.read((data) =>
+    Object.values(data.roleBindings).filter((binding) => binding.createdBy === "bootstrap"));
+  assert.equal(written.length, 0);
+});
+
+test("M4-C an unreadable bootstrap window is replaced, not treated as live", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  await adminLogin(f);
+  // A hand-edited store can carry a validTo no clock can read. rbac.js
+  // treats that as not active; bootstrap must agree and write a fresh
+  // window rather than leaving the first administrator with nothing.
+  await f.admin.store.mutate((data) => {
+    for (const binding of Object.values(data.roleBindings)) binding.validTo = "not-a-date";
+  });
+
+  const fresh = await adminLogin(f, new CookieJar());
+  const current = await me(f, fresh);
+  assert.equal(current.response.status, 200);
+  assert.ok(current.body.roles.includes("super_admin"));
+  const windows = await f.admin.store.read((data) =>
+    Object.values(data.roleBindings).map((binding) => binding.validTo));
+  assert.ok(windows.every((to) => Date.parse(to) > Date.now()));
+});
+
 test("M4-C desktop sign-in issues a token with step-up and refuses a stale ticket", {
   timeout: 30000,
 }, async (t) => {

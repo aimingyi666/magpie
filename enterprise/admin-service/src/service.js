@@ -305,23 +305,65 @@ function stepUpReturnPath(value) {
   return `${parsed.pathname}${parsed.search}`;
 }
 
-function bootstrapBinding(identity, config) {
+function bootstrapBinding(identity, config, now = Date.now()) {
   const subjectMatch = config.bootstrap.subjectIds.includes(identity.subject);
   const emailMatch = config.bootstrap.emails.includes(identity.email.toLowerCase());
   if (!subjectMatch && !emailMatch) return null;
-  const now = new Date();
+  const at = new Date(now);
   return {
     id: `rb_bootstrap_${sha256(identity.id).slice(0, 16)}`,
     subjectType: "admin",
     subjectId: identity.id,
     role: "super_admin",
     scopeOrgUnitId: "*",
-    validFrom: now.toISOString(),
-    validTo: new Date(now.getTime() + config.bootstrap.validHours * 3600 * 1000).toISOString(),
+    validFrom: at.toISOString(),
+    validTo: new Date(at.getTime() + config.bootstrap.validHours * 3600 * 1000).toISOString(),
     createdBy: "bootstrap",
     extraPermissions: ["roles.write"],
-    createdAt: now.toISOString(),
+    createdAt: at.toISOString(),
   };
+}
+
+// upsertBootstrapBinding puts the bootstrap super-admin binding in, or
+// refreshes one whose window lapsed: a lapsed window must not lock the
+// first administrator out on its next sign-in.
+//
+// It never overrides a role binding an operator wrote. A subject that has
+// any binding not created by bootstrap is authorized by that record alone,
+// so removing bootstrap config stops the grant at once and an expired
+// formal binding is not re-armed behind the operator's back. An
+// unreadable validTo counts as unknown, not as a live window: the binding
+// is replaced and the replacement is audited.
+function upsertBootstrapBinding(data, identity, config, now = Date.now()) {
+  const binding = bootstrapBinding(identity, config, now);
+  if (!binding) return;
+  const formal = Object.values(data.roleBindings).some((candidate) =>
+    candidate
+    && candidate.subjectId === binding.subjectId
+    && candidate.createdBy !== "bootstrap");
+  if (formal) return;
+  const existing = data.roleBindings[binding.id] || Object.values(data.roleBindings).find((candidate) =>
+    candidate
+    && candidate.createdBy === "bootstrap"
+    && candidate.subjectId === binding.subjectId
+    && candidate.role === binding.role
+    && candidate.scopeOrgUnitId === binding.scopeOrgUnitId);
+  if (existing && Date.parse(existing.validTo) > now) return;
+  if (existing && existing.id && existing.id !== binding.id) {
+    delete data.roleBindings[existing.id];
+  }
+  data.roleBindings[binding.id] = binding;
+  data.adminSystemAuditLogs.push({
+    id: `audit_${crypto.randomUUID()}`,
+    action: existing ? "bootstrap.binding.refreshed" : "bootstrap.binding.created",
+    timestamp: new Date(now).toISOString(),
+    actorSubjectId: identity.id,
+    actorEmail: identity.email,
+    bindingId: binding.id,
+    previousValidTo: existing ? String(existing.validTo || "") : "",
+    validTo: binding.validTo,
+    result: "applied",
+  });
 }
 
 async function readRawBody(req) {
@@ -8790,13 +8832,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       identity.id = adminSubjectId(config.oidc.issuer, identity.subject);
       const created = newSession(identity, req, config);
       await store.mutate((data) => {
-        const binding = bootstrapBinding(identity, config);
-        if (binding && !Object.values(data.roleBindings).some((candidate) =>
-          candidate.subjectId === binding.subjectId
-          && candidate.role === binding.role
-          && candidate.scopeOrgUnitId === binding.scopeOrgUnitId)) {
-          data.roleBindings[binding.id] = binding;
-        }
+        upsertBootstrapBinding(data, identity, config);
         data.adminSessions[sha256(created.sid)] = created.session;
       });
       redirect(res, "/admin/", {
@@ -8917,13 +8953,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       }
       const ticket = newDesktopTicket({ ...transaction, stepUp, stepUpError }, identity);
       await store.mutate((data) => {
-        const binding = bootstrapBinding(identity, config);
-        if (binding && !Object.values(data.roleBindings).some((candidate) =>
-          candidate.subjectId === binding.subjectId
-          && candidate.role === binding.role
-          && candidate.scopeOrgUnitId === binding.scopeOrgUnitId)) {
-          data.roleBindings[binding.id] = binding;
-        }
+        upsertBootstrapBinding(data, identity, config);
         data.desktopTickets[ticket.hash] = ticket.record;
         data.adminSystemAuditLogs.push({
           id: `audit_${crypto.randomUUID()}`,
