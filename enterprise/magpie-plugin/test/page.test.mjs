@@ -140,6 +140,28 @@ test("the page takes the window's look, not a palette of its own", () => {
   assert.doesNotMatch(CSS, /#f6f5f1|#171816/, "the old cream palette should be gone");
 });
 
+test("the usage tab shows totals, a per-user breakdown and a bar per bucket", () => {
+  // The organization's usage is three answers from the management service:
+  // totals, one row per user, and a time series. Each is read on its own,
+  // so a role without usage.read still sees the request list.
+  for (const id of ["usageCards", "usageChart", "usageUsers", "usageUsersEmpty",
+    "usageUsersTitle", "usageNote"]) {
+    assert.match(HTML, new RegExp(`id="${id}"`), `ui.html should contain #${id}`);
+  }
+  assert.match(JS, /adminApi\(`\/usage\/summary\?\$\{query\}`\)/);
+  assert.match(JS, /adminApi\(`\/usage\/timeseries\?\$\{query\}&bucket=day&groupBy=all`\)/);
+  assert.match(JS, /function renderUsageSummary\(/);
+  assert.match(JS, /function renderUsageUsers\(/);
+  assert.match(JS, /function renderUsageChart\(/);
+  assert.match(JS, /createElementNS\("http:\/\/www\.w3\.org\/2000\/svg", "svg"\)/);
+});
+
+test("the administrator tabs say which one is selected", () => {
+  assert.match(HTML, /id="adminTabs" class="tabs" role="tablist"/);
+  assert.match(HTML, /role="tab" aria-selected="true" data-tab="overview"/);
+  assert.match(JS, /setAttribute\("aria-selected", String\(on\)\)/);
+});
+
 test("the resources tab reads the catalog and each device's sync report", () => {
   // The tab shows what an administrator can read in the client: the
   // published catalog and the last sync report per device. Publishing and

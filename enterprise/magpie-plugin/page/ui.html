@@ -88,13 +88,13 @@
         </div>
       </div>
 
-      <nav id="adminTabs" class="tabs" aria-label="Administration">
-        <button class="tab is-on" type="button" data-tab="overview">Overview</button>
-        <button class="tab" type="button" data-tab="providers">Providers</button>
-        <button class="tab" type="button" data-tab="routing">Routing</button>
-        <button class="tab" type="button" data-tab="gateway">Gateway</button>
-        <button class="tab" type="button" data-tab="resources">Resources</button>
-        <button class="tab" type="button" data-tab="usage">Usage</button>
+      <nav id="adminTabs" class="tabs" role="tablist" aria-label="Administration">
+        <button class="tab is-on" type="button" role="tab" aria-selected="true" data-tab="overview">Overview</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="providers">Providers</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="routing">Routing</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="gateway">Gateway</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="resources">Resources</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="usage">Usage</button>
       </nav>
 
       <section class="tab-panel" data-panel="overview">
@@ -269,6 +269,17 @@
       </section>
 
       <section class="tab-panel" data-panel="usage" hidden>
+        <p id="usageNote" class="note"></p>
+        <div id="usageCards" class="cards"></div>
+        <div id="usageChart" class="chart" role="img"></div>
+        <section class="resources" aria-labelledby="usageUsersTitle">
+          <div class="resources-head">
+            <h3 id="usageUsersTitle">By user</h3>
+            <span id="usageUsersCount" class="count"></span>
+          </div>
+          <div id="usageUsers" class="list"></div>
+          <p id="usageUsersEmpty" class="empty" hidden></p>
+        </section>
         <div class="resources-head"><h2 id="usageTitle">Requests</h2><span id="usageCount" class="count"></span></div>
         <div id="usageList" class="list"></div>
         <p id="usageEmpty" class="empty" hidden></p>

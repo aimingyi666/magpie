@@ -8,6 +8,10 @@ export const RESOURCE_KINDS = Object.freeze([
   "instructions",
   "subagent",
   "template",
+  // A hook is executable code delivered to an agent, so it is the highest
+  // risk kind: the catalog accepts it, and the client must not apply one
+  // without its own approval. Publishing it here does not execute it.
+  "hook",
 ]);
 export const RESOURCE_DELIVERY_MODES = Object.freeze(["forced", "recommended"]);
 const MANIFEST_FIELDS = new Set([

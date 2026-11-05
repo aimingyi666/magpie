@@ -476,6 +476,17 @@ const ADMIN_MESSAGES = {
     keyCreate: "Create",
     usage: "Requests",
     usageEmpty: "No requests have been recorded yet.",
+    usageRequests: "Requests",
+    usageSuccessful: "Successful",
+    usageErrors: "Errors",
+    usageTokens: "Tokens",
+    usageCost: "Cost (USD)",
+    usageUsers: "By user",
+    usageUsersCount: "{count} users",
+    usageUsersEmpty: "No user usage in this window.",
+    usageChart: "Requests per {bucket}",
+    usageChartEmpty: "No usage in this window.",
+    usageUnavailable: "Usage summary is unavailable for your role.",
     noData: "Not available yet",
     requestsTotal: "{count} total",
     requestRow: "{model} → {provider}",
@@ -630,6 +641,17 @@ const ADMIN_MESSAGES = {
     keyCreate: "创建",
     usage: "请求",
     usageEmpty: "还没有记录到请求。",
+    usageRequests: "请求",
+    usageSuccessful: "成功",
+    usageErrors: "错误",
+    usageTokens: "Token",
+    usageCost: "费用（USD）",
+    usageUsers: "按用户",
+    usageUsersCount: "{count} 个用户",
+    usageUsersEmpty: "这个时间窗没有用户用量。",
+    usageChart: "每{bucket}请求",
+    usageChartEmpty: "这个时间窗没有用量。",
+    usageUnavailable: "你的角色看不到用量汇总。",
     noData: "暂无数据",
     requestsTotal: "共 {count} 条",
     requestRow: "{model} → {provider}",
@@ -784,6 +806,17 @@ const ADMIN_MESSAGES = {
     keyCreate: "建立",
     usage: "請求",
     usageEmpty: "還沒有記錄到請求。",
+    usageRequests: "請求",
+    usageSuccessful: "成功",
+    usageErrors: "錯誤",
+    usageTokens: "Token",
+    usageCost: "費用（USD）",
+    usageUsers: "按使用者",
+    usageUsersCount: "{count} 個使用者",
+    usageUsersEmpty: "這個時間窗沒有使用者用量。",
+    usageChart: "每{bucket}請求",
+    usageChartEmpty: "這個時間窗沒有用量。",
+    usageUnavailable: "你的角色看不到用量彙總。",
     noData: "暫無資料",
     requestsTotal: "共 {count} 筆",
     requestRow: "{model} → {provider}",
@@ -938,6 +971,17 @@ const ADMIN_MESSAGES = {
     keyCreate: "作成",
     usage: "リクエスト",
     usageEmpty: "リクエストはまだ記録されていません。",
+    usageRequests: "リクエスト",
+    usageSuccessful: "成功",
+    usageErrors: "エラー",
+    usageTokens: "トークン",
+    usageCost: "費用（USD）",
+    usageUsers: "ユーザー別",
+    usageUsersCount: "{count} 人",
+    usageUsersEmpty: "この期間にユーザーの利用はありません。",
+    usageChart: "{bucket}あたりのリクエスト",
+    usageChartEmpty: "この期間に利用はありません。",
+    usageUnavailable: "このロールでは利用集計を表示できません。",
     noData: "まだデータがありません",
     requestsTotal: "全 {count} 件",
     requestRow: "{model} → {provider}",
@@ -1092,6 +1136,17 @@ const ADMIN_MESSAGES = {
     keyCreate: "Erstellen",
     usage: "Anfragen",
     usageEmpty: "Es wurden noch keine Anfragen aufgezeichnet.",
+    usageRequests: "Anfragen",
+    usageSuccessful: "Erfolgreich",
+    usageErrors: "Fehler",
+    usageTokens: "Token",
+    usageCost: "Kosten (USD)",
+    usageUsers: "Nach Benutzer",
+    usageUsersCount: "{count} Benutzer",
+    usageUsersEmpty: "In diesem Zeitraum gibt es keine Benutzernutzung.",
+    usageChart: "Anfragen pro {bucket}",
+    usageChartEmpty: "In diesem Zeitraum gibt es keine Nutzung.",
+    usageUnavailable: "Ihre Rolle darf die Nutzungsübersicht nicht lesen.",
     noData: "Noch keine Daten",
     requestsTotal: "{count} gesamt",
     requestRow: "{model} → {provider}",
@@ -1858,7 +1913,10 @@ function syncReportRow(report) {
 function selectTab(name) {
   adminTab = name;
   for (const button of document.querySelectorAll("#adminTabs .tab")) {
-    button.classList.toggle("is-on", button.dataset.tab === name);
+    const on = button.dataset.tab === name;
+    button.classList.toggle("is-on", on);
+    button.setAttribute("aria-selected", String(on));
+    button.tabIndex = on ? 0 : -1;
   }
   for (const panel of document.querySelectorAll(".tab-panel")) {
     panel.hidden = panel.dataset.panel !== name;
@@ -1893,7 +1951,7 @@ async function loadAdminTab() {
       case "resources":
         return loadResources();
       case "usage":
-        return renderUsage(await adminApi("/requests?period=week&limit=100"));
+        return loadUsage();
       default:
         return undefined;
     }
@@ -2427,6 +2485,110 @@ function deviceRow(device) {
     el("span", `status status-${tone}`, ta("deviceStatus", { status: state })),
   );
   return item;
+}
+
+// Org-wide usage: the totals, one row per user and a bar per bucket, above
+// the request list. The summary is scoped by the management service to the
+// administrator's organization; a role without usage.read still sees the
+// request list, so each part answers on its own.
+async function loadUsage() {
+  const query = "period=week";
+  let summary = null;
+  let series = null;
+  try {
+    summary = await adminApi(`/usage/summary?${query}`);
+  } catch (error) {
+    if (!(error instanceof AdminApiError) || error.status !== 403) throw error;
+  }
+  try {
+    series = await adminApi(`/usage/timeseries?${query}&bucket=day&groupBy=all`);
+  } catch (error) {
+    if (!(error instanceof AdminApiError) || error.status !== 403) throw error;
+  }
+  renderUsageSummary(summary);
+  renderUsageUsers(summary);
+  renderUsageChart(series);
+  renderUsage(await adminApi("/requests?period=week&limit=100"));
+}
+
+function usageCard(label, value) {
+  const card = el("article", "card");
+  card.append(el("h3", "", label), el("p", "value", String(value ?? 0)));
+  return card;
+}
+
+function renderUsageSummary(summary) {
+  const target = $("usageCards");
+  if (!summary) {
+    target.replaceChildren();
+    $("usageNote").textContent = ta("usageUnavailable");
+    return;
+  }
+  $("usageNote").textContent = "";
+  const totals = summary.totals || {};
+  target.replaceChildren(
+    usageCard(ta("usageRequests"), totals.requests || 0),
+    usageCard(ta("usageSuccessful"), totals.successfulRequests || 0),
+    usageCard(ta("usageErrors"), totals.errors || 0),
+    usageCard(ta("usageTokens"), totals.totalTokens || 0),
+    usageCard(ta("usageCost"), Number(totals.costUsd || 0).toFixed(4)),
+  );
+}
+
+function renderUsageUsers(summary) {
+  const rows = Array.isArray(summary?.dimensions?.user) ? summary.dimensions.user : [];
+  $("usageUsersCount").textContent = ta("usageUsersCount", { count: rows.length });
+  $("usageUsers").replaceChildren(...rows.map(usageUserRow));
+  $("usageUsersEmpty").hidden = rows.length > 0;
+  $("usageUsersEmpty").textContent = ta("usageUsersEmpty");
+}
+
+function usageUserRow(row) {
+  const item = el("article", "resource");
+  const main = el("div", "resource-main");
+  main.append(el("span", "resource-title", row.label || row.email || row.key || ""));
+  main.append(el("span", "resource-meta", [
+    `${ta("usageRequests")} ${row.requests || 0}`,
+    `${ta("usageTokens")} ${row.totalTokens || 0}`,
+    `${ta("usageCost")} ${Number(row.costUsd || 0).toFixed(4)}`,
+  ].join(" · ")));
+  item.append(main);
+  return item;
+}
+
+function renderUsageChart(series) {
+  const target = $("usageChart");
+  const points = Array.isArray(series?.points) ? series.points : [];
+  const maximum = Math.max(1, ...points.map((point) => Number(point.totals?.requests || 0)));
+  if (points.length === 0) {
+    target.replaceChildren(el("p", "empty", ta("usageChartEmpty")));
+    target.setAttribute("aria-label", ta("usageChartEmpty"));
+    return;
+  }
+  const width = 640;
+  const height = 120;
+  const pad = 8;
+  const slot = (width - pad * 2) / points.length;
+  const barWidth = Math.max(1, slot - 2);
+  const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  svg.setAttribute("viewBox", `0 0 ${width} ${height}`);
+  svg.setAttribute("role", "img");
+  svg.setAttribute("aria-label", ta("usageChart", { bucket: series?.bucket || "day" }));
+  points.forEach((point, index) => {
+    const requests = Number(point.totals?.requests || 0);
+    if (requests <= 0) return;
+    const barHeight = Math.round(((height - pad * 2) * requests) / maximum);
+    const bar = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+    bar.setAttribute("class", "bar");
+    bar.setAttribute("x", String(Math.round(pad + index * slot)));
+    bar.setAttribute("y", String(height - pad - barHeight));
+    bar.setAttribute("width", String(Math.round(barWidth)));
+    bar.setAttribute("height", String(barHeight));
+    bar.append(document.createElementNS("http://www.w3.org/2000/svg", "title"));
+    bar.lastChild.textContent = `${point.start || ""}: ${requests}`;
+    svg.append(bar);
+  });
+  target.replaceChildren(svg);
 }
 
 function renderUsage(data) {

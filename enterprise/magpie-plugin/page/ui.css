@@ -725,3 +725,30 @@ h2 {
     transition: none;
   }
 }
+
+/* Org-wide usage: five small figures, a bar chart of requests per bucket,
+   and one row per user. */
+.chart {
+  min-height: 140px;
+  margin-top: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 12px;
+  background: var(--card-surface);
+}
+
+.chart svg {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.chart .bar {
+  fill: var(--accent);
+  opacity: .75;
+}
+
+.chart .axis {
+  fill: var(--muted);
+  font-size: 10px;
+}

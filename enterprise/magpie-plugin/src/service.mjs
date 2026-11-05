@@ -404,6 +404,13 @@ async function handleAdmin(req, res, url, { admin, host, port }) {
     ["GET", /^\/resources$/, () => admin.request("GET", "/api/v1/admin/resources")],
     ["GET", /^\/resources\/(res_[a-z0-9]{16,64})$/, (_body, m) =>
       admin.request("GET", `/api/v1/admin/resources/${m[1]}`)],
+    // Org-wide usage: totals, a per-user breakdown and a time series. The
+    // management service scopes every one of them to the administrator's
+    // organization.
+    ["GET", /^\/usage\/summary$/, () =>
+      admin.request("GET", `/api/v1/admin/usage/summary?${url.searchParams}`)],
+    ["GET", /^\/usage\/timeseries$/, () =>
+      admin.request("GET", `/api/v1/admin/usage/timeseries?${url.searchParams}`)],
     ["GET", /^\/resource-sync\/reports$/, () =>
       admin.request("GET", "/api/v1/admin/resource-sync/reports")],
     ["GET", /^\/requests$/, () => {
