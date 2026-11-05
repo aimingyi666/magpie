@@ -18,7 +18,7 @@
 `gateway-key describe --json` 与原子 `gateway-key policy apply --json` 机器协议已实现，
 并通过 Go 单测、gateway-key CLI 回归和隔离真实二进制冒烟。C4-02
 `enterprise/gateway-control/` 受控适配器也已实现，并通过 15 项 Mock/故障测试。C4-03a
-正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 109 项测试通过（82 项管理
+正式只读模型目录已实现，并通过 7 项目录专项测试；当前管理服务 119 项测试通过（92 项管理
 服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项），`GET /api/v1/admin/models` 已使用正式目录，
 `ADMIN_MODELS` 仅保留
 无正式目录时的兼容显示。C4-03b 用户级 `gatewayPolicy` 核心已在 auth-service 实现，
@@ -48,7 +48,7 @@ Ed25519 签名、发布/历史回滚、幂等和资源审计，并通过 11 项�
 核心已通过 14 项测试；M3-C-1 已实现设备短期同步凭证、desired-state、设备上报、管理员
 JSON 查询和客户端 HTTP 传输适配器，resource-service 15 项（11 核心 + 4 控制面）、
 client-sync 26 项（18 核心 + 8 传输）测试通过；M3-C-2 已实现 admin-service 只读资源/
-同步报告 API 和管理页面板，admin-service 109 项、local-mcp 60 项通过；企业七套回归合计 265 项。
+同步报告 API 和管理页面板，admin-service 119 项、local-mcp 60 项通过；企业九套回归合计 339 项。
 M3-A/M3-B 只有核心服务 API；M3-C-1/M3-C-2 已有控制面 API 和只读管理页，但尚未接入
 admin-service 真实审批、资源发布/回滚 UI、发布/回滚审批联动、OIDC 组织分配和本地 helper
 安装器/员工产品流；
@@ -398,7 +398,7 @@ tests:
 & 'D:\Environment\node-v26.12.1\node.exe' --test enterprise\local-mcp\test\*.test.mjs
 ```
 
-当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业七套回归合计 265 项。测试只使用精确文件路径、
+当前 local-mcp 60 项测试通过（含经过编排入口的真实子进程 E2E），企业九套回归合计 339 项。测试只使用精确文件路径、
 临时目录和隔离子进程，不读取真实 usage、管理员会话、Agent 配置或生产 Secret。
 
 生产阻断项：helper/server、stdio bridge、Codex 配置映射和一键配置编排核心已实现，但尚未接入本地 helper 安装器、生产启动器/Windows ACL/DPAPI/token 轮换、真实 Codex 客户端和管理台员工产品流；真实 OIDC、审批服务、Secret Broker、
@@ -410,7 +410,9 @@ Docker/VM、共享卷并发、浏览器 E2E、HA 和生产验收未完成。
 1. 管理员打开 `https://admin.ai.corp.example/admin/`。
 2. 经独立 OIDC Client 登录，完成 MFA/ACR。
 3. 首次登录按受控 bootstrap 创建有到期时间的 `super_admin`，随后写入正式角色绑定并移除
-   bootstrap 配置。
+   bootstrap 配置。bootstrap 只维护自己创建的绑定：一旦该管理员有正式角色绑定，bootstrap
+   不再写入或续期，移除配置即刻生效；过期续期与首次创建都记入
+   `bootstrap.binding.created`/`bootstrap.binding.refreshed` 系统审计。
 4. `/api/v1/admin/me` 返回当前角色、权限、组织范围和 CSRF token。
 5. `GET /api/v1/admin/org-units`、`departments`、`users`、`devices`、`credentials`、
    `models`、`usage/summary` 和 `usage/timeseries` 只返回服务端计算后可读的数据；跨范围
@@ -477,7 +479,7 @@ C4-03b/C4-03c 核心已有 26 项 auth 测试，管理端已接入额度/模型 
 - M3-A 已通过 11 项 resource-service 核心单元/Mock 集成测试；M3-B 已通过 14 项 mcp-gateway
   单元/Mock 集成测试；M3-C-1 已通过 resource-service 15 项（11 核心 + 4 控制面）和
   client-sync 26 项（18 核心 + 8 传输）单元/Mock 集成测试；M3-C-2 已通过 admin-service
-  109 项测试中的 5 项新增用例（企业全量 265 项）。仍须在真实
+  119 项测试中的 5 项新增用例（企业全量 339 项）。仍须在真实
   Compose 中验证镜像构建、secret 文件权限、
   `resource-data`/`resource-content`/`mcp-data` 卷、健康检查、重启恢复、签名密钥轮换和
   MCP 单副本限制，并接入 admin-service 真实审批、可写管理台和 OIDC 组织分配后再做
@@ -678,7 +680,7 @@ Mock/故障测试已覆盖这些映射；真实 Docker/共享卷故障恢复仍�
 - 任何“页面值已变但实际请求未被限制/未被拒绝”的结果都视为 C4 失败。
 - C4-01 机器协议和 C4-02 `gateway-control` 已实现；C4-02 通过 15 项 Mock/故障测试，
   但 Docker/Compose、真实共享卷、健康检查和故障恢复尚未实机验收。C4-03a 正式只读目录
-  已通过 7 项目录专项；管理服务当前 109 项通过（含 7 项通知渠道、7 项通知规则和 6 项 SIEM 专项），
+  已通过 7 项目录专项；管理服务当前 119 项通过（含 7 项通知渠道、7 项通知规则和 6 项 SIEM 专项），
   但仍待真实部署验收。
   C4-03b/C4-03c 已接通本地 Mock/故障链路，C4-04 完整管理链路 E2E 已通过；C4-03d、C5
   和 M2-D 核心已实现，基础查询、对账和导出页面已接入，但浏览器 E2E、失败恢复入口和

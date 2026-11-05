@@ -5,15 +5,15 @@
 M1 本地真实链路已验收，M2-A/M2-B/M2-C1/M2-C2/M2-C3 已实现并通过 Mock 测试；
 M2-C4-01 网关机器协议已实现，并通过 Go 单测、gateway-key CLI 回归和隔离真实二进制冒烟；
 C4-02 `gateway-control` 已实现并通过 15 项 Mock/故障测试；C4-03a 正式只读模型目录已实现，
-并通过 7 项目录专项、82 项管理服务集成、7 项通知渠道专项、7 项通知规则专项和 6 项 SIEM
-专项测试，管理服务合计 109 项通过；C4-03b 已在
+并通过 7 项目录专项、92 项管理服务集成、7 项通知渠道专项、7 项通知规则专项和 6 项 SIEM
+专项测试，管理服务合计 119 项通过；C4-03b 已在
 auth-service 实现用户级策略核心状态机、M1 `unknown` 迁移、分步首次设置、版本冲突、
 失败关闭和回读确认接口，auth-service 当前 26 项测试通过；C4-03c 的管理端额度/模型 API、
 幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿和启动恢复核心
 已实现，并通过 Mock/故障测试；C4-03d 已补管理页额度/模型写表单和员工只读状态门户，
 页面 E2E 和失败恢复入口仍未完成；M2-C5 的 operation/audit 查询和四种人工对账
 动作已经实现，并通过 Mock/故障测试；C4-04 完整管理到真实 Magpie 策略流 E2E 已实现并通过，
-覆盖多凭证、refresh/rotate 继承和故障恢复；M2-D 核心已实现，Mock/集成测试通过；生产验收尚未完成；M3-A 的资源目录、不可变版本、哈希、Ed25519 签名、发布/回滚和资源审计核心已实现并通过 11 项测试，M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查、上游凭据隔离和元数据审计核心已实现并通过 14 项测试，M3-C-1 的同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器已实现，M3-C-2 的只读资源/同步管理 API 和管理页面板已实现并通过 5 项新增管理测试，resource-service 通过 15 项测试（11 核心 + 4 控制面），client-sync 通过 26 项测试（18 核心 + 8 传输），admin-service 通过 109 项测试、local-mcp 通过 60 项测试、audit-service 通过 34 项测试（20 事件管道 + 14 内容审计核心），企业八套回归合计 299 项通过；M3-D 运行时、本地 helper、回环 HTTP server、stdio bridge、受管 Codex `config.toml` 映射和 `setupLocalMcpClient()` 一键配置编排核心已实现签名包、原子安装、权限/能力策略、高风险审批、Secret Broker、JSON-RPC、审计、健康计数、受控环境注入和经过编排入口的真实子进程 E2E，但管理台员工产品流、安装器/Windows 服务、真实 Codex 客户端、生产 launcher/token 轮换和生产验收未完成，M4-A 审计事件管道核心和 M4-B 内容审计核心已实现，M4-C/M4-D、M5 和 M6 仍未实现；M2-E 的 APR-01a
+覆盖多凭证、refresh/rotate 继承和故障恢复；M2-D 核心已实现，Mock/集成测试通过；生产验收尚未完成；M3-A 的资源目录、不可变版本、哈希、Ed25519 签名、发布/回滚和资源审计核心已实现并通过 11 项测试，M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查、上游凭据隔离和元数据审计核心已实现并通过 14 项测试，M3-C-1 的同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器已实现，M3-C-2 的只读资源/同步管理 API 和管理页面板已实现并通过 5 项新增管理测试，resource-service 通过 15 项测试（11 核心 + 4 控制面），client-sync 通过 26 项测试（18 核心 + 8 传输），admin-service 通过 119 项测试、local-mcp 通过 60 项测试、audit-service 通过 34 项测试（20 事件管道 + 14 内容审计核心）、magpie-plugin 通过 30 项测试，企业九套回归合计 339 项通过（CI 逐包执行）；M3-D 运行时、本地 helper、回环 HTTP server、stdio bridge、受管 Codex `config.toml` 映射和 `setupLocalMcpClient()` 一键配置编排核心已实现签名包、原子安装、权限/能力策略、高风险审批、Secret Broker、JSON-RPC、审计、健康计数、受控环境注入和经过编排入口的真实子进程 E2E，但管理台员工产品流、安装器/Windows 服务、真实 Codex 客户端、生产 launcher/token 轮换和生产验收未完成，M4-A 审计事件管道核心和 M4-B 内容审计核心已实现，M4-C/M4-D、M5 和 M6 仍未实现；M2-E 的 APR-01a
 服务端审批、绑定校验、职责分离、组织范围、一次性消费和启动恢复已实现并通过 Mock/故障
 测试，APR-01b 的 HMAC/Mock 外部审批回调适配器也已实现并通过测试；APR-01c 的独立 OIDC
 step-up 已实现并通过 Mock IdP 集成测试，NOTIFY-01a 的 transactional outbox、租约、幂等、
@@ -106,7 +106,7 @@ APR-01a 已实现管理写操作的审批请求、风险分级、payload/target 
 已实现独立 OIDC step-up，均通过 Mock/故障测试和 Mock IdP 集成测试。
 C4-04 的完整管理到真实 Magpie 策略流 E2E 已通过，验证模型拒绝、Token 限额、冲突不落盘、
 双设备部分失败、refresh/rotate 策略继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、
-旧 Key `401` 和秘密扫描；C5/M2-D 已完成基础页面接入，但生产验收尚未完成。M3-A 资源目录核心已实现并通过 11 项测试，M3-B 远程 MCP 治理核心已实现并通过 14 项测试，M3-C-1 同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器已实现，M3-C-2 只读资源/同步管理 API 和管理页面板已实现并通过 5 项新增管理测试，resource-service 通过 15 项测试（11 核心 + 4 控制面），client-sync 通过 26 项测试（18 核心 + 8 传输），admin-service 通过 109 项测试、local-mcp 通过 60 项测试、audit-service 通过 34 项测试（20 事件管道 + 14 内容审计核心），企业八套回归合计 299 项通过；M3-D 运行时、本地 helper、回环 HTTP server、stdio bridge、Codex 配置映射和 `setupLocalMcpClient()` 一键配置编排核心已实现，并通过经过编排入口的真实子进程 E2E，但管理台员工产品流、安装器/Windows 服务、真实 Codex 客户端、生产 launcher/token 轮换和生产验收未完成，M4-A 审计事件管道核心和 M4-B 内容审计核心已实现，M4-C/M4-D、M5 和 M6 仍未实现。M3-C-1/M3-C-2 已接入员工端同步凭证和同步报告 API 及管理页只读资源/漂移视图，但资源发布/回滚 UI、审批联动、本地 helper 安装器/产品入口、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收仍未完成。
+旧 Key `401` 和秘密扫描；C5/M2-D 已完成基础页面接入，但生产验收尚未完成。M3-A 资源目录核心已实现并通过 11 项测试，M3-B 远程 MCP 治理核心已实现并通过 14 项测试，M3-C-1 同步凭证、desired-state、设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器已实现，M3-C-2 只读资源/同步管理 API 和管理页面板已实现并通过 5 项新增管理测试，resource-service 通过 15 项测试（11 核心 + 4 控制面），client-sync 通过 26 项测试（18 核心 + 8 传输），admin-service 通过 119 项测试、local-mcp 通过 60 项测试、audit-service 通过 34 项测试（20 事件管道 + 14 内容审计核心）、magpie-plugin 通过 30 项测试，企业九套回归合计 339 项通过（CI 逐包执行）；M3-D 运行时、本地 helper、回环 HTTP server、stdio bridge、Codex 配置映射和 `setupLocalMcpClient()` 一键配置编排核心已实现，并通过经过编排入口的真实子进程 E2E，但管理台员工产品流、安装器/Windows 服务、真实 Codex 客户端、生产 launcher/token 轮换和生产验收未完成，M4-A 审计事件管道核心和 M4-B 内容审计核心已实现，M4-C/M4-D、M5 和 M6 仍未实现。M3-C-1/M3-C-2 已接入员工端同步凭证和同步报告 API 及管理页只读资源/漂移视图，但资源发布/回滚 UI、审批联动、本地 helper 安装器/产品入口、目标 Agent 文件映射、Windows ACL、MDM、真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收仍未完成。
 APR-01d 的审批箱、串并行步骤、quorum、转交和撤回已实现；APR-01e 的 break-glass
 15 分钟单次授权、24 小时复核、提醒、通知、审计、API 和管理页已完成 Mock/集成核心；
 NOTIFY-01d 的规则、抑制、聚合、升级、dead-letter 受审计重放和运营页已完成 Mock/集成核心；

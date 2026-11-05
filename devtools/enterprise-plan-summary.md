@@ -235,7 +235,7 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 | M2-C5 | 后端和基础页面已实现，Mock/故障测试通过 | operation 详情、脱敏审计分页、签名 cursor 和四种人工对账 API | 真实审计存储和生产运维演练 |
 | M2-E | APR-01a-e 核心与 NOTIFY-01a-d 已实现 | 服务端审批、绑定、职责分离、一次性消费、HMAC/Mock 外部审批回调、独立 OIDC step-up、审批箱/串并行/quorum/转交/撤回、break-glass 15 分钟单次授权/24 小时复核/提醒，以及事务性 outbox、租约、退避、死信、重启恢复、人工重放、渠道管理、渠道测试、统一 HTTPS 邮件/IM/Webhook/工单网关适配器、SIEM transport、dead-letters API、规则/抑制/聚合/升级和运营页已实现 | 真实 OA/IdP/MFA、break-glass 告警/工单和生产复核、真实 SIEM/Collector/Syslog/生产证书、真实厂商连接、生产值班闭环和生产投递 |
 | M2-D | 核心已实现，Mock/集成测试通过；生产验收尚未完成 | 基础写操作、审批、operation、用量/审计筛选、人工对账、CSV 导出和操作历史已实现 | 浏览器 E2E、失败恢复入口、真实数据/负载、完整运营看板和异步/对象存储导出 |
-| M3 | M3-A/M3-B/M3-C-1/M3-C-2 核心、控制面与只读管理可见性已实现；M3-D helper/server、stdio bridge、Codex 配置映射和一键配置编排核心已实现 | resource-service 15 项、mcp-gateway 14 项、client-sync 26 项、admin-service 新增 5 项、local-mcp 60 项测试通过；企业七套回归合计 265 项 | M3-A 已有资源目录、不可变版本、内容寻址、签名、发布/回滚和审计；M3-B 已有远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据隔离和审计；M3-C-1 已有设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和 HTTP 传输，叠加签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、路径/符号链接防护、并发锁和状态秘密隔离；M3-C-2 已有按组织范围过滤的只读资源/同步 API、严格字段投影和只读管理页面板；M3-D 已有 helper HTTP、stdio bridge、受管 Codex `config.toml` 映射、`setupLocalMcpClient()` 同步/选包/启动/写入/回读/受控环境注入和经过编排入口的真实子进程 E2E。资源发布/回滚 UI、admin-service 真实审批联动、OIDC 组织分配、本地 helper 安装器/员工产品流、真实 Codex 客户端、生产 launcher/token 轮换验收尚未完成；M3-D 管理台员工产品流、安装器/Windows 服务和生产验收未实现 |
+| M3 | M3-A/M3-B/M3-C-1/M3-C-2 核心、控制面与只读管理可见性已实现；M3-D helper/server、stdio bridge、Codex 配置映射和一键配置编排核心已实现 | resource-service 15 项、mcp-gateway 14 项、client-sync 26 项、admin-service 新增 5 项、local-mcp 60 项测试通过；企业九套回归合计 339 项 | M3-A 已有资源目录、不可变版本、内容寻址、签名、发布/回滚和审计；M3-B 已有远程 MCP 注册、企业统一端点、工具级授权、健康检查、凭据隔离和审计；M3-C-1 已有设备短期同步凭证、desired-state、设备上报、管理员 JSON 查询和 HTTP 传输，叠加签名 desired-state、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、路径/符号链接防护、并发锁和状态秘密隔离；M3-C-2 已有按组织范围过滤的只读资源/同步 API、严格字段投影和只读管理页面板；M3-D 已有 helper HTTP、stdio bridge、受管 Codex `config.toml` 映射、`setupLocalMcpClient()` 同步/选包/启动/写入/回读/受控环境注入和经过编排入口的真实子进程 E2E。资源发布/回滚 UI、admin-service 真实审批联动、OIDC 组织分配、本地 helper 安装器/员工产品流、真实 Codex 客户端、生产 launcher/token 轮换验收尚未完成；M3-D 管理台员工产品流、安装器/Windows 服务和生产验收未实现 |
 | M4 | 未实现 | 只有审计分级设计 | 对话正文、工具审计、脱敏、检索、留存和导出 |
 | M5 | 未实现 | 只有规则与响应设计 | 告警、阻断、SIEM、值班处置闭环 |
 | M6 | 未实现 | 只有规模化设计 | PostgreSQL/ClickHouse、多副本、Redis、KMS、mTLS、多地域和灾备 |
@@ -243,16 +243,18 @@ M0 -> M1 -> M2-A/B/C1/C2/C3
 当前已执行并通过的本地测试：
 
 - `enterprise/auth-service`：`26 passed, 0 failed`
-- `enterprise/admin-service`：`109 passed, 0 failed`（82 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）
+- `enterprise/admin-service`：`119 passed, 0 failed`（92 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）
 - `enterprise/gateway-control`：`15 passed, 0 failed`
 - `enterprise/resource-service`：`15 passed, 0 failed`（11 核心 + 4 控制面）
 - `enterprise/mcp-gateway`：`14 passed, 0 failed`
 - `enterprise/client-sync`：`26 passed, 0 failed`（18 核心 + 8 传输）
 - `enterprise/local-mcp`：`60 passed, 0 failed`（21 运行时 + 7 helper + 9 HTTP server + 5 bridge + 7 Codex 配置 + 10 client setup + 1 真实子进程 E2E）
-- 七套 Node/Mock 回归合计：`265 passed, 0 failed`
+- `enterprise/audit-service`：`34 passed, 0 failed`（20 事件管道 + 14 内容审计核心）
+- `enterprise/magpie-plugin`：`30 passed, 0 failed`（员工页 + 管理员页 + PKCE/路由白名单/页面与翻译）
+- 九套 Node/Mock 回归合计：`339 passed, 0 failed`，由 CI 的 `enterprise` job 逐包执行
 - `enterprise/test/c4-enterprise-policy-e2e.ps1`：18 阶段完整管理到真实 Magpie 策略流 E2E 通过
 
-以上本地/Mock 测试合计 `265 passed, 0 failed`。这些结果不等于真实 IdP、Docker、共享卷、
+以上本地/Mock 测试合计 `339 passed, 0 failed`。这些结果不等于真实 IdP、Docker、共享卷、
 Windows、反向代理、真实 Codex 客户端或生产部署验收。C4-04 只使用
 隔离真实 Magpie、临时配置目录和 Mock 上游，不能替代生产环境。
 

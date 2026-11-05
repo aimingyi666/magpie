@@ -33,7 +33,7 @@
 证据；C4-01 的 schema v1 机器协议已实现，并通过 Go 单测、gateway-key CLI 回归和隔离
 真实二进制冒烟；C4-02 `enterprise/gateway-control/` 受控适配器已实现，并通过 15 项
 Mock/故障测试。C4-03a 正式只读模型目录已实现，并通过 7 项目录专项；当前 admin-service
-109 项测试通过（82 项管理服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项）；C4-03b 的用户级
+119 项测试通过（92 项管理服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项、6 项 SIEM 专项）；C4-03b 的用户级
 `gatewayPolicy` 核心已在 auth-service 实现，
 覆盖旧 M1 `unknown` 迁移、分步初始化、版本冲突、失败关闭和回读确认，当前 26 项测试通过。
 C4-03c 的管理 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿
@@ -63,7 +63,7 @@ Mock/集成核心；M2-D 核心已实现，生产验收尚未完成。M3-A 的 `
 和元数据审计核心已实现，并通过 14 项测试；M3-C-1 的设备短期同步凭证、desired-state、
 设备上报、管理员 JSON 查询和客户端 HTTP 传输适配器已实现，resource-service 15 项
 （11 核心 + 4 控制面）和 client-sync 26 项（18 核心 + 8 传输）测试通过；M3-C-2 已实现
-admin-service 只读资源/同步报告 API 和管理页面板，admin-service 109 项、local-mcp 37 项
+admin-service 只读资源/同步报告 API 和管理页面板，admin-service 119 项、local-mcp 37 项
 通过；企业七套回归合计 242 项。M3-A/M3-B 尚未接入 admin-service 真实审批、可写管理台和
 OIDC 组织分配；M3-C-1/M3-C-2 已接入员工端同步 API 和管理页只读资源/漂移视图，但资源
 发布/回滚 UI、审批联动、本地 helper 安装器/产品流、目标 Agent 文件映射、Windows ACL/MDM、真实 IdP、
@@ -380,7 +380,7 @@ Issue、临时豁免期限和负责人。
 M2-C4 的目标不是“在管理页写一个额度数字”，而是证明用户级 `gatewayPolicy` 已经在所有
 活跃网关凭证上生效。C4-01 已完成底层机器协议和本地测试；C4-02 已完成受控适配器和
 15 项 Mock/故障测试，但 Docker/Compose、真实共享卷和健康检查尚未实机验收；C4-03a 已完成
-管理服务只读目录和 109 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
+管理服务只读目录和 119 项测试，但真实部署未验收；C4-03b 已完成 auth-service 用户级策略
 核心并通过 25 项测试；C4-03c 已完成管理 API、幂等签发、issuance journal、自动
 apply/readback、同步后交付、失败补偿和启动恢复的本地 Mock/故障链路，并通过 C4-04 的
 真实 Magpie 管理链路验证；真实共享卷和部署验收未完成。C4-03d/C5/M2-D 已完成管理页

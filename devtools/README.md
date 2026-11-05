@@ -54,8 +54,9 @@ Mock/集成测试通过；生产验收尚未完成。M3-A 的资源目录、不�
 视图，但资源发布/回滚 UI、审批联动、本地 helper 安装器/产品流、目标 Agent 文件映射、Windows ACL、MDM、
 真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收未完成。M3-B 的审批
 nonce 仅单进程内存、注册表与审计不是同一事务，且 Compose 尚未实机验收。当前本地/Mock
-回归为 admin 109 项、auth 26 项、gateway-control 15 项、resource 15 项、mcp-gateway 14 项、
-client-sync 26 项、local-mcp 60 项，合计 265 项通过。
+回归为 admin 119 项、auth 26 项、gateway-control 15 项、resource 15 项、mcp-gateway 14 项、
+client-sync 26 项、local-mcp 60 项、audit-service 34 项、magpie-plugin 30 项，合计 339 项通过，
+由 CI 的 `enterprise` job 逐包执行。
 C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
 宣称管理员已经可以在生产自助调额或授予模型。
 `APR-01a/b` 的服务端审批、职责分离、一次性消费和 HMAC/Mock 外部审批回调，

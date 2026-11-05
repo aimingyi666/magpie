@@ -150,7 +150,7 @@ audit-content/
 - 所有测试使用临时目录、端口 `0` 和进程内密钥，不接触真实 `usage.jsonl`、
   管理员会话或生产卷。
 - 后端 A/B 的模块不得直接读取环境变量；配置只由 `config.js` 注入。
-- 合并前由主线程统一运行 `node --check`、audit-service 测试、八套企业回归、
+- 合并前由主线程统一运行 `node --check`、audit-service 测试、九套企业回归、
   `git diff --check` 和持久文件秘密扫描。
 
 ## 5. 验收矩阵
