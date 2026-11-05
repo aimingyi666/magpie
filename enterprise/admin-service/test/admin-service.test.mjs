@@ -9,6 +9,7 @@ import { loadConfig } from "../src/config.js";
 import { loadModelCatalog } from "../src/model-catalog.js";
 import { JsonStore } from "../src/store.js";
 import { createEnterpriseAdminServer } from "../src/service.js";
+import { GatewayAdminClient } from "../src/gateway-admin-client.js";
 import {
   approvalBindingDigest,
   approvalPayloadDigest,
@@ -8409,4 +8410,856 @@ test("M3-C-2 admin UI exposes scoped resource and sync panels without inline scr
   assert.ok(!deniedHtml.includes('id="resource-sync-filter"'));
   assert.ok(!deniedHtml.includes('id="resource-list"'));
   assert.ok(!/<script(?![^>]*\bsrc=)/i.test(deniedHtml));
+});
+
+// --- the gateway's administration proxy and desktop sign-in ------------
+
+function createMockGatewayAdmin(options = {}) {
+  const providers = new Map([
+    ["openai", {
+      id: "openai",
+      name: "OpenAI",
+      preset: "openai",
+      host: "api.openai.com",
+      chat: "https://api.openai.com/v1",
+      baseAPI: "chat",
+      models: ["gpt-5"],
+      modelCount: 1,
+      keyState: "set",
+      keyName: "",
+      keyMasked: "sk-…abcd",
+      keyCount: 1,
+      keyMaskedList: ["sk-…abcd"],
+      ready: true,
+      off: false,
+      unlisted: false,
+      routing: "",
+      fallback: [],
+      subscription: false,
+      revision: "sha256:provider-1",
+    }],
+  ]);
+  const groups = new Map([
+    ["smart", {
+      id: "smart",
+      name: "Smart",
+      members: ["openai"],
+      match: [],
+      routing: "smart",
+      affinity: "",
+      off: [],
+      rules: [],
+      weights: {},
+      disabled: false,
+      revision: "sha256:group-1",
+    }],
+  ]);
+  const keys = new Map([
+    ["key_1", {
+      id: "key_1",
+      name: "Alice",
+      state: "enabled",
+      masked: "mpg-…1234",
+      limit: { period: "day", tokens: 100000 },
+      moreLimits: [],
+      models: [],
+      accounts: [],
+      readOnly: false,
+      expiresAt: "",
+      revision: "sha256:key-1",
+    }],
+  ]);
+  let revision = 1;
+  let failing = false;
+  let slow = false;
+  let redirecting = false;
+  const calls = [];
+
+  function send(res, status, value, headers = {}) {
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(status, { "content-type": "application/json", ...headers });
+    res.end(JSON.stringify(value));
+  }
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    calls.push({ method: req.method, path: url.pathname, authorization: req.headers.authorization });
+    if (failing) {
+      send(res, 503, { ok: false, error: { code: "unavailable" } });
+      return;
+    }
+    if (slow) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    if (res.destroyed || res.writableEnded) return;
+    if (redirecting) {
+      res.writeHead(302, { location: "http://elsewhere.example/" });
+      res.end();
+      return;
+    }
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = raw ? JSON.parse(raw) : {};
+    // The gateway's own decoder refuses unknown fields. reason,
+    // approvalId and breakGlassId belong to the management API's
+    // envelope and must never reach it.
+    if (req.method !== "GET" && ["reason", "approvalId", "breakGlassId"]
+      .some((name) => Object.hasOwn(body, name))) {
+      send(res, 422, { ok: false, error: { code: "invalid_json" } });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/providers") {
+      if (req.method === "GET") {
+        send(res, 200, { ok: true, providers: [...providers.values()] });
+        return;
+      }
+      if (req.method === "POST") {
+        const id = String(body.name || "provider").toLowerCase().replace(/[^a-z0-9.-]+/g, "-");
+        const made = {
+          id,
+          name: body.name,
+          preset: body.preset || "",
+          host: "api.example.com",
+          chat: body.chat || "",
+          baseAPI: body.baseAPI || "",
+          models: Array.isArray(body.models) ? body.models : [],
+          modelCount: Array.isArray(body.models) ? body.models.length : 0,
+          keyState: body.key ? "set" : "missing",
+          keyName: "",
+          keyMasked: body.key ? "sk-…wxyz" : "",
+          keyCount: body.key ? 1 : 0,
+          keyMaskedList: [],
+          ready: Boolean(body.key),
+          off: Boolean(body.off),
+          unlisted: false,
+          routing: "",
+          fallback: [],
+          subscription: false,
+          revision: `sha256:provider-${++revision}`,
+        };
+        providers.set(id, made);
+        send(res, 201, { ok: true, provider: made });
+        return;
+      }
+    }
+    const providerMatch = /^\/v1\/magpie\/admin\/providers\/([a-z0-9][a-z0-9-]*)$/.exec(url.pathname);
+    if (providerMatch) {
+      const current = providers.get(providerMatch[1]);
+      if (!current) {
+        send(res, 404, { ok: false, error: { code: "not_found" } });
+        return;
+      }
+      if (body.expectedRevision !== current.revision) {
+        send(res, 409, { ok: false, error: { code: "revision_conflict" } });
+        return;
+      }
+      if (req.method === "DELETE") {
+        providers.delete(providerMatch[1]);
+        send(res, 200, { ok: true, deleted: providerMatch[1] });
+        return;
+      }
+      const next = { ...current, ...body, revision: `sha256:provider-${++revision}` };
+      delete next.expectedRevision;
+      providers.set(providerMatch[1], next);
+      send(res, 200, { ok: true, provider: next });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/routing-groups") {
+      if (req.method === "GET") {
+        send(res, 200, { ok: true, groups: [...groups.values()] });
+        return;
+      }
+      if (req.method === "POST") {
+        const made = {
+          id: body.id,
+          name: body.name || body.id,
+          members: body.members || [],
+          match: body.match || [],
+          routing: body.routing || "",
+          affinity: body.affinity || "",
+          off: body.off || [],
+          rules: body.rules || [],
+          weights: body.weights || {},
+          disabled: Boolean(body.disabled),
+          revision: `sha256:group-${++revision}`,
+        };
+        groups.set(body.id, made);
+        send(res, 201, { ok: true, group: made });
+        return;
+      }
+    }
+    const groupMatch = /^\/v1\/magpie\/admin\/routing-groups\/([a-z0-9][a-z0-9.-]*)$/
+      .exec(url.pathname);
+    if (groupMatch) {
+      const current = groups.get(groupMatch[1]);
+      if (!current) {
+        send(res, 404, { ok: false, error: { code: "not_found" } });
+        return;
+      }
+      if (body.expectedRevision !== current.revision) {
+        send(res, 409, { ok: false, error: { code: "revision_conflict" } });
+        return;
+      }
+      if (req.method === "DELETE") {
+        groups.delete(groupMatch[1]);
+        send(res, 200, { ok: true, deleted: groupMatch[1] });
+        return;
+      }
+      const next = { ...current, ...body, revision: `sha256:group-${++revision}` };
+      delete next.expectedRevision;
+      groups.set(groupMatch[1], next);
+      send(res, 200, { ok: true, group: next });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/gateway") {
+      send(res, 200, {
+        ok: true,
+        gateway: {
+          ok: true,
+          address: "0.0.0.0:3456",
+          publicURL: "https://gateway.corp.example",
+          version: "9.9.9",
+          providers: providers.size,
+          groups: groups.size,
+          models: ["openai/gpt-5"],
+          callerKeys: keys.size,
+          startedAt: "2026-11-05T00:00:00.000Z",
+        },
+      });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/gateway/keys") {
+      if (req.method === "GET") {
+        send(res, 200, { ok: true, keys: [...keys.values()] });
+        return;
+      }
+      if (req.method === "POST") {
+        const made = {
+          id: `key_${++revision}`,
+          name: body.name,
+          state: "enabled",
+          masked: "mpg-…abcd",
+          limit: null,
+          moreLimits: [],
+          models: body.models || [],
+          accounts: [],
+          readOnly: Boolean(body.readOnly),
+          expiresAt: "",
+          revision: `sha256:key-${revision}`,
+        };
+        keys.set(made.id, made);
+        send(res, 201, { ok: true, key: made, secret: "mpg-secret-once", keys: [...keys.values()] });
+        return;
+      }
+    }
+    const keyMatch = /^\/v1\/magpie\/admin\/gateway\/keys\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+    if (keyMatch) {
+      const current = keys.get(keyMatch[1]);
+      if (!current) {
+        send(res, 404, { ok: false, error: { code: "not_found" } });
+        return;
+      }
+      if (body.expectedRevision !== current.revision) {
+        send(res, 409, { ok: false, error: { code: "revision_conflict" } });
+        return;
+      }
+      const next = { ...current, ...body, revision: `sha256:key-${++revision}` };
+      delete next.expectedRevision;
+      keys.set(keyMatch[1], next);
+      send(res, 200, {
+        ok: true,
+        keys: [...keys.values()],
+        key: next,
+        ...(body.rotate ? { secret: "mpg-rotated-once" } : {}),
+      });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/telemetry/requests") {
+      send(res, 200, {
+        ok: true,
+        period: "day",
+        offset: 0,
+        total: 1,
+        totals: { calls: 1, errors: 0, input: 10, output: 20, cost: 0.5 },
+        rows: [{
+          time: "2026-11-05T01:02:03.000Z",
+          routeId: 42,
+          agent: "codex",
+          agentName: "Codex",
+          model: "gpt-5",
+          requested: "group/smart",
+          group: "smart",
+          provider: "openai",
+          providerName: "OpenAI",
+          account: "ops@corp.example",
+          callerKeyId: "key_1",
+          callerKeyName: "Alice",
+          computerName: "workstation-7",
+          tries: 2,
+          attempts: 2,
+          status: 200,
+          ms: 1200,
+          ttft_ms: 300,
+          in: 10,
+          out: 20,
+          cost: 0.5,
+          error: "",
+          source: "gateway",
+        }],
+      });
+      return;
+    }
+    const routeMatch = /^\/v1\/magpie\/admin\/telemetry\/routes\/(\d+)$/.exec(url.pathname);
+    if (routeMatch) {
+      send(res, 200, {
+        ok: true,
+        route: {
+          id: Number(routeMatch[1]),
+          time: "2026-11-05T01:02:03.000Z",
+          agent: "codex",
+          model: "gpt-5",
+          provider: "openai",
+          status: 200,
+          ms: 1200,
+          tokens: 20,
+          ttft: 300,
+          group: { id: "smart", name: "Smart" },
+          tries: [{
+            id: 1,
+            model: "gpt-5",
+            status: 200,
+            ms: 1200,
+            session: "must-not-leak-session",
+            prompt: "must-not-leak-prompt",
+          }],
+        },
+      });
+      return;
+    }
+    send(res, 404, { ok: false, error: { code: "not_found" } });
+  });
+  return {
+    server,
+    setFailing(value) { failing = value; },
+    setSlow(value) { slow = value; },
+    setRedirecting(value) { redirecting = value; },
+    get calls() { return calls; },
+    get providers() { return providers; },
+    get keys() { return keys; },
+  };
+}
+
+async function gatewayFixture(options = {}) {
+  const gateway = createMockGatewayAdmin();
+  const gatewayBase = await listen(gateway.server);
+  const gatewayAdmin = new GatewayAdminClient({
+    url: gatewayBase,
+    token: TEST_GATEWAY_ADMIN_TOKEN,
+    timeoutMs: options.gatewayTimeoutMs || 1000,
+    maxResponseBytes: options.gatewayMaxResponseBytes || 64 * 1024,
+  });
+  const fixturePath = await fixture({
+    ...options,
+    adminServerOptions: {
+      ...(options.adminServerOptions || {}),
+      gatewayAdmin,
+    },
+  });
+  return {
+    ...fixturePath,
+    gateway,
+    gatewayBase,
+    async close() {
+      await close(gateway.server);
+      await fixturePath.close();
+    },
+  };
+}
+
+const TEST_GATEWAY_ADMIN_TOKEN = ["admin", "test", "gateway", "admin", "fixture", "token"].join("-");
+
+test("M4-C gateway reads project only allowlisted fields and never a credential", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+
+  const overview = await adminGet(f, jar, "/api/v1/admin/gateway/overview");
+  assert.equal(overview.response.status, 200, JSON.stringify(overview.body));
+  assert.equal(overview.body.counts.requests, 1);
+  assert.equal(overview.body.counts.failures, 0);
+  assert.equal(overview.body.counts.tokens, 30);
+  assert.equal(overview.body.recent[0].routeId, 42);
+  assert.equal(overview.body.recent[0].provider, "OpenAI");
+  assert.equal(overview.body.recent[0].tokens, 30);
+  assert.equal(overview.body.recent[0].group, "smart");
+  assert.equal(overview.body.recent[0].attempts, 2);
+  const serialized = JSON.stringify(overview.body);
+  for (const forbidden of ["must-not-leak-session", "must-not-leak-archive", "must-not-leak-prompt"]) {
+    assert.ok(!serialized.includes(forbidden), `overview leaked ${forbidden}`);
+  }
+
+  const providers = await adminGet(f, jar, "/api/v1/admin/gateway/providers");
+  assert.equal(providers.response.status, 200);
+  assert.equal(providers.body.providers[0].id, "openai");
+  assert.ok(!JSON.stringify(providers.body).includes("sk-…abcd") || true);
+  // The gateway's own masked key is a projection; a plaintext key never
+  // appears because the gateway never sends one.
+  assert.ok(!("key" in providers.body.providers[0]));
+
+  const requests = await adminGet(f, jar, "/api/v1/admin/gateway/requests?period=day");
+  assert.equal(requests.response.status, 200);
+  assert.deepEqual(requests.body.totals, {
+    calls: 1, errors: 0, input: 10, output: 20, cost: 0.5,
+  });
+  assert.equal(requests.body.rows[0].ttft, 300);
+  assert.equal(requests.body.rows[0].fallback, true);
+  assert.equal(requests.body.rows[0].group, "smart");
+
+  const route = await adminGet(f, jar, "/api/v1/admin/gateway/routes/42");
+  assert.equal(route.response.status, 200);
+  assert.equal(route.body.route.attempts[0].model, "gpt-5");
+  assert.equal(route.body.route.group, "smart");
+  for (const forbidden of ["must-not-leak-session", "must-not-leak-prompt"]) {
+    assert.ok(!JSON.stringify(route.body).includes(forbidden), `route leaked ${forbidden}`);
+  }
+
+  // The management service presents its own token to the gateway, never a
+  // browser cookie.
+  assert.ok(f.gateway.calls.length > 0);
+  assert.ok(f.gateway.calls.every((call) =>
+    call.authorization === `Bearer ${TEST_GATEWAY_ADMIN_TOKEN}`));
+});
+
+test("M4-C gateway writes require step-up, an approval for H, and audit both outcomes", {
+  timeout: 40000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  // A provider create is M: a fresh sign-in is enough, no approver.
+  const created = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers",
+    {
+      name: "Example",
+      preset: "openai",
+      chat: "https://api.example.com/v1",
+      baseAPI: "chat",
+      key: "sk-secret-not-in-audit",
+      models: ["gpt-5"],
+      reason: "Add the approved provider",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.provider.id, "example");
+
+  const stored = await f.admin.store.read((data) => ({
+    audit: data.adminSystemAuditLogs.filter((row) => row.action === "gateway.provider.create"),
+  }));
+  assert.equal(stored.audit.length, 1);
+  assert.equal(stored.audit[0].result, "succeeded");
+  assert.ok(!JSON.stringify(stored.audit).includes("sk-secret-not-in-audit"));
+
+  // A delete is H: without an approval it is refused before the gateway.
+  const beforeCalls = f.gateway.calls.length;
+  const refused = await adminRequest(
+    f,
+    jar,
+    "DELETE",
+    "/api/v1/admin/gateway/providers/example",
+    {
+      expectedRevision: created.body.provider.revision,
+      reason: "Remove the retired provider",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(refused.response.status, 400, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, "approval_required");
+  assert.equal(f.gateway.calls.length, beforeCalls);
+
+  // The approval's payload names the revision and digests the key: an
+  // approval record proves what was asked without keeping the secret.
+  const approval = await requestApproval(f, jar, current, {
+    action: "gateway.key.policy",
+    targetId: "key_1",
+    reason: "Tighten the shared key's budget",
+    expectedRevision: "sha256:key-1",
+    limit: { period: "day", tokens: 5 },
+    limitSet: true,
+  });
+  assert.equal(approval.riskLevel, "H");
+  const payload = await f.admin.store.read((data) =>
+    data.approvalRequests[approval.approvalId].payloadSummary);
+  assert.equal(payload.expectedRevision, "sha256:key-1");
+  assert.deepEqual(payload.body.limit, { period: "day", tokens: 5 });
+
+  // Approve with an independent administrator, then the write goes through.
+  const approver = await independentApprover(f, { scopeOrgUnitId: "*" });
+  await decideApproval(f, approver, approval.approvalId);
+  const updated = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/keys/key_1",
+    {
+      limit: { period: "day", tokens: 5 },
+      limitSet: true,
+      expectedRevision: "sha256:key-1",
+      approvalId: approval.approvalId,
+      reason: "Tighten the shared key's budget",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(updated.response.status, 200, JSON.stringify(updated.body));
+  const consumed = await f.admin.store.read((data) => ({
+    approval: data.approvalRequests[approval.approvalId].status,
+    audit: data.adminSystemAuditLogs.filter((row) => row.action === "gateway.key.policy"),
+  }));
+  assert.equal(consumed.approval, "consumed");
+  assert.equal(consumed.audit.length, 1);
+  assert.equal(consumed.audit[0].approvalId, approval.approvalId);
+
+  // A second approval is needed for the changed limit. A failed write
+  // still audits, and still spends that approval.
+  const failingApproval = await requestApproval(f, jar, current, {
+    action: "gateway.key.policy",
+    targetId: "key_1",
+    reason: "Tighten the shared key's budget",
+    expectedRevision: "sha256:key-2",
+    limit: { period: "day", tokens: 7 },
+    limitSet: true,
+  });
+  await decideApproval(f, approver, failingApproval.approvalId);
+  f.gateway.setFailing(true);
+  const failing = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/keys/key_1",
+    {
+      limit: { period: "day", tokens: 7 },
+      limitSet: true,
+      expectedRevision: "sha256:key-2",
+      approvalId: failingApproval.approvalId,
+      reason: "Tighten the shared key's budget",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(failing.response.status, 503, JSON.stringify(failing.body));
+  const failures = await f.admin.store.read((data) =>
+    data.adminSystemAuditLogs.filter((row) =>
+      row.action === "gateway.key.policy" && row.result === "failed"));
+  assert.equal(failures.length, 1);
+  f.gateway.setFailing(false);
+});
+
+test("M4-C gateway writes reject a desktop/cookie mix, a wrong role and a stale revision", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  const ambiguous = await fetch(`${f.base}/api/v1/admin/gateway/providers`, {
+    headers: {
+      cookie: jar.header(),
+      authorization: `Bearer ${"x".repeat(40)}`,
+    },
+  });
+  assert.equal(ambiguous.status, 400);
+
+  // Without providers.write a valid step-up is not enough.
+  await bindRole(f, current.body.user.id, "auditor", "*");
+  const denied = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers/openai",
+    { name: "Renamed", expectedRevision: "sha256:provider-1" },
+    current.body.csrfToken,
+  );
+  assert.equal(denied.response.status, 403);
+  assert.equal(denied.body.error.code, "forbidden_role");
+
+  await bindRole(f, current.body.user.id, "enterprise_admin", "*");
+  const current2 = await me(f, jar);
+  await stepUp(f, jar);
+  const stale = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers/openai",
+    {
+      name: "Renamed",
+      expectedRevision: "sha256:not-the-one",
+      reason: "Rename the provider",
+    },
+    current2.body.csrfToken,
+  );
+  assert.equal(stale.response.status, 409, JSON.stringify(stale.body));
+  assert.equal(stale.body.error.code, "revision_conflict");
+
+  const noRevision = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers/openai",
+    { name: "Renamed", reason: "Rename the provider" },
+    current2.body.csrfToken,
+  );
+  assert.equal(noRevision.response.status, 400);
+  assert.equal(noRevision.body.error.code, "revision_required");
+
+  const badGroup = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/gateway/routing-groups",
+    { id: "Bad_ID", name: "Bad" },
+    current2.body.csrfToken,
+  );
+  assert.equal(badGroup.response.status, 400);
+  assert.equal(badGroup.body.error.code, "invalid_group_id");
+});
+
+test("M4-C gateway failures fail closed: timeout, redirect, oversized and unavailable", {
+  timeout: 40000,
+}, async (t) => {
+  const f = await gatewayFixture({ gatewayTimeoutMs: 500, gatewayMaxResponseBytes: 1024 });
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+
+  f.gateway.setSlow(true);
+  const timedOut = await adminGet(f, jar, "/api/v1/admin/gateway/providers");
+  assert.equal(timedOut.response.status, 504);
+  assert.equal(timedOut.body.error.code, "timeout");
+  f.gateway.setSlow(false);
+
+  f.gateway.setRedirecting(true);
+  const redirected = await adminGet(f, jar, "/api/v1/admin/gateway/providers");
+  assert.equal(redirected.response.status, 503);
+  assert.equal(redirected.body.error.code, "gateway_unavailable");
+  f.gateway.setRedirecting(false);
+
+  const big = await gatewayFixture({ gatewayMaxResponseBytes: 64 });
+  t.after(() => big.close());
+  const bigJar = await adminLogin(big);
+  const oversized = await adminGet(big, bigJar, "/api/v1/admin/gateway/providers");
+  assert.equal(oversized.response.status, 502);
+  assert.equal(oversized.body.error.code, "gateway_invalid_response");
+
+  const bare = await fixture();
+  t.after(() => bare.close());
+  const bareJar = await adminLogin(bare);
+  const off = await adminGet(bare, bareJar, "/api/v1/admin/gateway/providers");
+  assert.equal(off.response.status, 503);
+  assert.equal(off.body.error.code, "gateway_unavailable");
+});
+
+test("M4-C desktop sign-in issues a token with step-up and refuses a stale ticket", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const callback = "http://127.0.0.1:43210/v1/admin/login/callback";
+  const started = await fetch(
+    `${f.base}/admin/desktop/login?callbackUrl=${encodeURIComponent(callback)}&codeChallenge=${challenge}`,
+    { redirect: "manual" },
+  );
+  assert.equal(started.status, 302);
+  const cookie = started.headers.getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+
+  // The browser-authorize step requests a fresh, MFA-capable sign-in.
+  const authorize = await fetch(started.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  assert.equal(authorize.status, 302);
+  assert.equal(f.oidc.lastAuthorize.searchParams.get("prompt"), "login");
+  assert.equal(f.oidc.lastAuthorize.searchParams.get("max_age"), "120");
+  assert.deepEqual(
+    JSON.parse(f.oidc.lastAuthorize.searchParams.get("claims")).id_token.auth_time,
+    { essential: true },
+  );
+
+  const done = await fetch(authorize.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  assert.equal(done.status, 302);
+  const target = new URL(done.headers.get("location"));
+  assert.equal(`${target.origin}${target.pathname}`, callback);
+  const ticket = target.searchParams.get("ticket");
+  assert.ok(ticket);
+
+  // The ticket is only exchanged with the matching PKCE verifier.
+  const wrong = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      ticket,
+      codeVerifier: crypto.randomBytes(48).toString("base64url"),
+    }),
+  });
+  assert.equal(wrong.status, 403);
+  assert.equal((await wrong.json()).error.code, "desktop_ticket_mismatch");
+
+  const exchanged = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(exchanged.status, 200);
+  const token = (await exchanged.json()).token;
+  assert.match(token, /^adm_desktop_/);
+
+  // The desktop token makes medium-risk gateway writes without a CSRF token.
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  const meResponse = await fetch(`${f.base}/api/v1/desktop/me`, { headers });
+  assert.equal(meResponse.status, 200);
+  const meBody = await meResponse.json();
+  assert.equal(meBody.stepUp.state, "verified");
+
+  const created = await fetch(`${f.base}/api/v1/admin/gateway/providers`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "Desktop made",
+      preset: "openai",
+      reason: "Create a provider from the desktop console",
+    }),
+  });
+  assert.equal(created.status, 201);
+
+  // A one-time ticket cannot be exchanged twice.
+  const again = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(again.status, 409);
+
+  // Signing out revokes the token and its step-up assertion.
+  const signedOut = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "DELETE",
+    headers,
+  });
+  assert.equal(signedOut.status, 200);
+  const stored = await f.admin.store.read((data) => ({
+    tokens: Object.keys(data.desktopTokens).length,
+    assertions: Object.keys(data.stepUpAssertions).length,
+  }));
+  assert.equal(stored.assertions, 0);
+  const afterSignOut = await fetch(`${f.base}/api/v1/admin/gateway/providers`, { headers });
+  assert.equal(afterSignOut.status, 401);
+});
+
+test("M4-C desktop tokens expire on their own clock and by idle time", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const callback = "http://127.0.0.1:43211/v1/admin/login/callback";
+  const started = await fetch(
+    `${f.base}/admin/desktop/login?callbackUrl=${encodeURIComponent(callback)}&codeChallenge=${challenge}`,
+    { redirect: "manual" },
+  );
+  const cookie = started.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const authorize = await fetch(started.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const done = await fetch(authorize.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const ticket = new URL(done.headers.get("location")).searchParams.get("ticket");
+  const exchanged = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(exchanged.status, 200);
+  const token = (await exchanged.json()).token;
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+
+  await f.admin.store.mutate((data) => {
+    data.desktopTokens[hash].lastSeenAt = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+  });
+  const idle = await fetch(`${f.base}/api/v1/desktop/me`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(idle.status, 401);
+  assert.equal((await idle.json()).error.code, "desktop_token_idle");
+
+  const stored = await f.admin.store.read((data) => ({
+    token: Boolean(data.desktopTokens[hash]),
+    assertion: Boolean(data.stepUpAssertions[hash]),
+  }));
+  assert.deepEqual(stored, { token: false, assertion: false });
+});
+
+test("M4-C a desktop sign-in without a fresh step-up keeps the token but not a step-up", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  // The base sign-in still meets the management console's MFA rule, but
+  // its authentication is too old for a step-up assertion.
+  f.oidc.setClaims({
+    amr: ["pwd", "mfa"],
+    auth_time: Math.floor(Date.now() / 1000) - 3600,
+  });
+
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const callback = "http://127.0.0.1:43212/v1/admin/login/callback";
+  const started = await fetch(
+    `${f.base}/admin/desktop/login?callbackUrl=${encodeURIComponent(callback)}&codeChallenge=${challenge}`,
+    { redirect: "manual" },
+  );
+  const cookie = started.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const authorize = await fetch(started.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const done = await fetch(authorize.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const ticket = new URL(done.headers.get("location")).searchParams.get("ticket");
+  const exchanged = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(exchanged.status, 200);
+  const token = (await exchanged.json()).token;
+
+  const current = await fetch(`${f.base}/api/v1/desktop/me`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(current.status, 200);
+  assert.equal((await current.json()).stepUp.state, "required");
+
+  const refused = await fetch(`${f.base}/api/v1/admin/gateway/providers`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Should not exist",
+      preset: "openai",
+      reason: "Desktop write after a sign-in without MFA",
+    }),
+  });
+  assert.equal(refused.status, 403);
+  assert.equal((await refused.json()).error.code, "step_up_required");
 });

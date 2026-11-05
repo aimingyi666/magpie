@@ -380,8 +380,8 @@ OIDC 组织分配或员工客户端同步；M3-C-1 已有独立同步控制面�
 
 ### 4.3 客户端资源同步（M3-C-1：控制面与核心包）
 
-`client-sync` 是本地 Magpie/helper 未来使用的签名资源同步核心，当前不是可直接供员工网页
-调用的服务。它固定 Ed25519 公钥、`signingKeyId` 和 SPKI SHA-256 指纹，校验 desired-state
+`client-sync` 是本地 Magpie 插件/helper 使用的签名资源同步核心，本身不直接暴露给网页；
+员工端插件通过回环服务调用它。它固定 Ed25519 公钥、`signingKeyId` 和 SPKI SHA-256 指纹，校验 desired-state
 manifest、资源内容、长度和 SHA-256，在 staging 中 fsync 并复验后以 rename 原子激活；新版本
 验签或安装失败时保留上一验签版本，离线时继续使用最后验签版本。
 
@@ -396,10 +396,10 @@ node --test enterprise/client-sync/test/*.test.mjs
 ```
 
 当前严格边界：已有员工设备短期同步凭证、desired-state、设备上报和管理员 JSON 查询；
-M3-C-2 已提供管理页的只读资源目录和同步报告/漂移可见性。但仍没有资源发布/回滚 UI、
-发布/回滚审批联动、本地 helper 产品入口、浏览器 E2E、Windows ACL、MDM、目标 Agent
-文件映射或灰度发布；因此员工网页仍不能直接修改本机 Agent 文件，M3-C-1/M3-C-2 不能据此
-宣称产品级同步完成。
+M3-C-2 已提供管理页的只读资源目录和同步报告/漂移可见性；员工端已有 Magpie 插件页展示
+状态并执行立即同步。但仍没有资源发布/回滚 UI、发布/回滚审批联动、独立 helper 安装器、
+浏览器 E2E、Windows ACL、MDM、目标 Agent 文件映射或灰度发布；因此员工网页仍不能直接
+修改本机 Agent 文件，M3-C-1/M3-C-2 不能据此宣称产品级同步完成。
 
 ### 4.4 只读管理可见性（M3-C-2：admin-service）
 
@@ -460,6 +460,76 @@ token 轮换/恢复和管理台员工产品流仍未实现；
 验收。Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把 M3-D
 运行时核心写成产品化或生产可用。
 
+### 4.6 员工端 Magpie 插件页（状态 + 立即同步：已实现）
+
+`enterprise/magpie-plugin/` 在员工已有的 Magpie 侧边栏增加「企业」页。员工仍然安装同一份
+Magpie，**不需要单独的企业定制版客户端**。这一刀只覆盖员工端：
+
+- 读取 `join-enterprise.ps1` 写入的设备凭据，显示已加入/未加入、设备名、网关和凭据到期时间。
+- 读取 `client-sync` 的 `state.json`，显示最近同步、最后成功时间、错误码和资源列表。
+- 显示资源的强制/推荐策略，以及已安装、已变更、缺失、已关闭、已不再分配状态。
+- 资源名称优先取 `enterprise-sync.json` 的 `displayNames`，其次取 release 的
+  `metadata.json` 或正文首个一级标题；资源 ID 作为次要信息保留。desired-state
+  协议本身只带 ID，管理端名称暂不下发。
+- 「立即同步」通过插件宿主的回环服务调用现有 `ClientSyncEngine.syncOnce()`，并上报结果。
+
+安装方式：
+
+```powershell
+magpie plugin add .\enterprise\magpie-plugin
+```
+
+插件默认在 `127.0.0.1:3477` 启动本地服务，端口可在插件设置中用 `port` 选项修改。页面不接触
+设备令牌、私钥或绝对路径；本地服务只监听回环地址，并要求每次运行随机生成的页面令牌。
+
+边界：这一版不做供应商接入、资源发布/回滚、后台定时资源同步或独立安装器；这些仍分别属于
+普通 Provider 配置、`admin-service`/`resource-service` 和后续本地 helper/服务。插件页测试
+覆盖凭据/配置/状态文件异常、资源状态推导、Host/Origin/页面令牌、未加入/未配置和并发同步，
+当前 30 项通过（含管理员模式的 PKCE、失败关闭、路由白名单与页面/翻译检查）。
+
+### 4.7 原生管理员模式（客户端插件 + 网页管理台并存）
+
+`enterprise/magpie-plugin/` 现在还提供「管理员」视图，和员工视图共用同一个插件与本地回环
+服务。它不是把 `/admin/` iframe 进 Magpie：原生页只调用本机服务，本机服务再访问
+`admin-service`。网页管理台 `/admin/`、Cookie、CSRF 和 OIDC 路由保持不变，继续承载用户与
+组织、设备、凭证、审批、资源同步、审计和导出。
+
+首期原生页覆盖运行总览、供应商、路由、网关、用量与请求详情。管理员可以在自己电脑的
+Magpie 打开，也可以直接在管理服务器上的 Magpie 打开；两种位置都走同一条回环服务路径。
+
+登录过程：
+
+1. 本机服务生成 `state`、PKCE 和 nonce。
+2. 系统浏览器完成现有管理 OIDC/MFA。
+3. `admin-service` 回调本机回环地址，只返回一次性 desktop ticket。
+4. 本机服务用 ticket + PKCE verifier 换取短期桌面管理员 token。
+
+页面从不持有 OIDC secret、管理 Cookie、桌面 token、网关管理 token 或供应商 Key。桌面
+token 最长 8 小时、空闲 30 分钟失效，可手动退出；首期不做长期 refresh token。
+
+企业网关新增独立的管理 API：
+
+- 监听容器内专用地址，例如 `MAGPIE_ADMIN_ADDR=0.0.0.0:3450`；
+- 只接受 `MAGPIE_ADMIN_TOKEN`，普通 Gateway Key、员工设备令牌、只读 Key 和浏览器 Cookie
+  一律拒绝；
+- 管理端口只在 Compose 网络内，**不发布宿主机端口**；
+- `admin-service` 用 `ADMIN_GATEWAY_ADMIN_URL` 和 `ADMIN_GATEWAY_ADMIN_TOKEN` 访问它，
+  不跟随重定向、限制响应大小、超时和异常都失败关闭；
+- 供应商、路由、Gateway Key、遥测请求均有字段白名单；供应商 Key/Secret、AccessKey、
+  token hash、私钥和内部路径不回传；
+- 写操作要求 revision/`If-Match`，写后重新读取确认；失败的写不会报成成功。
+
+风险级别：
+
+- 供应商、路由、Gateway Key 的普通查看为 `L`；
+- 新增/编辑模型与路由为 `M`，需要 step-up；
+- 删除供应商、轮换/清除 Key、修改 Gateway Key 额度或白名单为 `H`，需要审批 + step-up。
+
+原生页首期不实现审批中心；遇到 `approval_required` 时，管理员转到网页管理台完成审批。
+这一版同样不修改网关监听地址/端口、不做局域网共享、重启或进程接管，也不支持在服务器侧
+登录 Cursor、WorkBuddy、Codex 等订阅 OAuth；首期供应商只支持 API Key、自定义 Provider
+和预设 Provider。
+
 ## 5. 当前员工与管理员流程（只列已实现）
 
 ### 5.1 员工流程
@@ -473,7 +543,9 @@ token 轮换/恢复和管理台员工产品流仍未实现；
 4. 员工网页已完成 OIDC 身份建立，并展示本人身份、额度、模型、凭证、设备、策略同步状态和
    恢复提示；`/api/v1/me` 也只返回当前登录员工的同类数据。页面不返回 Gateway Key、设备令牌
    或 token hash。操作历史和完整资源视图仍属于后续阶段。
-5. **网页不能直接修改员工电脑上的 Agent 文件。** 必须由本地 Magpie/加入脚本执行 Provider
+5. 员工桌面 Magpie 可安装 `enterprise/magpie-plugin`。侧边栏「企业」页只读展示设备、最近
+   同步和资源状态，并提供「立即同步」；它复用同一份 Magpie，不是单独的企业定制客户端。
+6. **网页不能直接修改员工电脑上的 Agent 文件。** 必须由本地 Magpie/加入脚本执行 Provider
    写入和 Agent 一键配置；只打开浏览器、不安装本地 Magpie，不能设置本机 Agent。
 
 ### 5.2 管理员流程
@@ -520,7 +592,9 @@ token 轮换/恢复和管理台员工产品流仍未实现；
 ### 5.3 当前结论
 
 员工不是“只通过网页就能设置本地 Agent”。已实现的闭环是“网页 OIDC 授权 + 本地 Magpie
-落配置”；员工网页可以只读查看本人策略、凭证、设备和同步状态。管理员也不是“完整企业
+落配置”；员工网页可以只读查看本人策略、凭证、设备和同步状态。员工桌面的 Magpie 插件页
+还能查看资源同步状态并执行「立即同步」，但仍不是独立企业客户端，也不负责供应商接入。
+管理员也不是“完整企业
 控制台”，当前具备身份底座、只读治理、四个受控写 API 与基础页面、额度/模型策略写表单、
 完整证据链状态、C5 查询/对账、M2-D CSV 导出、APR-01a 基础审批、APR-01b HMAC 回调
 适配器和 APR-01c step-up 门禁；C4-04 的真实管理链路 E2E 已通过，但仍缺少完整审批/运营
@@ -614,6 +688,9 @@ enterprise/
   resource-service/          M3-A 资源目录、不可变版本和签名 manifest
   mcp-gateway/               M3-B 远程 MCP 注册、策略代理和健康检查
   audit-service/             M4-A + M4-B 审计事件与内容管道核心（默认仅元数据）
+  client-sync/               M3-C-1 签名资源同步核心和 HTTP 传输
+  local-mcp/                 M3-D 受控本地 MCP 运行时核心
+  magpie-plugin/             员工端 Magpie 插件页：设备/同步/资源状态 + 立即同步
   scripts/
     provision-user.ps1      服务端：开通/配置员工密钥
     join-client.ps1         客户端：加入企业网关

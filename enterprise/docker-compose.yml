@@ -21,6 +21,11 @@ services:
       MAGPIE_ADDR: 0.0.0.0:3425
       MAGPIE_ALLOW_IPS: ${MAGPIE_ALLOW_IPS:-127.0.0.1/32}
       MAGPIE_UPDATE_FEED: ${MAGPIE_UPDATE_FEED:-}
+      # The administration API has a listener of its own, on the Compose
+      # network alone: no host port is published for it, and its token is
+      # not a Gateway Key. An empty address turns it off.
+      MAGPIE_ADMIN_ADDR: ${MAGPIE_ADMIN_ADDR:-0.0.0.0:3450}
+      MAGPIE_ADMIN_TOKEN: ${MAGPIE_ADMIN_TOKEN:-}
     volumes:
       - magpie-data:/config
     healthcheck:
@@ -316,6 +321,8 @@ services:
     depends_on:
       auth:
         condition: service_healthy
+      gateway:
+        condition: service_healthy
     ports:
       - "${ADMIN_BIND:-0.0.0.0}:${ADMIN_HOST_PORT:-3445}:3445"
     environment:
@@ -359,6 +366,20 @@ services:
       ADMIN_RESOURCE_SERVICE_TOKEN: ${ADMIN_RESOURCE_SERVICE_TOKEN:-}
       ADMIN_RESOURCE_SERVICE_TIMEOUT_MS: ${ADMIN_RESOURCE_SERVICE_TIMEOUT_MS:-5000}
       ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES: ${ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES:-4194304}
+      # The enterprise gateway's own administration API, on the internal
+      # network. Its token never leaves admin-service.
+      ADMIN_GATEWAY_ADMIN_URL: ${ADMIN_GATEWAY_ADMIN_URL:-http://gateway:3450}
+      ADMIN_GATEWAY_ADMIN_TOKEN: ${MAGPIE_ADMIN_TOKEN:-}
+      ADMIN_GATEWAY_ADMIN_TIMEOUT_MS: ${ADMIN_GATEWAY_ADMIN_TIMEOUT_MS:-10000}
+      ADMIN_GATEWAY_ADMIN_MAX_RESPONSE_BYTES: ${ADMIN_GATEWAY_ADMIN_MAX_RESPONSE_BYTES:-4194304}
+      # The native administrator page signs in through the system browser
+      # and hands a one-time ticket to the loopback callback in the plugin.
+      ADMIN_DESKTOP_LOGIN_ENABLED: ${ADMIN_DESKTOP_LOGIN_ENABLED:-true}
+      ADMIN_DESKTOP_CALLBACK_HOSTS: ${ADMIN_DESKTOP_CALLBACK_HOSTS:-127.0.0.1,localhost}
+      ADMIN_DESKTOP_CALLBACK_PORTS: ${ADMIN_DESKTOP_CALLBACK_PORTS:-3477}
+      ADMIN_DESKTOP_TICKET_TTL_SECONDS: ${ADMIN_DESKTOP_TICKET_TTL_SECONDS:-120}
+      ADMIN_DESKTOP_TOKEN_TTL_HOURS: ${ADMIN_DESKTOP_TOKEN_TTL_HOURS:-8}
+      ADMIN_DESKTOP_IDLE_MINUTES: ${ADMIN_DESKTOP_IDLE_MINUTES:-30}
       ADMIN_APPROVAL_CALLBACK_SECRET: ${ADMIN_APPROVAL_CALLBACK_SECRET:-}
       ADMIN_APPROVAL_CALLBACK_ISSUER: ${ADMIN_APPROVAL_CALLBACK_ISSUER:-}
       ADMIN_APPROVAL_CALLBACK_AUDIENCE: ${ADMIN_APPROVAL_CALLBACK_AUDIENCE:-}

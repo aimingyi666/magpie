@@ -3,6 +3,17 @@ import crypto from "node:crypto";
 import fs from "node:fs/promises";
 import { AuthServiceClient } from "./auth-client.js";
 import { ResourceServiceClient, ResourceServiceError } from "./resource-client.js";
+import { GatewayAdminClient, GatewayAdminError } from "./gateway-admin-client.js";
+import {
+  bearerToken,
+  desktopCallbackUrl,
+  desktopPkce,
+  desktopTicketState,
+  desktopTokenState,
+  isDesktopRequest,
+  newDesktopTicket,
+  newDesktopToken,
+} from "./desktop.js";
 import {
   normalizeAdminIdentity,
   OidcClient,
@@ -122,6 +133,17 @@ const OPERATION_PERMISSIONS = Object.freeze({
   "usage.export.create": "usage.export",
   "audit.export.create": "audit.export",
   "operation.reconcile": "operations.reconcile",
+  "gateway.provider.create": "providers.write",
+  "gateway.provider.update": "providers.write",
+  "gateway.provider.delete": "providers.write",
+  "gateway.routing.create": "routing.write",
+  "gateway.routing.update": "routing.write",
+  "gateway.routing.delete": "routing.write",
+  "gateway.key.create": "gateway.write",
+  "gateway.key.update": "gateway.write",
+  "gateway.key.policy": "gateway.write",
+  "gateway.key.rotate": "gateway.write",
+  "gateway.key.remove": "gateway.write",
 });
 
 const APPROVAL_ACTION_TARGETS = Object.freeze({
@@ -134,6 +156,17 @@ const APPROVAL_ACTION_TARGETS = Object.freeze({
   "usage.export.create": { targetType: "export", permission: "usage.export" },
   "audit.export.create": { targetType: "export", permission: "audit.export" },
   "operation.reconcile": { targetType: "operation", permission: "operations.reconcile" },
+  "gateway.provider.create": { targetType: "gateway", permission: "providers.write" },
+  "gateway.provider.update": { targetType: "gateway", permission: "providers.write" },
+  "gateway.provider.delete": { targetType: "gateway", permission: "providers.write" },
+  "gateway.routing.create": { targetType: "gateway", permission: "routing.write" },
+  "gateway.routing.update": { targetType: "gateway", permission: "routing.write" },
+  "gateway.routing.delete": { targetType: "gateway", permission: "routing.write" },
+  "gateway.key.create": { targetType: "gateway", permission: "gateway.write" },
+  "gateway.key.update": { targetType: "gateway", permission: "gateway.write" },
+  "gateway.key.policy": { targetType: "gateway", permission: "gateway.write" },
+  "gateway.key.rotate": { targetType: "gateway", permission: "gateway.write" },
+  "gateway.key.remove": { targetType: "gateway", permission: "gateway.write" },
 });
 
 const POLICY_ACTIONS = new Set([
@@ -382,6 +415,64 @@ function cleanIdentifier(value, name, code = "invalid_request") {
     throw new HttpError(400, code, `${name} is invalid`);
   }
   return identifier;
+}
+
+// A gateway write is approved on its business payload, never on a
+// credential. Secret-bearing fields are replaced with a digest, so an
+// approval record proves what was asked for without keeping the secret
+// beside it.
+const GATEWAY_SECRET_FIELD = /^(?:key|keys|addKeys|removeKeys|secret|apiKey|apikey|token|accessKey|accessToken|password|clientSecret)$/i;
+
+function redactedGatewayValue(value) {
+  if (Array.isArray(value)) return value.map(redactedGatewayValue);
+  if (value && typeof value === "object") {
+    const output = {};
+    for (const [name, entry] of Object.entries(value)) {
+      // The key patch's own "id" names a key already saved; it is not a
+      // secret. Its "key" is one, and is digested like every other.
+      if (GATEWAY_SECRET_FIELD.test(name) && entry !== undefined && entry !== null && entry !== "") {
+        output[name] = `sha256:${sha256(String(entry))}`;
+        continue;
+      }
+      output[name] = redactedGatewayValue(entry);
+    }
+    return output;
+  }
+  return value;
+}
+
+// gatewayApprovalBody is the write without the envelope the management
+// API adds to it: action, target, reason and the approval it cites are
+// the approval's own fields, not part of what is being approved.
+const GATEWAY_ENVELOPE_FIELDS = new Set([
+  "action",
+  "targetId",
+  "reason",
+  "approvalId",
+  "breakGlassId",
+  "expectedRevision",
+]);
+
+function gatewayApprovalBody(body) {
+  const output = {};
+  for (const [name, value] of Object.entries(body || {})) {
+    if (GATEWAY_ENVELOPE_FIELDS.has(name)) continue;
+    output[name] = redactedGatewayValue(value);
+  }
+  return output;
+}
+
+// gatewaySettingsBody is what the gateway itself is sent: the same strip
+// as the approval body, but with its values as they were. reason,
+// approvalId, breakGlassId and expectedRevision are the management API's
+// envelope; the gateway's strict JSON decoder refuses any of them.
+function gatewaySettingsBody(body) {
+  const output = {};
+  for (const [name, value] of Object.entries(body || {})) {
+    if (GATEWAY_ENVELOPE_FIELDS.has(name)) continue;
+    output[name] = value;
+  }
+  return output;
 }
 
 function cleanEvidenceRef(value, required = false) {
@@ -1829,6 +1920,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   const authService = options.authService || new AuthServiceClient(config.authService);
   const resourceService = options.resourceService
     || new ResourceServiceClient(config.resourceService || { enabled: false });
+  const gatewayAdmin = options.gatewayAdmin
+    || new GatewayAdminClient(config.gatewayAdmin || {});
   const notificationChannelSettings = config.notifications?.channels || {};
   const notificationChannelTransport = options.notificationChannelTransport || (
     notificationChannelSettings.enabled
@@ -2639,6 +2732,18 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     if (action === "usage.export.create" || action === "audit.export.create") {
       return normalizedExportRequest(action, body);
     }
+    if (action.startsWith("gateway.")) {
+      // The revision names the configuration this approval was written
+      // against: a later write must still be applied to that revision.
+      // A create has nothing to compare against, so only the actions on
+      // an existing record carry one.
+      const revision = String(body.expectedRevision ?? "").trim();
+      if (!action.endsWith(".create")) gatewayExpectedRevision(revision);
+      return {
+        expectedRevision: revision,
+        body: gatewayApprovalBody(body),
+      };
+    }
     return {};
   }
 
@@ -2721,6 +2826,28 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           exportType: request.exportType,
           orgUnitId: request.orgUnitId,
         },
+      };
+    }
+    if (definition.targetType === "gateway") {
+      // Gateway configuration is one global thing: it has no organization
+      // unit of its own, so only an administrator whose role covers the
+      // whole organization may approve a write to it.
+      const sessionAccess = await requirePermission(session, definition.permission, "*");
+      if (!hasGlobalScope(sessionAccess.access)) {
+        throw new HttpError(
+          403,
+          "forbidden_scope",
+          "Gateway configuration requires organization-wide access",
+        );
+      }
+      if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(targetId)) {
+        throw new HttpError(400, "invalid_request", "targetId is not a gateway record id");
+      }
+      return {
+        targetType: "gateway",
+        targetId,
+        targetOrgUnitId: "*",
+        target: { id: targetId },
       };
     }
     const targetResult = await writeTarget(
@@ -3485,7 +3612,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     if (action) approvalActionDefinition(action);
     const targetType = one("targetType", 32);
     if (targetType
-        && !["user", "device", "credential", "operation", "export"].includes(targetType)) {
+        && !["user", "device", "credential", "operation", "export", "gateway"].includes(targetType)) {
       throw new HttpError(400, "invalid_approval_filter", "targetType is not supported");
     }
     return {
@@ -4200,6 +4327,74 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     return result;
   }
 
+  // --- desktop bearer sessions ----------------------------------------
+  //
+  // A desktop administrator has a bearer token, not a cookie. It is looked
+  // up in the same store but in its own collection, so revoking a browser
+  // session can never leave a desktop token alive by accident, and the
+  // management cookie is never accepted in its place.
+
+  async function desktopSession(token) {
+    if (!token) return null;
+    const tokenHash = sha256(token);
+    const result = await store.mutate((data) => {
+      const stored = data.desktopTokens?.[tokenHash];
+      const state = desktopTokenState(stored, config.desktop);
+      if (!state.ok) {
+        if (stored) {
+          delete data.desktopTokens[tokenHash];
+          delete data.stepUpAssertions[tokenHash];
+        }
+        return { error: state.code };
+      }
+      stored.lastSeenAt = new Date().toISOString();
+      return {
+        tokenHash,
+        session: {
+          subjectId: stored.subjectId,
+          subject: stored.subject,
+          email: stored.email,
+          name: stored.name,
+          createdAt: stored.createdAt,
+          lastSeenAt: stored.lastSeenAt,
+          expiresAt: stored.expiresAt,
+        },
+      };
+    });
+    if (result.error) {
+      throw new HttpError(401, result.error, "The desktop administrator session is no longer valid");
+    }
+    // Desktop requests are not tied to a browser, so there is no CSRF
+    // token and no step-up assertion keyed by a browser session. Step-up
+    // still applies: see requireStepUpFor below.
+    return {
+      sidHash: result.tokenHash,
+      session: structuredClone(result.session),
+      desktop: true,
+    };
+  }
+
+  // desktopOrCookie resolves either a desktop bearer token or the web
+  // console's cookie session. A request carrying both is refused: two
+  // identities on one request is how an audit trail gets a lie in it.
+  async function currentPrincipal(req) {
+    const token = bearerToken(req);
+    const cookie = sessionCookie(req, config);
+    if (token && cookie) {
+      throw new HttpError(400, "ambiguous_session", "Send either a desktop token or a management cookie");
+    }
+    if (token) return desktopSession(token);
+    return currentSession(req);
+  }
+
+  // desktopOrCookie is the read/write entry point for the desktop's agent
+  // pages: cookie-based calls keep their CSRF rule, bearer calls never
+  // carry a CSRF token because a browser does not add one on its own.
+  async function requireCsrfOrDesktop(req, current) {
+    if (current.desktop) return;
+    await requireCsrf(req, current.session);
+  }
+
   async function stepUpState(current, req) {
     const { sidHash, session } = current;
     if (!config.stepUpOidc || !stepUpOidc) {
@@ -4229,11 +4424,18 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         amr: [...assertion.amr],
         authTime: assertion.authTime,
       };
-      if (assertion.sessionHash !== sidHash
+      // A desktop token has no browser of its own: its assertion is bound
+      // to the token, not to an IP or a user agent.
+      const bindingChanged = current.desktop
+        ? assertion.desktop !== true
+          || assertion.sessionHash !== sidHash
+          || assertion.subjectId !== session.subjectId
+        : assertion.desktop === true
+          || assertion.sessionHash !== sidHash
           || assertion.subjectId !== session.subjectId
           || assertion.ip !== clientIp(req)
-          || assertion.userAgentHash !== userAgentHash(req)
-          || assertion.accessDigest !== accessDigest(access)) {
+          || assertion.userAgentHash !== userAgentHash(req);
+      if (bindingChanged || assertion.accessDigest !== accessDigest(access)) {
         return { ...base, ...publicFields, state: "binding_mismatch" };
       }
       if (!Number.isFinite(Date.parse(assertion.expiresAt))
@@ -4255,7 +4457,12 @@ export async function createEnterpriseAdminServer(config, options = {}) {
   async function requireStepUp(current, req, action, riskOverride = "") {
     const { sidHash, session } = current;
     const risk = riskOverride || riskForAction(action);
-    if (!["H", "C"].includes(risk)) return null;
+    // Medium-risk gateway writes are configuration edits: they need a
+    // fresh sign-in but not an approver. Every other action keeps the
+    // existing rule that only H and C ask for step-up.
+    if (!["H", "C"].includes(risk) && !(risk === "M" && action.startsWith("gateway."))) {
+      return null;
+    }
     if (!config.stepUpOidc || !stepUpOidc) {
       throw new HttpError(
         503,
@@ -4267,11 +4474,19 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       const assertion = data.stepUpAssertions[sidHash];
       const access = effectiveAccess(data, session.subjectId);
       if (!assertion) return { code: "step_up_required" };
-      if (assertion.sessionHash !== sidHash
+      // A desktop token has no browser of its own: its step-up was
+      // completed in one, and is bound to the token and the identity it
+      // was issued to. A cookie session is bound to its browser too.
+      const bindingChanged = current.desktop
+        ? assertion.desktop !== true
+          || assertion.sessionHash !== sidHash
+          || assertion.subjectId !== session.subjectId
+        : assertion.desktop === true
+          || assertion.sessionHash !== sidHash
           || assertion.subjectId !== session.subjectId
           || assertion.ip !== clientIp(req)
-          || assertion.userAgentHash !== userAgentHash(req)
-          || assertion.accessDigest !== accessDigest(access)) {
+          || assertion.userAgentHash !== userAgentHash(req);
+      if (bindingChanged || assertion.accessDigest !== accessDigest(access)) {
         return { code: "step_up_binding_mismatch" };
       }
       const expiry = risk === "C" ? assertion.criticalExpiresAt : assertion.expiresAt;
@@ -4526,7 +4741,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     }
     const targetType = one("targetType", 32);
     if (targetType
-        && !["user", "device", "credential", "operation", "export"].includes(targetType)) {
+        && !["user", "device", "credential", "operation", "export", "gateway"].includes(targetType)) {
       throw new HttpError(400, "invalid_operation_filter", "targetType is not supported");
     }
     const normalized = {
@@ -4692,7 +4907,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       limit,
     };
     if (normalized.targetType
-        && !["user", "device", "credential", "operation", "export"].includes(
+        && !["user", "device", "credential", "operation", "export", "gateway"].includes(
           normalized.targetType,
         )) {
       throw new HttpError(400, "invalid_audit_filter", "targetType is not supported");
@@ -7733,6 +7948,749 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     };
   }
 
+  // --- the gateway's administration API -------------------------------
+  //
+  // The management service is the only caller of the gateway's own admin
+  // API; the browser, desktop or not, never holds its token. Reads stay
+  // L-risk but still need the read permission; writes go through the same
+  // approval, step-up and audit path as every other write here.
+
+  function requireGatewayAdmin() {
+    if (!gatewayAdmin.enabled) {
+      throw new HttpError(
+        503,
+        "gateway_unavailable",
+        "Gateway administration is not configured",
+      );
+    }
+  }
+
+  async function gatewayAdminCall(call) {
+    requireGatewayAdmin();
+    try {
+      return await call();
+    } catch (error) {
+      if (error instanceof HttpError) throw error;
+      if (error instanceof GatewayAdminError) {
+        throw new HttpError(
+          Number.isInteger(error.statusCode) ? error.statusCode : 503,
+          String(error.code || "gateway_unavailable"),
+          String(error.message || "The gateway administration API is unavailable"),
+        );
+      }
+      throw new HttpError(503, "gateway_unavailable", "The gateway administration API is unavailable");
+    }
+  }
+
+  function gatewayProviderId(value) {
+    const id = String(value || "").trim();
+    if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
+      throw new HttpError(400, "invalid_provider_id", "The provider id is invalid");
+    }
+    return id;
+  }
+
+  function gatewayGroupId(value) {
+    const id = String(value || "").trim();
+    // Lowercase letters, digits, dots and dashes: the router's own group
+    // id shape, so a group the page creates is one the gateway can keep.
+    if (!/^[a-z0-9][a-z0-9.-]{0,63}$/.test(id)) {
+      throw new HttpError(400, "invalid_group_id", "The routing group id is invalid");
+    }
+    return id;
+  }
+
+  function gatewayKeyId(value) {
+    const id = String(value || "").trim();
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+      throw new HttpError(400, "invalid_key_id", "The gateway key id is invalid");
+    }
+    return id;
+  }
+
+  function gatewayExpectedRevision(value) {
+    const revision = String(value ?? "").trim();
+    if (!revision || [...revision].length > 200 || /[\u0000-\u001f\u007f]/.test(revision)) {
+      throw new HttpError(400, "revision_required", "expectedRevision is required");
+    }
+    return revision;
+  }
+
+  // A gateway write takes an If-Match revision or an expectedRevision in
+  // the body, never neither: an administrator's change is applied to what
+  // they read, not to whatever is there when the request arrives.
+  function gatewayRevisionFrom(req, body) {
+    const header = String(req.headers["if-match"] || "").trim();
+    const inBody = String(body?.expectedRevision || "").trim();
+    if (header && inBody && header !== inBody) {
+      throw new HttpError(409, "revision_conflict", "If-Match and expectedRevision disagree");
+    }
+    return gatewayExpectedRevision(header || inBody);
+  }
+
+  function gatewayPublicProvider(provider) {
+    if (!provider || typeof provider !== "object" || Array.isArray(provider)) return {};
+    const models = Array.isArray(provider.models) ? provider.models.map(String) : [];
+    const fallback = Array.isArray(provider.fallback) ? provider.fallback.map(String) : [];
+    const masked = Array.isArray(provider.keyMaskedList)
+      ? provider.keyMaskedList.map(String)
+      : [];
+    return {
+      id: String(provider.id || ""),
+      name: String(provider.name || ""),
+      preset: String(provider.preset || ""),
+      icon: String(provider.icon || ""),
+      host: String(provider.host || ""),
+      chat: String(provider.chat || ""),
+      responses: String(provider.responses || ""),
+      anthropic: String(provider.anthropic || ""),
+      gemini: String(provider.gemini || ""),
+      baseAPI: String(provider.baseAPI || ""),
+      models,
+      modelCount: Number.isSafeInteger(provider.modelCount) ? provider.modelCount : models.length,
+      keyState: String(provider.keyState || "missing"),
+      keyName: String(provider.keyName || ""),
+      keyMasked: String(provider.keyMasked || ""),
+      keyCount: Number.isSafeInteger(provider.keyCount) ? provider.keyCount : 0,
+      keyMaskedList: masked,
+      keys: Array.isArray(provider.keys) ? provider.keys.map(gatewayPublicProviderKey) : [],
+      ready: Boolean(provider.ready),
+      off: Boolean(provider.off),
+      unlisted: Boolean(provider.unlisted),
+      routing: String(provider.routing || ""),
+      fallback,
+      subscription: Boolean(provider.subscription),
+      revision: String(provider.revision || ""),
+    };
+  }
+
+  // One of a provider's keys, as the page shows it: the fingerprint to act
+  // on, and never the key's value, which the gateway does not answer.
+  function gatewayPublicProviderKey(key) {
+    if (!plainObjectValue(key)) return {};
+    return {
+      id: String(key.id || ""),
+      name: String(key.name || ""),
+      masked: String(key.masked || ""),
+      active: Boolean(key.active),
+      on: Boolean(key.on),
+      protocol: String(key.protocol || ""),
+      weight: Number.isSafeInteger(key.weight) ? key.weight : 0,
+      plan: String(key.plan || ""),
+      rest: plainObjectValue(key.rest) ? {
+        why: String(key.rest.why || ""),
+        status: Number(key.rest.status || 0),
+        until: String(key.rest.until || ""),
+        model: String(key.rest.model || ""),
+        error: String(key.rest.error || ""),
+      } : null,
+    };
+  }
+
+  function gatewayPublicGroup(group) {
+    if (!group || typeof group !== "object" || Array.isArray(group)) return {};
+    const strings = (value) => (Array.isArray(value) ? value.map(String) : []);
+    return {
+      id: String(group.id || ""),
+      name: String(group.name || ""),
+      members: strings(group.members),
+      live: Array.isArray(group.live) ? group.live.map(gatewayPublicGroupMember) : [],
+      match: strings(group.match),
+      routing: String(group.routing || ""),
+      affinity: String(group.affinity || ""),
+      off: strings(group.off),
+      rules: Array.isArray(group.rules) ? group.rules.map((rule) => ({
+        match: String(rule?.match || ""),
+        intent: String(rule?.intent || ""),
+        to: strings(rule?.to),
+        pause: Boolean(rule?.pause),
+      })) : [],
+      weights: plainObjectValue(group.weights) ? { ...group.weights } : {},
+      disabled: Boolean(group.disabled),
+      revision: String(group.revision || ""),
+    };
+  }
+
+  // One member of a routing group as routing weighs it now.
+  function gatewayPublicGroupMember(member) {
+    if (!plainObjectValue(member)) return {};
+    return {
+      id: String(member.id || ""),
+      provider: String(member.provider || ""),
+      model: String(member.model || ""),
+      name: String(member.name || ""),
+      on: Boolean(member.on),
+      rest: plainObjectValue(member.rest) ? {
+        why: String(member.rest.why || ""),
+        status: Number(member.rest.status || 0),
+        until: String(member.rest.until || ""),
+        model: String(member.rest.model || ""),
+        error: String(member.rest.error || ""),
+      } : null,
+    };
+  }
+
+  function plainObjectValue(value) {
+    return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+  }
+
+  function gatewayPublicGateway(state) {
+    if (!plainObjectValue(state)) return {};
+    return {
+      ok: Boolean(state.ok),
+      address: String(state.address || ""),
+      publicURL: String(state.publicURL || ""),
+      version: String(state.version || ""),
+      providers: Number.isSafeInteger(state.providers) ? state.providers : 0,
+      groups: Number.isSafeInteger(state.groups) ? state.groups : 0,
+      models: Array.isArray(state.models) ? state.models.map(String) : [],
+      callerKeys: Number.isSafeInteger(state.callerKeys) ? state.callerKeys : 0,
+      startedAt: String(state.startedAt || ""),
+    };
+  }
+
+  function gatewayPublicKey(key) {
+    if (!plainObjectValue(key)) return {};
+    return {
+      id: String(key.id || ""),
+      name: String(key.name || ""),
+      state: String(key.state || "enabled"),
+      masked: String(key.masked || ""),
+      limit: plainObjectValue(key.limit) ? { ...key.limit } : null,
+      moreLimits: Array.isArray(key.moreLimits) ? key.moreLimits.map((l) => ({ ...l })) : [],
+      models: Array.isArray(key.models) ? key.models.map(String) : [],
+      accounts: Array.isArray(key.accounts) ? key.accounts.map(String) : [],
+      readOnly: Boolean(key.readOnly),
+      expiresAt: key.expiresAt ? String(key.expiresAt) : "",
+      revision: String(key.revision || ""),
+    };
+  }
+
+  // A page of the gateway's own usage ledger. Request rows are its, not
+  // the management service's: whatever it does not project is dropped
+  // rather than passed through.
+  function gatewayPublicLedger(page) {
+    if (!plainObjectValue(page)) return { rows: [], total: 0 };
+    const totals = plainObjectValue(page.totals) ? page.totals : {};
+    return {
+      period: String(page.period || ""),
+      offset: Number.isSafeInteger(page.offset) ? page.offset : 0,
+      total: Number.isSafeInteger(page.total) ? page.total : 0,
+      rows: Array.isArray(page.rows) ? page.rows.map(gatewayPublicRequest) : [],
+      truncated: Boolean(page.truncated),
+      totals: {
+        calls: Number(totals.calls || 0),
+        errors: Number(totals.errors || 0),
+        input: Number(totals.input || 0),
+        output: Number(totals.output || 0),
+        cost: Number(totals.cost || 0),
+      },
+    };
+  }
+
+  // A request row the gateway folded from its usage ledger: one row per
+  // route, its attempts counted, group named only for a real routing
+  // group. Only what an administrator needs to see a request routed is
+  // kept — never a session, prompt, mask, archive path or folder.
+  function gatewayPublicRequest(row) {
+    if (!plainObjectValue(row)) return {};
+    const input = safeNumber(row.in);
+    const output = safeNumber(row.out);
+    const routeId = Number.isSafeInteger(row.routeId) && row.routeId > 0 ? row.routeId : null;
+    const tries = safeNumber(row.tries);
+    const attempts = safeNumber(row.attempts);
+    return {
+      time: String(row.time || ""),
+      routeId,
+      user: "",
+      device: String(row.computerName || ""),
+      callerKeyId: String(row.callerKeyId || ""),
+      callerKeyName: String(row.callerKeyName || ""),
+      agent: String(row.agentName || row.agent || ""),
+      agentId: String(row.agent || ""),
+      model: String(row.model || ""),
+      requested: String(row.requested || ""),
+      served: String(row.served || ""),
+      provider: String(row.providerName || row.provider || ""),
+      providerId: String(row.provider || ""),
+      account: String(row.account || ""),
+      key: String(row.providerKeyName || ""),
+      group: String(row.group || ""),
+      tries,
+      attempts,
+      fallback: tries > 1 || attempts > 1,
+      status: safeNumber(row.status),
+      millis: safeNumber(row.ms),
+      ttft: safeNumber(row.ttft_ms),
+      firstText: safeNumber(row.first_text_ms),
+      input,
+      output,
+      tokens: input + output,
+      cost: safeNumber(row.cost),
+      source: String(row.source || ""),
+      error: String(row.error || ""),
+    };
+  }
+
+  async function gatewayReadOverview(req, res) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "gateway.read");
+    const [state, providers, groups, keys, page] = await gatewayAdminCall(() => Promise.all([
+      gatewayAdmin.gatewayState(),
+      gatewayAdmin.listProviders(),
+      gatewayAdmin.listRoutingGroups(),
+      gatewayAdmin.listGatewayKeys(),
+      gatewayAdmin.requestPage(new URLSearchParams({ period: "day", limit: "20" })),
+    ]));
+    const ledger = gatewayPublicLedger(page);
+    const requests = ledger.rows;
+    json(res, 200, {
+      gateway: gatewayPublicGateway(state),
+      counts: {
+        providers: providers.length,
+        groups: groups.length,
+        keys: keys.length,
+        requests: ledger.totals.calls,
+        failures: ledger.totals.errors,
+        tokens: ledger.totals.input + ledger.totals.output,
+        cost: ledger.totals.cost,
+      },
+      recent: requests.slice(0, 20),
+    });
+  }
+
+  // Every gateway write is one operation: a fresh sign-in (and, for the
+  // destructive ones, an approval) is checked first, the gateway is
+  // called once, and the management audit and the approval's consumption
+  // are written whatever the gateway answered. A write whose audit could
+  // not be recorded fails closed.
+  function gatewayWriteEnvelope(body) {
+    const reason = cleanReason(body.reason);
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    const breakGlassId = cleanOptionalBreakGlassId(body.breakGlassId);
+    if (approvalId && breakGlassId) {
+      throw new HttpError(
+        400,
+        "approval_and_break_glass_exclusive",
+        "approvalId and breakGlassId cannot be used together",
+      );
+    }
+    return { reason, approvalId, breakGlassId };
+  }
+
+  async function gatewayWrite(req, requestId, options) {
+    const {
+      current, action, targetId, body, call,
+    } = options;
+    const permission = approvalActionDefinition(action).permission;
+    // Authorization comes before reading the request's audit reason: a
+    // caller without the role learns nothing about the write's input
+    // validation, and a denial never looks like a malformed request.
+    await requirePermission(current.session, permission, "*");
+    const envelope = gatewayWriteEnvelope(body);
+    await requireStepUp(current, req, action);
+    if (!approvalRequiredForAction(action)) {
+      if (envelope.approvalId || envelope.breakGlassId) {
+        throw approvalHttpError(
+          "approval_invalid",
+          "This action must not consume an approval or break-glass grant",
+        );
+      }
+    } else {
+      if (!envelope.approvalId && !envelope.breakGlassId) {
+        throw approvalHttpError(
+          "approval_required",
+          "approvalId or breakGlassId is required for this action",
+        );
+      }
+    }
+    const payload = approvalBusinessPayload(action, body);
+    const operation = {
+      id: `op_${crypto.randomUUID()}`,
+      requestId,
+      action,
+      targetType: "gateway",
+      targetId,
+      targetOrgUnitId: "*",
+      actorSubjectId: current.session.subjectId,
+      actorEmail: current.session.email,
+      approvalId: envelope.approvalId,
+      breakGlassId: envelope.breakGlassId,
+    };
+    if (approvalRequiredForAction(action)) {
+      try {
+        await store.mutate((data) => {
+          if (envelope.breakGlassId) {
+            consumeBreakGlassForOperation(
+              data,
+              envelope.breakGlassId,
+              breakGlassExpectedBinding({
+                environmentId: approvalEnvironmentId,
+                policyVersion: BREAK_GLASS_POLICY_VERSION,
+                requesterSubjectId: current.session.subjectId,
+                action,
+                targetType: "gateway",
+                targetId,
+                targetOrgUnitId: "*",
+                riskLevel: riskForAction(action),
+                reason: envelope.reason,
+                payload,
+              }),
+              operation,
+              breakGlassNow(),
+            );
+          } else {
+            reserveApprovalForOperation(
+              data,
+              envelope.approvalId,
+              approvalExpectedBinding({
+                requesterSubjectId: current.session.subjectId,
+                action,
+                targetType: "gateway",
+                targetId,
+                targetOrgUnitId: "*",
+                riskLevel: riskForAction(action),
+                reason: envelope.reason,
+                payload,
+              }),
+              operation,
+            );
+          }
+        });
+      } catch (error) {
+        if (error instanceof HttpError) throw error;
+        throw new HttpError(503, "audit_unavailable", "Management audit is unavailable");
+      }
+    }
+
+    let outcome = "succeeded";
+    let result;
+    let failure = null;
+    try {
+      result = await gatewayAdminCall(call);
+    } catch (error) {
+      outcome = "failed";
+      failure = error;
+    }
+    try {
+      await store.mutate((data) => {
+        if (operation.approvalId) {
+          if (outcome === "succeeded") {
+            consumeApprovalForOperation(data, operation.approvalId, operation, "succeeded");
+          } else {
+            // The reserved approval is spent even by a failed attempt:
+            // leaving it reserved would let a retry ride on it.
+            const approval = data.approvalRequests[operation.approvalId];
+            if (approval?.status === "reserved") {
+              consumeApprovalForOperation(data, operation.approvalId, operation, "failed");
+            }
+          }
+        }
+        data.adminSystemAuditLogs.push({
+          id: `audit_${crypto.randomUUID()}`,
+          action,
+          timestamp: new Date().toISOString(),
+          actorSubjectId: current.session.subjectId,
+          actorEmail: current.session.email,
+          requestId,
+          targetType: "gateway",
+          targetId,
+          reason: envelope.reason,
+          approvalId: operation.approvalId,
+          breakGlassId: operation.breakGlassId,
+          errorCode: failure instanceof HttpError ? failure.code : "",
+          result: outcome,
+        });
+      });
+    } catch {
+      throw new HttpError(503, "audit_unavailable", "The administration audit could not be written");
+    }
+    if (failure) throw failure;
+    return result;
+  }
+
+  async function gatewayReadProviders(req, res) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "providers.read");
+    const providers = await gatewayAdminCall(() => gatewayAdmin.listProviders());
+    json(res, 200, { providers: providers.map(gatewayPublicProvider) });
+  }
+
+  async function gatewayCreateProvider(req, res, requestId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const prepared = plainObjectValue(body.provider) ? body.provider : body;
+    const name = String(prepared.name || "").trim();
+    if (!name) throw new HttpError(400, "invalid_provider", "A provider needs a name");
+    // A create has no id yet: the approval names the provider by its name
+    // slug, and the record's own id is what the audit keeps.
+    const targetId = `provider:${name.toLowerCase().replace(/[^a-z0-9.-]+/g, "-").slice(0, 48)}`;
+    const result = await gatewayWrite(req, requestId, {
+      current,
+      action: "gateway.provider.create",
+      targetId,
+      body,
+      call: () => gatewayAdmin.createProvider(gatewaySettingsBody(prepared)),
+    });
+    json(res, 201, { provider: gatewayPublicProvider(result) });
+  }
+
+  async function gatewayUpdateProvider(req, res, requestId, providerId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const id = gatewayProviderId(providerId);
+    const expectedRevision = gatewayRevisionFrom(req, body);
+    const result = await gatewayWrite(req, requestId, {
+      current,
+      action: "gateway.provider.update",
+      targetId: id,
+      body: { ...body, expectedRevision },
+      call: () => gatewayAdmin.updateProvider(id, gatewaySettingsBody(body), expectedRevision),
+    });
+    json(res, 200, { provider: gatewayPublicProvider(result) });
+  }
+
+  async function gatewayDeleteProvider(req, res, requestId, providerId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const id = gatewayProviderId(providerId);
+    const expectedRevision = gatewayRevisionFrom(req, body);
+    await gatewayWrite(req, requestId, {
+      current,
+      action: "gateway.provider.delete",
+      targetId: id,
+      body: { ...body, expectedRevision },
+      call: () => gatewayAdmin.deleteProvider(id, expectedRevision),
+    });
+    json(res, 200, { ok: true, deleted: id });
+  }
+
+  async function gatewayReadGroups(req, res) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "routing.read");
+    const groups = await gatewayAdminCall(() => gatewayAdmin.listRoutingGroups());
+    json(res, 200, { groups: groups.map(gatewayPublicGroup) });
+  }
+
+  async function gatewayCreateGroup(req, res, requestId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const prepared = plainObjectValue(body.group) ? body.group : body;
+    const id = gatewayGroupId(prepared.id);
+    const result = await gatewayWrite(req, requestId, {
+      current,
+      action: "gateway.routing.create",
+      targetId: id,
+      body,
+      call: () => gatewayAdmin.createRoutingGroup(gatewaySettingsBody(prepared)),
+    });
+    json(res, 201, { group: gatewayPublicGroup(result) });
+  }
+
+  async function gatewayUpdateGroup(req, res, requestId, groupId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const id = gatewayGroupId(groupId);
+    const expectedRevision = gatewayRevisionFrom(req, body);
+    const result = await gatewayWrite(req, requestId, {
+      current,
+      action: "gateway.routing.update",
+      targetId: id,
+      body: { ...body, expectedRevision },
+      call: () => gatewayAdmin.updateRoutingGroup(id, gatewaySettingsBody(body), expectedRevision),
+    });
+    json(res, 200, { group: gatewayPublicGroup(result) });
+  }
+
+  async function gatewayDeleteGroup(req, res, requestId, groupId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const id = gatewayGroupId(groupId);
+    const expectedRevision = gatewayRevisionFrom(req, body);
+    await gatewayWrite(req, requestId, {
+      current,
+      action: "gateway.routing.delete",
+      targetId: id,
+      body: { ...body, expectedRevision },
+      call: () => gatewayAdmin.deleteRoutingGroup(id, expectedRevision),
+    });
+    json(res, 200, { ok: true, deleted: id });
+  }
+
+  async function gatewayReadGateway(req, res) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "gateway.read");
+    const [state, keys] = await gatewayAdminCall(() => Promise.all([
+      gatewayAdmin.gatewayState(),
+      gatewayAdmin.listGatewayKeys(),
+    ]));
+    json(res, 200, {
+      gateway: gatewayPublicGateway(state),
+      keys: keys.map(gatewayPublicKey),
+    });
+  }
+
+  async function gatewayReadKeys(req, res) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "gateway.read");
+    const keys = await gatewayAdminCall(() => gatewayAdmin.listGatewayKeys());
+    json(res, 200, { keys: keys.map(gatewayPublicKey) });
+  }
+
+  async function gatewayCreateKey(req, res, requestId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const prepared = plainObjectValue(body.key) ? body.key : body;
+    const name = String(prepared.name || "").trim();
+    if (!name) throw new HttpError(400, "invalid_key", "A gateway key needs a name");
+    const targetId = `key:${name.toLowerCase().replace(/[^a-z0-9.-]+/g, "-").slice(0, 48)}`;
+    const created = await gatewayWrite(req, requestId, {
+      current,
+      action: "gateway.key.create",
+      targetId,
+      body,
+      call: () => gatewayAdmin.createGatewayKey(gatewaySettingsBody(prepared)),
+    });
+    // The secret is answered once; the browser keeps it in memory only.
+    json(res, 201, { key: gatewayPublicKey(created.key), secret: created.secret });
+  }
+
+  async function gatewayUpdateKey(req, res, requestId, keyId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    const body = await readJsonBody(req);
+    const id = gatewayKeyId(keyId);
+    const expectedRevision = gatewayRevisionFrom(req, body);
+    const rotate = body.rotate === true;
+    const remove = body.remove === true;
+    // A rotation, a removal, a quota or a model allowlist is destructive:
+    // it is approved. A rename or an off switch is a configuration edit.
+    const action = rotate
+      ? "gateway.key.rotate"
+      : remove
+        ? "gateway.key.remove"
+        : (body.limit !== undefined || body.models !== undefined
+          ? "gateway.key.policy"
+          : "gateway.key.update");
+    const result = await gatewayWrite(req, requestId, {
+      current,
+      action,
+      targetId: id,
+      body: { ...body, expectedRevision },
+      call: () => gatewayAdmin.updateGatewayKey(id, gatewaySettingsBody(body), expectedRevision),
+    });
+    const response = { keys: result.keys.map(gatewayPublicKey) };
+    if (result.key) response.key = gatewayPublicKey(result.key);
+    if (result.secret) response.secret = result.secret;
+    json(res, 200, response);
+  }
+
+  async function gatewayReadRequests(req, res, url) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "gateway.read");
+    const allowed = new URLSearchParams();
+    for (const name of ["period", "offset", "limit", "day", "agent", "model", "provider", "callerKeyId"]) {
+      const value = String(url.searchParams.get(name) || "").trim();
+      if (!value) continue;
+      if ([...value].length > 240 || /[\u0000-\u001f\u007f]/.test(value)) {
+        throw new HttpError(400, "invalid_usage_filter", `${name} is invalid`);
+      }
+      allowed.set(name, value);
+    }
+    const page = await gatewayAdminCall(() => gatewayAdmin.requestPage(allowed));
+    json(res, 200, gatewayPublicLedger(page));
+  }
+
+  async function gatewayReadRoute(req, res, routeId) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "gateway.read");
+    if (!/^\d{1,19}$/.test(String(routeId || ""))) {
+      throw new HttpError(400, "invalid_route", "The route id is not a number");
+    }
+    const route = await gatewayAdminCall(() => gatewayAdmin.routeTrace(routeId));
+    json(res, 200, { route: gatewayPublicRoute(route) });
+  }
+
+  // A route detail is the gateway's live trace or, after a restart, its
+  // usage rows: the same route id is shared by every attempt. What the
+  // page shows is projected here, never passed through: a live trace
+  // carries the conversation's session, folders and prompt.
+  function gatewayPublicRoute(route) {
+    if (!plainObjectValue(route)) return {};
+    const attemptsSource = Array.isArray(route.attempts) ? route.attempts : null;
+    const triesSource = Array.isArray(route.tries) ? route.tries : [];
+    const attempts = (attemptsSource || triesSource)
+      .map((item) => (attemptsSource ? gatewayPublicRequest(item) : gatewayPublicTry(item)));
+    return {
+      id: Number.isSafeInteger(route.id) ? route.id : 0,
+      source: String(route.source || (attemptsSource ? "usage" : "live")),
+      time: String(route.time || ""),
+      agent: String(route.agent || ""),
+      model: String(route.model || ""),
+      provider: String(route.provider || ""),
+      status: safeNumber(route.status),
+      error: String(route.error || ""),
+      millis: safeNumber(route.ms),
+      ttft: safeNumber(route.ttft),
+      firstText: safeNumber(route.firstText),
+      tokens: safeNumber(route.tokens),
+      out: safeNumber(route.out),
+      group: String(route.group?.id || route.group || ""),
+      tries: attempts.length || safeNumber(route.tries),
+      attempts,
+    };
+  }
+
+  // One attempt of a live trace. Its id names the account or key tried;
+  // no prompt, session or request body is here.
+  function gatewayPublicTry(item) {
+    if (!plainObjectValue(item)) return {};
+    return {
+      id: String(item.id || ""),
+      model: String(item.model || ""),
+      effort: String(item.effort || ""),
+      time: String(item.start || ""),
+      done: Boolean(item.done),
+      status: safeNumber(item.status),
+      millis: safeNumber(item.ms),
+      ttft: safeNumber(item.ttft),
+      firstText: safeNumber(item.firstText),
+      served: String(item.served || ""),
+      upstream: String(item.upstream || ""),
+      fail: String(item.fail || ""),
+      error: String(item.error || ""),
+      rest: plainObjectValue(item.rest) ? {
+        why: String(item.rest.why || ""),
+        status: safeNumber(item.rest.status),
+        until: String(item.rest.until || ""),
+        model: String(item.rest.model || ""),
+        error: String(item.rest.error || ""),
+      } : null,
+    };
+  }
+
   async function handle(req, res) {
     const requestId = crypto.randomUUID();
     res.setHeader("x-request-id", requestId);
@@ -7858,6 +8816,265 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           ),
           cookieHeader(config, config.loginCookieName, "", 0),
         ],
+      });
+      return;
+    }
+
+    // --- desktop administrator sign-in --------------------------------
+    //
+    // The native page asks its loopback service to open the system
+    // browser here. The state, nonce and PKCE verifier live in the
+    // browser's login cookie until the identity provider calls back; the
+    // desktop's own challenge rides along so the ticket it later receives
+    // is only exchangeable by the machine that asked.
+    if (req.method === "GET" && url.pathname === "/admin/desktop/login") {
+      if (!config.desktop.enabled) {
+        throw new HttpError(503, "desktop_login_disabled", "Desktop sign-in is turned off");
+      }
+      const callback = desktopCallbackUrl(url.searchParams.get("callbackUrl"), config.desktop);
+      if (callback.error) {
+        throw new HttpError(400, callback.error, callback.message);
+      }
+      const challenge = String(url.searchParams.get("codeChallenge") || "").trim();
+      if (!/^[A-Za-z0-9_-]{43,128}$/.test(challenge)) {
+        throw new HttpError(400, "invalid_code_challenge", "codeChallenge is missing or invalid");
+      }
+      const started = await oidc.begin({
+        redirectUri: new URL("/admin/desktop/oauth/callback", config.publicUrl).toString(),
+        promptLogin: true,
+        ...(config.stepUpOidc
+          ? {
+            maxAgeSeconds: config.stepUpOidc.authTimeMaxAgeSeconds,
+            requireAuthTime: true,
+            acrValues: config.stepUpOidc.allowedAcrValues,
+          }
+          : {}),
+      });
+      const transaction = {
+        ...started.transaction,
+        mode: "desktop",
+        callbackUrl: callback.url.toString(),
+        challenge,
+        ticketTtlSeconds: config.desktop.ticketTtlSeconds,
+        stepUpTtlSeconds: config.stepUpOidc?.ttlSeconds || 0,
+        stepUpCriticalTtlSeconds: config.stepUpOidc?.criticalTtlSeconds || 0,
+      };
+      redirect(res, started.url, {
+        "set-cookie": [
+          cookieHeader(
+            config,
+            config.loginCookieName,
+            signCookie(JSON.stringify(transaction), config.sessionSecret),
+            600,
+          ),
+        ],
+      });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/admin/desktop/oauth/callback") {
+      const cookies = parseCookies(req.headers.cookie);
+      const raw = verifyCookie(cookies[config.loginCookieName], config.sessionSecret);
+      if (!raw) throw new HttpError(400, "login_expired", "Login transaction is missing or expired");
+      let transaction;
+      try {
+        transaction = JSON.parse(raw);
+      } catch {
+        throw new HttpError(400, "login_expired", "Login transaction is invalid");
+      }
+      if (transaction.mode !== "desktop") {
+        throw new HttpError(400, "login_invalid", "This callback is not a desktop sign-in");
+      }
+      if (!safeEqual(url.searchParams.get("state") || "", transaction.state)) {
+        throw new HttpError(400, "invalid_oidc_state", "OIDC state does not match");
+      }
+      const completed = await oidc.complete(url.searchParams.get("code") || "", transaction);
+      const identity = normalizeAdminIdentity(completed.claims, config.oidc);
+      identity.id = adminSubjectId(config.oidc.issuer, identity.subject);
+      // The desktop's ticket carries the sign-in's authentication context
+      // when — and only when — the provider proved a fresh, strong one.
+      // A provider that gave none leaves the token without a step-up
+      // assertion, so a medium-risk write asks for a browser round-trip
+      // instead of trusting this sign-in.
+      let stepUp = null;
+      let stepUpError = "";
+      if (config.stepUpOidc && stepUpOidc) {
+        try {
+          const authentication = validateStepUpAuthentication(
+            completed.claims,
+            config.stepUpOidc,
+          );
+          stepUp = {
+            acr: authentication.acr,
+            amr: [...authentication.amr],
+            authTime: authentication.authTime,
+            ttlSeconds: config.stepUpOidc.ttlSeconds,
+            criticalTtlSeconds: config.stepUpOidc.criticalTtlSeconds,
+          };
+        } catch (error) {
+          stepUpError = error instanceof Error ? error.message : "step-up authentication is invalid";
+        }
+      }
+      const ticket = newDesktopTicket({ ...transaction, stepUp, stepUpError }, identity);
+      await store.mutate((data) => {
+        const binding = bootstrapBinding(identity, config);
+        if (binding && !Object.values(data.roleBindings).some((candidate) =>
+          candidate.subjectId === binding.subjectId
+          && candidate.role === binding.role
+          && candidate.scopeOrgUnitId === binding.scopeOrgUnitId)) {
+          data.roleBindings[binding.id] = binding;
+        }
+        data.desktopTickets[ticket.hash] = ticket.record;
+        data.adminSystemAuditLogs.push({
+          id: `audit_${crypto.randomUUID()}`,
+          action: "desktop.ticket.issued",
+          timestamp: new Date().toISOString(),
+          actorSubjectId: identity.id,
+          actorEmail: identity.email,
+          callbackUrl: transaction.callbackUrl,
+          stepUp: Boolean(stepUp),
+          stepUpError: stepUp ? "" : stepUpError,
+          result: "issued",
+        });
+      });
+      const target = new URL(transaction.callbackUrl);
+      target.searchParams.set("ticket", ticket.ticket);
+      redirect(res, target.toString(), {
+        "set-cookie": [cookieHeader(config, config.loginCookieName, "", 0)],
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/desktop/token") {
+      if (!config.desktop.enabled) {
+        throw new HttpError(503, "desktop_login_disabled", "Desktop sign-in is turned off");
+      }
+      const body = await readJsonBody(req);
+      const ticketValue = String(body.ticket || "").trim();
+      const verifier = String(body.codeVerifier || "").trim();
+      if (!/^[A-Za-z0-9_-]{20,128}$/.test(ticketValue)
+          || !/^[A-Za-z0-9_-]{43,128}$/.test(verifier)) {
+        throw new HttpError(400, "invalid_ticket", "ticket and codeVerifier are required");
+      }
+      const ticketHash = sha256(ticketValue);
+      const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+      const outcome = await store.mutate((data) => {
+        const record = data.desktopTickets[ticketHash];
+        const state = desktopTicketState(record);
+        if (!state.ok) return { error: state.code };
+        if (!safeEqual(challenge, record.challenge)) {
+          return { error: "desktop_ticket_mismatch" };
+        }
+        record.consumedAt = new Date().toISOString();
+        const created = newDesktopToken(record, config.desktop);
+        data.desktopTokens[created.hash] = created.record;
+        // A desktop token has no browser to bind a later step-up to, so
+        // its assertion is written once, here, from the sign-in that
+        // minted it. Without one, medium-risk writes ask for a browser
+        // sign-in rather than being allowed on a stale session.
+        const stepUp = record.stepUp;
+        if (stepUp && Number.isFinite(stepUp.authTime)) {
+          const verifiedAt = new Date();
+          const expiresAt = new Date(
+            Math.min(
+              Date.parse(created.record.expiresAt),
+              verifiedAt.getTime() + Number(stepUp.ttlSeconds || 0) * 1000,
+            ),
+          );
+          const criticalExpiresAt = new Date(
+            Math.min(
+              expiresAt.getTime(),
+              verifiedAt.getTime() + Number(stepUp.criticalTtlSeconds || 0) * 1000,
+            ),
+          );
+          data.stepUpAssertions[created.hash] = {
+            desktop: true,
+            sessionHash: created.hash,
+            subjectId: record.subjectId,
+            acr: String(stepUp.acr || ""),
+            amr: Array.isArray(stepUp.amr) ? [...stepUp.amr] : [],
+            authTime: stepUp.authTime,
+            // A desktop token has no browser address or user agent of its
+            // own. These fields satisfy the persisted assertion shape;
+            // requireStepUp ignores them when desktop is true.
+            ip: "desktop",
+            userAgentHash: sha256("magpie-desktop-token"),
+            verifiedAt: verifiedAt.toISOString(),
+            expiresAt: expiresAt.toISOString(),
+            criticalExpiresAt: criticalExpiresAt.toISOString(),
+            accessDigest: accessDigest(effectiveAccess(data, record.subjectId)),
+          };
+        }
+        data.adminSystemAuditLogs.push({
+          id: `audit_${crypto.randomUUID()}`,
+          action: "desktop.token.issued",
+          timestamp: new Date().toISOString(),
+          actorSubjectId: record.subjectId,
+          actorEmail: record.email,
+          stepUp: Boolean(stepUp),
+          result: "issued",
+        });
+        return {
+          token: created.token,
+          expiresAt: created.record.expiresAt,
+          user: {
+            id: record.subjectId,
+            subject: record.subject,
+            email: record.email,
+            name: record.name,
+          },
+        };
+      });
+      if (outcome.error) {
+        const status = outcome.error === "desktop_ticket_consumed" ? 409 : 403;
+        throw new HttpError(status, outcome.error, "The desktop sign-in ticket is not valid");
+      }
+      json(res, 200, {
+        token: outcome.token,
+        expiresAt: outcome.expiresAt,
+        user: outcome.user,
+      });
+      return;
+    }
+
+    if (req.method === "DELETE" && url.pathname === "/api/v1/desktop/token") {
+      const token = bearerToken(req);
+      if (!token) throw new HttpError(401, "not_signed_in", "A desktop token is required");
+      await store.mutate((data) => {
+        const record = data.desktopTokens?.[sha256(token)];
+        if (record) {
+          record.revokedAt = new Date().toISOString();
+          delete data.stepUpAssertions[sha256(token)];
+          data.adminSystemAuditLogs.push({
+            id: `audit_${crypto.randomUUID()}`,
+            action: "desktop.token.revoked",
+            timestamp: record.revokedAt,
+            actorSubjectId: record.subjectId,
+            actorEmail: record.email,
+            result: "revoked",
+          });
+        }
+      });
+      json(res, 200, { ok: true });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/v1/desktop/me") {
+      const token = bearerToken(req);
+      if (!token) throw new HttpError(401, "not_signed_in", "A desktop token is required");
+      const current = await desktopSession(token);
+      const data = await store.read((state) => {
+        const access = effectiveAccess(state, current.session.subjectId);
+        return { access, orgUnits: visibleOrgUnits(state, access) };
+      });
+      json(res, 200, {
+        user: publicIdentity(current.session),
+        roles: data.access.roles,
+        permissions: data.access.permissions,
+        scopeOrgUnitIds: data.access.scopeOrgUnitIds,
+        orgUnits: data.orgUnits,
+        expiresAt: current.session.expiresAt,
+        stepUp: await stepUpState(current, req),
       });
       return;
     }
@@ -8393,6 +9610,80 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
       await requirePermission(current.session, "models.read");
       json(res, 200, publicModelCatalog(modelCatalog));
+      return;
+    }
+
+    // The enterprise gateway's administration API, proxied. The desktop
+    // administrator pages and the web console both read these; the gateway
+    // token never leaves this process.
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway/overview") {
+      await gatewayReadOverview(req, res);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway") {
+      await gatewayReadGateway(req, res);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway/providers") {
+      await gatewayReadProviders(req, res);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/gateway/providers") {
+      await gatewayCreateProvider(req, res, requestId);
+      return;
+    }
+    const gatewayProviderMatch = /^\/api\/v1\/admin\/gateway\/providers\/([a-z0-9][a-z0-9-]{0,63})$/.exec(
+      url.pathname,
+    );
+    if (gatewayProviderMatch && req.method === "PATCH") {
+      await gatewayUpdateProvider(req, res, requestId, gatewayProviderMatch[1]);
+      return;
+    }
+    if (gatewayProviderMatch && req.method === "DELETE") {
+      await gatewayDeleteProvider(req, res, requestId, gatewayProviderMatch[1]);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway/routing-groups") {
+      await gatewayReadGroups(req, res);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/gateway/routing-groups") {
+      await gatewayCreateGroup(req, res, requestId);
+      return;
+    }
+    const gatewayGroupMatch = /^\/api\/v1\/admin\/gateway\/routing-groups\/([A-Za-z0-9_-]{1,64})$/.exec(
+      url.pathname,
+    );
+    if (gatewayGroupMatch && req.method === "PATCH") {
+      await gatewayUpdateGroup(req, res, requestId, gatewayGroupMatch[1]);
+      return;
+    }
+    if (gatewayGroupMatch && req.method === "DELETE") {
+      await gatewayDeleteGroup(req, res, requestId, gatewayGroupMatch[1]);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway/keys") {
+      await gatewayReadKeys(req, res);
+      return;
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/gateway/keys") {
+      await gatewayCreateKey(req, res, requestId);
+      return;
+    }
+    const gatewayKeyMatch = /^\/api\/v1\/admin\/gateway\/keys\/([A-Za-z0-9_-]{1,64})$/.exec(
+      url.pathname,
+    );
+    if (gatewayKeyMatch && req.method === "PATCH") {
+      await gatewayUpdateKey(req, res, requestId, gatewayKeyMatch[1]);
+      return;
+    }
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway/requests") {
+      await gatewayReadRequests(req, res, url);
+      return;
+    }
+    const gatewayRouteMatch = /^\/api\/v1\/admin\/gateway\/routes\/(\d{1,19})$/.exec(url.pathname);
+    if (req.method === "GET" && gatewayRouteMatch) {
+      await gatewayReadRoute(req, res, gatewayRouteMatch[1]);
       return;
     }
 

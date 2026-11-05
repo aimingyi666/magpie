@@ -607,6 +607,24 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// The enterprise administration listener is bound before the gateway
+	// is: an address that cannot be taken is a startup failure, not a
+	// gateway that runs with no way for an administrator to reach it.
+	adminCfg, err := AdminConfigFromEnv()
+	if err != nil {
+		return err
+	}
+	adminLn, err := s.openAdmin(adminCfg)
+	if err != nil {
+		return err
+	}
+	if adminLn != nil {
+		go func() {
+			if err := s.serveAdminOn(ctx, adminLn, adminCfg); err != nil {
+				log.Printf("magpie administration API: %v", err)
+			}
+		}()
+	}
 	s.lnMu.Lock()
 	s.tls = cfg
 	s.lnMu.Unlock()

@@ -114,6 +114,29 @@ export function loadConfig(env = process.env) {
       `ADMIN_RESOURCE_SERVICE_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
     );
   }
+  // The gateway's own administration API: an internal address and a token
+  // of its own, together or not at all.
+  const gatewayAdminUrl = String(env.ADMIN_GATEWAY_ADMIN_URL || "").trim();
+  const gatewayAdminToken = String(env.ADMIN_GATEWAY_ADMIN_TOKEN || "").trim();
+  if (Boolean(gatewayAdminUrl) !== Boolean(gatewayAdminToken)) {
+    throw new Error(
+      "ADMIN_GATEWAY_ADMIN_URL and ADMIN_GATEWAY_ADMIN_TOKEN are required together",
+    );
+  }
+  if (gatewayAdminToken && gatewayAdminToken.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `ADMIN_GATEWAY_ADMIN_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+    );
+  }
+  if (gatewayAdminUrl) {
+    const parsed = new URL(gatewayAdminUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("ADMIN_GATEWAY_ADMIN_URL must use http or https");
+    }
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error("ADMIN_GATEWAY_ADMIN_URL must not carry credentials, a query or a fragment");
+    }
+  }
   const stepUpClientId = String(env.ADMIN_STEP_UP_OIDC_CLIENT_ID || "").trim();
   const stepUpClientSecret = String(env.ADMIN_STEP_UP_OIDC_CLIENT_SECRET || "").trim();
   const stepUpRedirectUri = String(env.ADMIN_STEP_UP_REDIRECT_URI || "").trim();
@@ -242,6 +265,21 @@ export function loadConfig(env = process.env) {
     sessionTtlSeconds: integer(env, "ADMIN_SESSION_TTL_HOURS", 8, 1, 8) * 3600,
     idleTimeoutSeconds: integer(env, "ADMIN_IDLE_TIMEOUT_MINUTES", 30, 5, 120) * 60,
     rateLimitPerMinute: integer(env, "ADMIN_RATE_LIMIT_PER_MINUTE", 120, 10, 10000),
+    desktop: {
+      // Where a desktop admin signs in from. The callback must be a
+      // loopback address: the ticket lands in the browser's address bar,
+      // and only the machine asking for it may receive it.
+      enabled: bool(env, "ADMIN_DESKTOP_LOGIN_ENABLED", true),
+      allowedCallbackHosts: list(env, "ADMIN_DESKTOP_CALLBACK_HOSTS").length
+        ? list(env, "ADMIN_DESKTOP_CALLBACK_HOSTS").map((value) => value.toLowerCase())
+        : ["127.0.0.1", "localhost", "[::1]"],
+      allowedCallbackPorts: list(env, "ADMIN_DESKTOP_CALLBACK_PORTS")
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0 && value <= 65535),
+      ticketTtlSeconds: integer(env, "ADMIN_DESKTOP_TICKET_TTL_SECONDS", 120, 30, 600),
+      tokenTtlSeconds: integer(env, "ADMIN_DESKTOP_TOKEN_TTL_HOURS", 8, 1, 8) * 3600,
+      idleTimeoutSeconds: integer(env, "ADMIN_DESKTOP_IDLE_MINUTES", 30, 5, 120) * 60,
+    },
     allowedIps: allowedIpValues.map((value) => parseAllowedIp(value)),
     bootstrap: {
       subjectIds: list(env, "ADMIN_BOOTSTRAP_SUBJECTS"),
@@ -263,6 +301,19 @@ export function loadConfig(env = process.env) {
       maxResponseBytes: integer(
         env,
         "ADMIN_RESOURCE_SERVICE_MAX_RESPONSE_BYTES",
+        4 * 1024 * 1024,
+        16 * 1024,
+        32 * 1024 * 1024,
+      ),
+    },
+    gatewayAdmin: {
+      enabled: Boolean(gatewayAdminUrl),
+      url: gatewayAdminUrl ? url(env, "ADMIN_GATEWAY_ADMIN_URL") : "",
+      token: gatewayAdminToken,
+      timeoutMs: integer(env, "ADMIN_GATEWAY_ADMIN_TIMEOUT_MS", 10000, 500, 60000),
+      maxResponseBytes: integer(
+        env,
+        "ADMIN_GATEWAY_ADMIN_MAX_RESPONSE_BYTES",
         4 * 1024 * 1024,
         16 * 1024,
         32 * 1024 * 1024,

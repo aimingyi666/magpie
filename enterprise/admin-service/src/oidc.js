@@ -43,13 +43,14 @@ export class OidcClient {
 
   async begin(options = {}) {
     const discovery = await this.loadDiscovery();
+    const redirectUri = options.redirectUri || this.config.redirectUri;
     const nonce = randomToken(24);
     const state = randomToken(24);
     const verifier = randomToken(48);
     const url = new URL(discovery.authorization_endpoint);
     url.searchParams.set("response_type", "code");
     url.searchParams.set("client_id", this.config.clientId);
-    url.searchParams.set("redirect_uri", this.config.redirectUri);
+    url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("scope", this.config.scopes.join(" "));
     url.searchParams.set("state", state);
     url.searchParams.set("nonce", nonce);
@@ -60,11 +61,12 @@ export class OidcClient {
       url.searchParams.set("max_age", String(options.maxAgeSeconds));
     }
     const requestedClaims = {};
-    if (this.config.allowedAcrValues?.length) {
-      url.searchParams.set("acr_values", this.config.allowedAcrValues.join(" "));
+    const acrValues = options.acrValues || this.config.allowedAcrValues;
+    if (acrValues?.length) {
+      url.searchParams.set("acr_values", acrValues.join(" "));
       requestedClaims.acr = {
         essential: true,
-        values: this.config.allowedAcrValues,
+        values: acrValues,
       };
     }
     if (options.requireAuthTime) {
@@ -79,6 +81,7 @@ export class OidcClient {
         state,
         nonce,
         verifier,
+        redirectUri,
         createdAt: Date.now(),
       },
     };
@@ -93,7 +96,7 @@ export class OidcClient {
     const body = new URLSearchParams({
       grant_type: "authorization_code",
       code,
-      redirect_uri: this.config.redirectUri,
+      redirect_uri: transaction.redirectUri || this.config.redirectUri,
       code_verifier: transaction.verifier,
       client_id: this.config.clientId,
     });

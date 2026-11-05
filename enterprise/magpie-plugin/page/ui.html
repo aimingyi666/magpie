@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="{{MAGPIE_LANG}}" data-theme="{{MAGPIE_THEME}}">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="magpie-enterprise-token" content="{{MAGPIE_TOKEN}}">
+<meta name="color-scheme" content="light dark">
+<title>Enterprise</title>
+<link rel="stylesheet" href="ui.css">
+<script src="ui.js" defer></script>
+</head>
+<body>
+<main class="page">
+  <header class="head">
+    <div class="head-who">
+      <p id="eyebrow" class="eyebrow">MAGPIE ENTERPRISE</p>
+      <h1 id="title">Enterprise resources</h1>
+      <p id="subtitle" class="subtitle"></p>
+    </div>
+    <div class="head-actions">
+      <div id="views" class="views" role="tablist" aria-label="View">
+        <button id="viewEmployee" class="view is-on" type="button" role="tab" aria-selected="true">Employee</button>
+        <button id="viewAdmin" class="view" type="button" role="tab" aria-selected="false">Administrator</button>
+      </div>
+      <button id="sync" class="primary" type="button">Sync now</button>
+      <button id="signIn" class="primary" type="button" hidden>Sign in</button>
+    </div>
+  </header>
+
+  <p id="notice" class="notice" role="status" hidden></p>
+
+  <section id="employeeView" class="view-panel" aria-label="Status">
+  <div class="cards">
+    <article class="card">
+      <div class="card-head">
+        <h2 id="joinedTitle">Device</h2>
+        <span id="joinedBadge" class="badge"></span>
+      </div>
+      <p id="joined" class="value"></p>
+      <div id="joinedNote" class="note"></div>
+    </article>
+    <article class="card">
+      <div class="card-head">
+        <h2 id="syncTitle">Sync</h2>
+        <span id="syncBadge" class="badge"></span>
+      </div>
+      <p id="syncState" class="value"></p>
+      <div id="syncNote" class="note"></div>
+    </article>
+  </div>
+
+  <section class="resources" aria-labelledby="resourcesTitle">
+    <div class="resources-head">
+      <h2 id="resourcesTitle">Resources</h2>
+      <span id="resourcesCount" class="count"></span>
+    </div>
+    <div id="resources" class="list"></div>
+    <p id="resourcesEmpty" class="empty" hidden></p>
+  </section>
+  </section>
+
+  <section id="adminView" class="view-panel" aria-label="Administration" hidden>
+    <div id="adminSignedOut" class="admin-gate" hidden>
+      <h2 id="adminGateTitle">Administrator mode</h2>
+      <p id="adminGateText" class="subtitle"></p>
+      <form id="consoleForm" class="console-form" hidden>
+        <label class="field"><span>Management console address</span>
+          <input name="adminUrl" required autocomplete="off" placeholder="https://admin.example.com">
+        </label>
+        <div class="form-actions">
+          <button class="primary" type="submit">Save address</button>
+        </div>
+        <p id="consoleNote" class="note"></p>
+      </form>
+      <button id="adminSignIn" class="primary" type="button">Sign in</button>
+      <button id="openConsole" class="linkish" type="button">Open the web console</button>
+    </div>
+
+    <div id="adminSignedIn" hidden>
+      <div class="admin-bar">
+        <div id="adminWho" class="admin-who"></div>
+        <div class="admin-bar-actions">
+          <a id="openConsoleSignedIn" class="linkish" href="#" target="_blank" rel="noopener noreferrer">Web console</a>
+          <button id="adminSignOut" class="linkish" type="button">Sign out</button>
+          <button id="adminRefresh" class="linkish" type="button">Refresh</button>
+        </div>
+      </div>
+
+      <nav id="adminTabs" class="tabs" aria-label="Administration">
+        <button class="tab is-on" type="button" data-tab="overview">Overview</button>
+        <button class="tab" type="button" data-tab="providers">Providers</button>
+        <button class="tab" type="button" data-tab="routing">Routing</button>
+        <button class="tab" type="button" data-tab="gateway">Gateway</button>
+        <button class="tab" type="button" data-tab="usage">Usage</button>
+      </nav>
+
+      <section class="tab-panel" data-panel="overview">
+        <div class="cards">
+          <article class="card">
+            <div class="card-head"><h2 id="ovGatewayTitle">Gateway</h2><span id="ovGatewayBadge" class="badge"></span></div>
+            <p id="ovGateway" class="value"></p>
+            <div id="ovGatewayNote" class="note"></div>
+          </article>
+          <article class="card">
+            <div class="card-head"><h2 id="ovCallsTitle">Requests today</h2><span id="ovCallsBadge" class="badge"></span></div>
+            <p id="ovCalls" class="value"></p>
+            <div id="ovCallsNote" class="note"></div>
+          </article>
+        </div>
+        <section class="resources">
+          <div class="resources-head"><h2 id="ovRecentTitle">Recent requests</h2><span id="ovRecentCount" class="count"></span></div>
+          <div id="ovRecent" class="list"></div>
+          <p id="ovRecentEmpty" class="empty" hidden></p>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-panel="providers" hidden>
+        <div class="resources-head">
+          <h2 id="providersTitle">Providers</h2>
+          <span id="providersCount" class="count"></span>
+          <button id="providerAdd" class="linkish" type="button">Add provider</button>
+        </div>
+        <div id="providersList" class="list"></div>
+        <p id="providersEmpty" class="empty" hidden></p>
+        <form id="providerForm" class="form" hidden>
+          <h3 id="providerFormTitle">Add a provider</h3>
+          <label class="field"><span>Name</span><input name="name" required autocomplete="off"></label>
+          <label class="field"><span>Preset</span><input name="preset" autocomplete="off" placeholder="openai, anthropic, … (optional)"></label>
+          <label class="field"><span>Base URL (custom)</span><input name="baseAPI" autocomplete="off" placeholder="https://api.example.com/v1"></label>
+          <label class="field"><span>API key</span><input name="key" type="password" autocomplete="new-password"></label>
+            <label class="field"><span>Add keys (one per line)</span><textarea name="addKeys" autocomplete="off" placeholder="sk-…"></textarea></label>
+          <label class="field"><span>Models (comma separated, empty for all)</span><input name="models" autocomplete="off"></label>
+          <label class="check"><input name="off" type="checkbox"> Turned off</label>
+          <label class="field"><span>Change reason (audit)</span><input name="reason" required autocomplete="off"></label>
+          <div class="form-actions">
+            <button class="primary" type="submit">Save</button>
+            <button class="linkish" type="button" data-close="providerForm">Cancel</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="tab-panel" data-panel="routing" hidden>
+        <div class="resources-head">
+          <h2 id="routingTitle">Routing groups</h2>
+          <span id="routingCount" class="count"></span>
+          <button id="groupAdd" class="linkish" type="button">Add routing group</button>
+        </div>
+        <div id="routingList" class="list"></div>
+        <p id="routingEmpty" class="empty" hidden></p>
+        <form id="groupForm" class="form" hidden>
+          <h3 id="groupFormTitle">Add a routing group</h3>
+          <label class="field"><span>ID</span><input name="id" required autocomplete="off" placeholder="lowercase letters, digits, dots, dashes"></label>
+          <label class="field"><span>Name</span><input name="name" autocomplete="off"></label>
+          <label class="field"><span>Members (one per line, in order)</span><textarea name="members"></textarea></label>
+          <label class="field"><span>Match models (one per line, empty for all)</span><textarea name="match"></textarea></label>
+          <label class="field"><span>Routing</span><input name="routing" autocomplete="off" placeholder="smart, fixed, …"></label>
+          <label class="field"><span>Affinity</span><input name="affinity" autocomplete="off"></label>
+          <label class="field"><span>Turned off members (one per line)</span><textarea name="off"></textarea></label>
+          <label class="field"><span>Rules (JSON array)</span><textarea name="rules" placeholder='[{"match":"gpt-*","to":["member-id"]}]'></textarea></label>
+          <label class="field"><span>Weights (JSON object)</span><textarea name="weights" placeholder='{"member-id":2}'></textarea></label>
+          <label class="check"><input name="disabled" type="checkbox"> Disabled</label>
+          <label class="field"><span>Change reason (audit)</span><input name="reason" required autocomplete="off"></label>
+          <div class="form-actions">
+            <button class="primary" type="submit">Save</button>
+            <button class="linkish" type="button" data-close="groupForm">Cancel</button>
+          </div>
+        </form>
+      </section>
+
+      <section class="tab-panel" data-panel="gateway" hidden>
+        <div class="cards">
+          <article class="card">
+            <div class="card-head"><h2 id="gwTitle">Enterprise gateway</h2><span id="gwBadge" class="badge"></span></div>
+            <p id="gwAddress" class="value"></p>
+            <div id="gwNote" class="note"></div>
+          </article>
+          <article class="card">
+            <div class="card-head"><h2 id="gwModelsTitle">Models</h2><span id="gwModelsCount" class="count"></span></div>
+            <p id="gwModels" class="value"></p>
+          </article>
+        </div>
+        <section class="resources">
+          <div class="resources-head">
+            <h2 id="gwKeysTitle">Gateway keys</h2>
+            <span id="gwKeysCount" class="count"></span>
+            <button id="keyAdd" class="linkish" type="button">Add key</button>
+          </div>
+          <div id="gwKeys" class="list"></div>
+          <p id="gwKeysEmpty" class="empty" hidden></p>
+          <form id="keyForm" class="form" hidden>
+            <h3 id="keyFormTitle">Add a gateway key</h3>
+            <label class="field"><span>Name</span><input name="name" required autocomplete="off"></label>
+            <label class="field"><span>Models (comma separated, empty for all)</span><input name="models" autocomplete="off"></label>
+            <label class="check"><input name="readOnly" type="checkbox"> Read-only key</label>
+            <label class="field"><span>Change reason (audit)</span><input name="reason" required autocomplete="off"></label>
+            <div class="form-actions">
+              <button class="primary" type="submit">Create</button>
+              <button class="linkish" type="button" data-close="keyForm">Cancel</button>
+            </div>
+            <p id="keySecret" class="notice notice-warn" hidden></p>
+          </form>
+          <form id="keyEditForm" class="form" hidden>
+            <h3 id="keyEditTitle">Edit a gateway key</h3>
+            <label class="field"><span>Name</span><input name="name" autocomplete="off"></label>
+            <label class="field"><span>Models (comma separated, empty for all)</span><input name="models" autocomplete="off"></label>
+            <label class="field"><span>Limit period (empty for none)</span>
+              <select name="period">
+                <option value="">No limit</option>
+                <option value="day">Per day</option>
+                <option value="week">Per week</option>
+                <option value="month">Per month</option>
+                <option value="hours">Rolling hours</option>
+                <option value="days">Rolling days</option>
+              </select>
+            </label>
+            <label class="field"><span>Limit tokens (empty for none)</span><input name="tokens" inputmode="numeric" autocomplete="off"></label>
+            <label class="field"><span>Limit cost in USD (optional)</span><input name="cost" inputmode="decimal" autocomplete="off"></label>
+            <label class="check"><input name="off" type="checkbox"> Disabled</label>
+            <label class="field"><span>Change reason (audit)</span><input name="reason" required autocomplete="off"></label>
+            <p class="note"><span id="keyEditNote"></span></p>
+            <div class="form-actions">
+              <button class="primary" type="submit">Save</button>
+              <button class="linkish" type="button" data-close="keyEditForm">Cancel</button>
+            </div>
+          </form>
+        </section>
+
+        <section class="resources" aria-labelledby="gwDevicesTitle">
+          <div class="resources-head">
+            <h2 id="gwDevicesTitle">Devices</h2>
+            <span id="gwDevicesCount" class="count"></span>
+          </div>
+          <div id="gwDevices" class="list"></div>
+          <p id="gwDevicesEmpty" class="empty" hidden></p>
+        </section>
+      </section>
+
+      <section class="tab-panel" data-panel="usage" hidden>
+        <div class="resources-head"><h2 id="usageTitle">Requests</h2><span id="usageCount" class="count"></span></div>
+        <div id="usageList" class="list"></div>
+        <p id="usageEmpty" class="empty" hidden></p>
+        <div id="usageDetail" class="detail" hidden></div>
+      </section>
+    </div>
+  </section>
+</main>
+<noscript>This page needs JavaScript.</noscript>
+</body>
+</html>

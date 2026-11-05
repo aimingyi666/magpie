@@ -318,6 +318,10 @@ func random(n int) (string, error) {
 type Change struct {
 	Key  string `json:"key"`
 	Name string `json:"name"`
+	// Patch, for "patch-key", sets several fields in one write: a partial
+	// administration change must not leave a key renamed but not switched
+	// off because the second call failed.
+	Patch *KeyPatch `json:"patch,omitempty"`
 	// Limit is what "limit-key" sets; nil or Unlimited takes the limit off.
 	Limit *Limit `json:"limit,omitempty"`
 	// Index is which of the key's limits "limit-key" sets and
@@ -346,6 +350,17 @@ type Change struct {
 	Secret string `json:"secret,omitempty"`
 }
 
+// KeyPatch is what "patch-key" sets. A nil field is left as it is.
+type KeyPatch struct {
+	Name      *string
+	Off       *bool
+	ReadOnly  *bool
+	Models    []string
+	ModelsSet bool
+	Limit     *Limit
+	LimitSet  bool
+}
+
 // Now is when Update sets or resets a limit. A variable for the tests.
 var Now = time.Now
 
@@ -359,6 +374,12 @@ func Update(action string, in Change) (string, error) {
 	}
 	name := strings.TrimSpace(in.Name)
 	if action == "add-key" || action == "rename-key" {
+		if name == "" || utf8.RuneCountInString(name) > 120 {
+			return "", errors.New("Use a name between 1 and 120 characters")
+		}
+	}
+	if action == "patch-key" && in.Patch != nil && in.Patch.Name != nil {
+		name = strings.TrimSpace(*in.Patch.Name)
 		if name == "" || utf8.RuneCountInString(name) > 120 {
 			return "", errors.New("Use a name between 1 and 120 characters")
 		}
@@ -473,6 +494,48 @@ func Update(action string, in Change) (string, error) {
 				return "", err
 			}
 			keys[i].Models = ms
+		case "patch-key":
+			if in.Patch == nil {
+				return "", errors.New("patch-key needs a patch")
+			}
+			p := in.Patch
+			if p.Name != nil {
+				keys[i].Name = name
+			}
+			if p.Off != nil {
+				keys[i].Off = *p.Off
+			}
+			if p.ReadOnly != nil {
+				if *p.ReadOnly && defaultKey {
+					return "", errors.New("The sharing key can't be read-only: add a key of its own for reading stats")
+				}
+				keys[i].ReadOnly = *p.ReadOnly
+			}
+			if p.ModelsSet {
+				ms, err := CleanModels(p.Models)
+				if err != nil {
+					return "", err
+				}
+				keys[i].Models = ms
+			}
+			if p.LimitSet {
+				lim, err := p.Limit.Valid()
+				if err != nil {
+					return "", err
+				}
+				ls := keys[i].limitList()
+				now := Now().Round(0)
+				var first *Limit
+				if len(ls) > 0 {
+					first = &ls[0]
+				}
+				ls = nil
+				if lim != nil {
+					lim.Since = sinceOf(first, lim, now)
+					ls = []Limit{*lim}
+				}
+				keys[i].setLimits(ls)
+			}
 		case "accounts-key":
 			as, err := CleanAccounts(in.Accounts)
 			if err != nil {
@@ -536,6 +599,98 @@ func Update(action string, in Change) (string, error) {
 		return "", err
 	}
 	return secret, nil
+}
+
+// AddKey makes a gateway key and answers it with its own id, in the one
+// write: an administrator asked to add a key must not have to guess which
+// of the listed keys is the new one. The secret is answered once, as the
+// key's own value; the Key it returns never carries it.
+func AddKey(name, secret string, readOnly bool) (Key, string, error) {
+	mu.Lock()
+	defer mu.Unlock()
+	name = strings.TrimSpace(name)
+	if name == "" || utf8.RuneCountInString(name) > 120 {
+		return Key{}, "", errors.New("Use a name between 1 and 120 characters")
+	}
+	keys, err := load()
+	if err != nil {
+		return Key{}, "", err
+	}
+	id, err := random(12)
+	if err != nil {
+		return Key{}, "", err
+	}
+	if secret != "" {
+		if secret, err = ownSecret(secret, keys); err != nil {
+			return Key{}, "", err
+		}
+	} else {
+		token, err := random(24)
+		if err != nil {
+			return Key{}, "", err
+		}
+		secret = Prefix + token
+	}
+	k := Key{ID: id, Name: name, Secret: secret, ReadOnly: readOnly}
+	keys = append(keys, k)
+	if err := save(keys); err != nil {
+		return Key{}, "", err
+	}
+	k.Secret = ""
+	maskKey(&k)
+	return k, secret, nil
+}
+
+// Remove deletes a key by id. It is for undoing a key an administrator
+// made in the same operation: the ordinary way users remove one keeps the
+// default key's mirror consistent, and so does this.
+func Remove(id string) error {
+	mu.Lock()
+	defer mu.Unlock()
+	keys, err := load()
+	if err != nil {
+		return err
+	}
+	i := slices.IndexFunc(keys, func(k Key) bool { return k.ID == id })
+	if i < 0 {
+		return errors.New("Key not found")
+	}
+	var mirror *Key
+	if keys[i].LAN || keys[i].ID == settings.Load().LANKeyID {
+		k := keys[i]
+		k.Off = true
+		mirror = &k
+	}
+	keys = slices.Delete(keys, i, i+1)
+	if mirror != nil {
+		s := settings.Load()
+		if err := setLegacyMirror(&s, *mirror); err != nil {
+			return err
+		}
+		if err := settings.Save(s); err != nil {
+			return err
+		}
+	}
+	return save(keys)
+}
+
+// maskKey is List's masking of one key, so a caller that keeps its own
+// copy shows the same ending and never the credential.
+func maskKey(k *Key) {
+	if len(k.Secret) > 8 {
+		prefix := legacyLANPrefix
+		if strings.HasPrefix(k.Secret, Prefix) {
+			prefix = Prefix
+		}
+		k.Masked = prefix + "…" + k.Secret[len(k.Secret)-6:]
+		return
+	}
+	if k.Secret != "" && !Managed(k.Secret) {
+		k.Masked = "…"
+		if len(k.Secret) >= 12 {
+			k.Masked += k.Secret[len(k.Secret)-4:]
+		}
+	}
 }
 
 func setLegacyMirror(s *settings.Settings, k Key) error {

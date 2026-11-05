@@ -7,3 +7,7 @@
 /magpie-dev-backend
 /magpie-dev.new
 /internal/update/launcher-*.com
+
+# Local enterprise preview state: stores, usage ledgers and the preview
+# gateway's administration token. Never commit these.
+/enterprise/data/

@@ -34,6 +34,17 @@ const ACTION_RISK = Object.freeze({
   "usage.export.create": "H",
   "audit.export.create": "H",
   "operation.reconcile": "C",
+  "gateway.provider.create": "M",
+  "gateway.provider.update": "M",
+  "gateway.provider.delete": "H",
+  "gateway.routing.create": "M",
+  "gateway.routing.update": "M",
+  "gateway.routing.delete": "M",
+  "gateway.key.create": "M",
+  "gateway.key.update": "M",
+  "gateway.key.policy": "H",
+  "gateway.key.rotate": "H",
+  "gateway.key.remove": "H",
 });
 
 const LOW_RISK_ACTIONS = new Set(["user.enable"]);
@@ -66,6 +77,10 @@ export function riskForAction(action) {
 export function approvalRequiredForAction(action) {
   const risk = riskForAction(action);
   if (!risk) throw new Error(`Unknown approval action: ${action}`);
+  // A gateway write is a configuration edit, not a user-facing
+  // entitlement: medium-risk ones take a fresh sign-in (step-up) alone,
+  // and only the destructive ones ask an approver as well.
+  if (action.startsWith("gateway.")) return risk === "H";
   return !LOW_RISK_ACTIONS.has(action);
 }
 
@@ -114,6 +129,16 @@ export function normalizedApprovalPayload(action, value = {}) {
         && !Array.isArray(value.filters)
         ? canonicalValue(value.filters)
         : {},
+    };
+  }
+  if (action.startsWith("gateway.")) {
+    return {
+      expectedRevision: String(value.expectedRevision || ""),
+      body: canonicalValue(
+        value.body && typeof value.body === "object" && !Array.isArray(value.body)
+          ? value.body
+          : {},
+      ),
     };
   }
   if ([
