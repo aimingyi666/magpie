@@ -700,6 +700,62 @@ told its own calls and limit alone:
 | `GET /v1/magpie/concurrency` | requests in flight per account |
 | `POST`/`GET /v1/magpie/keys`, `DELETE /v1/magpie/keys/{id}` | short-lived keys, above |
 
+### The administration listener
+
+The routes above answer whoever the gateway already lets in: a program on
+this computer, or another one with an enabled gateway key. An enterprise
+deployment also needs one place where an administrator manages providers,
+routing groups and gateway keys without holding any of those. That is a
+second listener of its own (`MAGPIE_ADMIN_ADDR`), never the gateway's
+address, and it is reached with a dedicated token (`MAGPIE_ADMIN_TOKEN`),
+not a gateway key, a device token, an issued key or a browser cookie.
+
+| Route | What it does |
+| --- | --- |
+| `GET /healthz` | `{"ok":true,"service":"magpie-admin"}`, the one route without the token |
+| `GET`/`POST /v1/magpie/admin/providers`, `PATCH`/`DELETE /v1/magpie/admin/providers/{id}` | providers, their keys masked and never answered |
+| `GET`/`POST /v1/magpie/admin/routing-groups`, `PATCH`/`DELETE /v1/magpie/admin/routing-groups/{id}` | routing groups, members and rules |
+| `GET /v1/magpie/admin/gateway` | the gateway's state and its model catalog |
+| `GET`/`POST /v1/magpie/admin/gateway/keys`, `PATCH /v1/magpie/admin/gateway/keys/{id}` | gateway keys: create answers the secret once, patch renames, switches off, holds to models or a limit, rotates and removes |
+| `GET /v1/magpie/admin/telemetry/requests`, `GET /v1/magpie/admin/telemetry/routes/{id}` | the request log and one route's detail, projected from the live trace |
+
+Constraints and failure behavior:
+
+- **Both or neither.** `AdminConfigFromEnv` refuses an address without a
+  token, a token without an address, a token shorter than 32 characters and
+  an address that is not `host:port`. Both unset turns the listener off.
+- **Bound before the gateway serves.** `Server.ListenAndServe` opens it
+  first, so an address that cannot be taken fails the start instead of
+  leaving a gateway running with no way in.
+- **Writes carry a revision.** A `PATCH` or `DELETE` sends `If-Match` or
+  `expectedRevision`; a stale one answers 409 `revision_conflict` and writes
+  nothing, and every write is read back before it is reported.
+- **Writes are audited before they are attempted.** A write whose
+  "requested" record cannot be written answers 503 `unavailable` and does
+  not happen; the result record follows with the status it carried. The
+  audit keeps no body.
+- **Every answer is JSON and bounded.** A non-JSON content type is refused
+  415, bodies are capped (`adminBodyMax`), and answers carry
+  `cache-control: no-store` and `x-content-type-options: nosniff`.
+- **Nothing secret is projected.** Provider keys, secrets, access keys,
+  token hashes and private paths are not answered; a created or rotated
+  gateway key answers its secret once and lists it masked afterwards.
+
+`AdminConfig`, `AdminConfigFromEnv`, `openAdmin`, `serveAdminOn` and
+`adminHandler` in [`admin.go`](../../internal/gateway/admin.go), and
+`TestAdminConfigFromEnv`, `TestAdminListenerOnlyAcceptsItsToken`,
+`TestAdminWritesRequireJSONAndStayBounded`,
+`TestAdminProviderCRUDFailsClosedAndNeverLeaksKeys`,
+`TestAdminRoutingGroupCRUDUsesRevision`, `TestAdminGatewayKeyLifecycle`,
+`TestAdminTelemetryAndGatewayState` and `TestAdminListenerServesAndStops`
+in [`admin_test.go`](../../internal/gateway/admin_test.go).
+
+A gateway key's fields are patched in one write (`patch-key` in
+`access.Update`): a key renamed and switched off by one administration
+change lands both, not the first alone. `TestPatchKeyWritesEveryFieldOnce`
+and `TestPatchKeyLeavesAbsentFieldsAlone` in
+[`patch_test.go`](../../internal/access/patch_test.go).
+
 ## Turning provider search off
 
 [Settings](../../internal/settings/settings.go)' `searcher: "off"` disables magpie's provider-assisted search,
