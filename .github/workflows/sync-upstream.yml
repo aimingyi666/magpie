@@ -15,19 +15,46 @@ concurrency:
 jobs:
   sync:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 10
     steps:
-      - name: 检出仓库
-        uses: actions/checkout@v4
+      - name: 通过 GitHub API 同步上游 main
+        uses: actions/github-script@v7
         with:
-          ref: main
-          fetch-depth: 0
+          github-token: ${{ github.token }}
+          script: |
+            const { owner, repo } = context.repo;
+            const attempts = 3;
 
-      - name: 合并上游 main 并推送
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git remote add upstream https://github.com/yetone/magpie.git
-          git fetch upstream main
-          git merge --no-edit upstream/main
-          git push origin HEAD:main
+            for (let attempt = 1; attempt <= attempts; attempt++) {
+              try {
+                const { data } = await github.request(
+                  "POST /repos/{owner}/{repo}/merge-upstream",
+                  { owner, repo, branch: "main" }
+                );
+                core.info(data.message);
+                core.info(`merge_type=${data.merge_type}; base_branch=${data.base_branch}`);
+                return;
+              } catch (error) {
+                if (error.status === 409) {
+                  core.setFailed(
+                    "上游 main 与 fork 存在合并冲突。请先在本地解决冲突并推送，再重新运行此工作流。"
+                  );
+                  return;
+                }
+                if (error.status === 422) {
+                  core.setFailed(`GitHub 拒绝同步（HTTP 422）：${error.message}`);
+                  return;
+                }
+
+                const retryable = error.status === 429 || error.status >= 500;
+                if (!retryable || attempt === attempts) {
+                  throw error;
+                }
+
+                const delay = attempt * 10_000;
+                core.warning(
+                  `同步失败（HTTP ${error.status}），${delay / 1000} 秒后重试...`
+                );
+                await new Promise((resolve) => setTimeout(resolve, delay));
+              }
+            }

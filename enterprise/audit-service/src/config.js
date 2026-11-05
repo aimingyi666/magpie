@@ -8,6 +8,15 @@ function required(env, name) {
   return value;
 }
 
+function optionalSecret(env, name) {
+  const value = String(env[name] || "").trim();
+  if (!value) return "";
+  if (value.length < MIN_SECRET_LENGTH || value.length > 4096) {
+    throw new Error(`${name} must be from ${MIN_SECRET_LENGTH} to 4096 characters`);
+  }
+  return value;
+}
+
 function integer(env, name, fallback, min, max) {
   const raw = env[name] == null || env[name] === "" ? fallback : Number(env[name]);
   if (!Number.isSafeInteger(raw) || raw < min || raw > max) {
@@ -24,8 +33,8 @@ function boolean(env, name, fallback) {
   return raw === "true";
 }
 
-function contentEncryptionKey(env) {
-  const value = required(env, "AUDIT_CONTENT_ENCRYPTION_KEY");
+function keyOf32Bytes(env, name) {
+  const value = required(env, name);
   let key;
   if (/^[a-f0-9]{64}$/i.test(value)) {
     key = Buffer.from(value, "hex");
@@ -37,7 +46,7 @@ function contentEncryptionKey(env) {
     }
   }
   if (key.length !== 32) {
-    throw new Error("AUDIT_CONTENT_ENCRYPTION_KEY must encode exactly 32 bytes as base64 or 64 hex characters");
+    throw new Error(`${name} must encode exactly 32 bytes as base64 or 64 hex characters`);
   }
   return key;
 }
@@ -58,16 +67,112 @@ export function loadConfig(env = process.env) {
     throw new Error(`AUDIT_SERVICE_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`);
   }
   const contentEnabled = boolean(env, "AUDIT_CONTENT_ENABLED", false);
-  const contentReadToken = String(env.AUDIT_CONTENT_READ_TOKEN || "").trim();
-  if (contentReadToken && contentReadToken.length < MIN_SECRET_LENGTH) {
-    throw new Error(`AUDIT_CONTENT_READ_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`);
+  const contentAdminEnabled = boolean(env, "AUDIT_CONTENT_ADMIN_ENABLED", false);
+  if (contentAdminEnabled && !contentEnabled) {
+    throw new Error("AUDIT_CONTENT_ADMIN_ENABLED=true requires AUDIT_CONTENT_ENABLED=true");
   }
-  const contentEncryptionKeyValue = contentEnabled ? contentEncryptionKey(env) : null;
-  if (contentEnabled && !contentReadToken) {
-    throw new Error("AUDIT_CONTENT_READ_TOKEN is required when AUDIT_CONTENT_ENABLED=true");
+  if (String(env.AUDIT_CONTENT_READ_TOKEN || "").trim()) {
+    throw new Error(
+      "AUDIT_CONTENT_READ_TOKEN is retired; content body reads require a one-time content grant",
+    );
   }
-  if (contentEnabled && contentReadToken === serviceToken) {
-    throw new Error("AUDIT_CONTENT_READ_TOKEN must differ from AUDIT_SERVICE_TOKEN");
+  const contentEncryptionKeyValue = contentEnabled
+    ? keyOf32Bytes(env, "AUDIT_CONTENT_ENCRYPTION_KEY")
+    : null;
+  const contentAdminToken = contentAdminEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_ADMIN_TOKEN")
+    : "";
+  if (contentAdminEnabled && !contentAdminToken) {
+    throw new Error("AUDIT_CONTENT_ADMIN_TOKEN is required when AUDIT_CONTENT_ADMIN_ENABLED=true");
+  }
+  const contentGrantSecretValue = contentAdminEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_GRANT_SECRET")
+    : "";
+  if (contentAdminEnabled && !contentGrantSecretValue) {
+    throw new Error("AUDIT_CONTENT_GRANT_SECRET is required when AUDIT_CONTENT_ADMIN_ENABLED=true");
+  }
+  const contentCursorSecret = contentAdminEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_CURSOR_SECRET")
+    : "";
+  if (contentAdminEnabled && !contentCursorSecret) {
+    throw new Error("AUDIT_CONTENT_CURSOR_SECRET is required when AUDIT_CONTENT_ADMIN_ENABLED=true");
+  }
+  const contentOrganizationId = contentAdminEnabled
+    ? String(env.AUDIT_CONTENT_ORGANIZATION_ID || "").trim()
+    : "";
+  if (contentAdminEnabled
+      && (!contentOrganizationId
+        || contentOrganizationId.length > 128
+        || !/^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/.test(contentOrganizationId))) {
+    throw new Error(
+      "AUDIT_CONTENT_ORGANIZATION_ID must be a valid organization id when AUDIT_CONTENT_ADMIN_ENABLED=true",
+    );
+  }
+  const contentGovernanceEnabled = boolean(
+    env,
+    "AUDIT_CONTENT_GOVERNANCE_ENABLED",
+    false,
+  );
+  if (contentGovernanceEnabled && !contentAdminEnabled) {
+    throw new Error(
+      "AUDIT_CONTENT_GOVERNANCE_ENABLED=true requires AUDIT_CONTENT_ADMIN_ENABLED=true",
+    );
+  }
+  const contentGovernanceToken = contentGovernanceEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_GOVERNANCE_TOKEN")
+    : "";
+  if (contentGovernanceEnabled && !contentGovernanceToken) {
+    throw new Error(
+      "AUDIT_CONTENT_GOVERNANCE_TOKEN is required when AUDIT_CONTENT_GOVERNANCE_ENABLED=true",
+    );
+  }
+  const contentProofSecret = contentGovernanceEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_PROOF_SECRET")
+    : "";
+  if (contentGovernanceEnabled && !contentProofSecret) {
+    throw new Error(
+      "AUDIT_CONTENT_PROOF_SECRET is required when AUDIT_CONTENT_GOVERNANCE_ENABLED=true",
+    );
+  }
+  const contentExportEnabled = boolean(env, "AUDIT_CONTENT_EXPORT_ENABLED", false);
+  if (contentExportEnabled && !contentGovernanceEnabled) {
+    throw new Error(
+      "AUDIT_CONTENT_EXPORT_ENABLED=true requires AUDIT_CONTENT_GOVERNANCE_ENABLED=true",
+    );
+  }
+  const contentExportSecret = contentExportEnabled
+    ? optionalSecret(env, "AUDIT_CONTENT_EXPORT_SECRET")
+    : "";
+  if (contentExportEnabled && !contentExportSecret) {
+    throw new Error(
+      "AUDIT_CONTENT_EXPORT_SECRET is required when AUDIT_CONTENT_EXPORT_ENABLED=true",
+    );
+  }
+  const contentExportKey = contentExportEnabled
+    ? keyOf32Bytes(env, "AUDIT_CONTENT_EXPORT_KEY")
+    : null;
+  if (contentExportKey
+      && contentEncryptionKeyValue
+      && contentExportKey.equals(contentEncryptionKeyValue)) {
+    throw new Error(
+      "AUDIT_CONTENT_EXPORT_KEY must differ from AUDIT_CONTENT_ENCRYPTION_KEY",
+    );
+  }
+  const secrets = [
+    ["AUDIT_SERVICE_TOKEN", serviceToken],
+    ["AUDIT_CONTENT_ADMIN_TOKEN", contentAdminToken],
+    ["AUDIT_CONTENT_GRANT_SECRET", contentGrantSecretValue],
+    ["AUDIT_CONTENT_CURSOR_SECRET", contentCursorSecret],
+    ["AUDIT_CONTENT_GOVERNANCE_TOKEN", contentGovernanceToken],
+    ["AUDIT_CONTENT_PROOF_SECRET", contentProofSecret],
+    ["AUDIT_CONTENT_EXPORT_SECRET", contentExportSecret],
+  ].filter(([, value]) => value);
+  for (let left = 0; left < secrets.length; left += 1) {
+    for (let right = left + 1; right < secrets.length; right += 1) {
+      if (secrets[left][1] === secrets[right][1]) {
+        throw new Error(`${secrets[left][0]} must differ from ${secrets[right][0]}`);
+      }
+    }
   }
   const contentMaxChunkBytes = integer(
     env,
@@ -93,6 +198,9 @@ export function loadConfig(env = process.env) {
     1024,
     64 * 1024 * 1024,
   );
+  const contentStoreDir = path.resolve(
+    String(env.AUDIT_CONTENT_STORE_DIR || "./data/audit-content"),
+  );
   return {
     bind: bindAddress(env),
     port: integer(env, "AUDIT_PORT", 3449, 1, 65535),
@@ -106,11 +214,27 @@ export function loadConfig(env = process.env) {
     batchSize: integer(env, "AUDIT_BATCH_SIZE", 200, 1, 5000),
     rateLimitPerMinute: integer(env, "AUDIT_RATE_LIMIT_PER_MINUTE", 6000, 10, 1_000_000),
     contentEnabled,
+    contentAdminEnabled,
+    contentGovernanceEnabled,
     contentEncryptionKey: contentEncryptionKeyValue,
-    contentReadToken,
-    contentStoreDir: path.resolve(
-      String(env.AUDIT_CONTENT_STORE_DIR || "./data/audit-content"),
+    contentAdminToken,
+    contentGovernanceToken,
+    contentProofSecret,
+    contentExportEnabled,
+    contentExportSecret,
+    contentExportKey,
+    contentGrantSecret: contentGrantSecretValue,
+    contentCursorSecret,
+    contentOrganizationId,
+    contentGrantTtlSeconds: integer(
+      env,
+      "AUDIT_CONTENT_GRANT_TTL_SECONDS",
+      120,
+      15,
+      300,
     ),
+    contentGrantStorePath: path.join(contentStoreDir, "content-grants.json"),
+    contentStoreDir,
     contentMaxBodyBytes,
     contentMaxChunkBytes,
     contentMaxStreamBytes,
@@ -132,6 +256,20 @@ export function loadConfig(env = process.env) {
       env,
       "AUDIT_CONTENT_STREAM_TTL_MS",
       15 * 60 * 1000,
+      10_000,
+      24 * 60 * 60 * 1000,
+    ),
+    contentExportTtlSeconds: integer(
+      env,
+      "AUDIT_CONTENT_EXPORT_TTL_SECONDS",
+      120,
+      15,
+      300,
+    ),
+    contentRetentionSweepIntervalMs: integer(
+      env,
+      "AUDIT_CONTENT_RETENTION_SWEEP_INTERVAL_MS",
+      60 * 60 * 1000,
       10_000,
       24 * 60 * 60 * 1000,
     ),

@@ -2,10 +2,12 @@ package gateway
 
 import (
 	"net/http/httptest"
+	"net/netip"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/yetone/magpie/internal/access"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/usage"
 )
@@ -128,5 +130,33 @@ func TestObserverPoint(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestObserverRequestUsesAuthenticatedCallerAndPeerAddress(t *testing.T) {
+	o := &fakeObserver{watch: true}
+	defer usage.Observe(o)()
+	req := httptest.NewRequest("POST", "/v1/chat/completions", strings.NewReader(`{"model":"m1"}`))
+	req.RemoteAddr = "203.0.113.9:4321"
+	req.Header.Set("X-Forwarded-For", "198.51.100.7")
+	req.Header.Set("X-Real-IP", "198.51.100.8")
+	req = req.WithContext(access.WithIdentity(req.Context(), access.Identity{
+		KeyID: "gateway-key-1", KeyName: "Alice",
+		Issuer: &access.Identity{KeyID: "issuer-1"},
+	}))
+	if _, observed := observeRequest(req, "", []byte(`{"model":"m1"}`)); observed == nil {
+		t.Fatal("request was not observed")
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if len(o.begun) != 1 {
+		t.Fatalf("begun: %d", len(o.begun))
+	}
+	got := o.begun[0]
+	if got.CallerKeyID != "gateway-key-1" || got.CallerKeyName != "Alice" || got.CallerIssuerID != "issuer-1" {
+		t.Fatalf("caller: %+v", got)
+	}
+	if got.SourceAddr != netip.MustParseAddr("203.0.113.9") {
+		t.Fatalf("source: %s", got.SourceAddr)
 	}
 }

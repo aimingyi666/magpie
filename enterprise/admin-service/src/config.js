@@ -72,6 +72,9 @@ function url(env, name, fallback) {
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
     throw new Error(`${name} must use http or https`);
   }
+  if (parsed.username || parsed.password) {
+    throw new Error(`${name} must not contain credentials`);
+  }
   return parsed.toString().replace(/\/+$/, "");
 }
 
@@ -135,6 +138,84 @@ export function loadConfig(env = process.env) {
     }
     if (parsed.username || parsed.password || parsed.search || parsed.hash) {
       throw new Error("ADMIN_GATEWAY_ADMIN_URL must not carry credentials, a query or a fragment");
+    }
+  }
+  // M4-E: the admin UI reaches audit-service only through this optional
+  // content boundary. Metadata/body access uses the admin token; retention,
+  // deletion, legal holds and exports use the governance token.
+  const auditContentServiceUrl = String(
+    env.ADMIN_AUDIT_CONTENT_SERVICE_URL || "",
+  ).trim();
+  const auditContentServiceAdminToken = String(
+    env.ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN || "",
+  ).trim();
+  const auditContentServiceGovernanceToken = String(
+    env.ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN || "",
+  ).trim();
+  const auditContentServiceOrganizationId = String(
+    env.ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID || "",
+  ).trim();
+  const auditContentServiceExportKey = String(
+    env.ADMIN_AUDIT_CONTENT_EXPORT_KEY || "",
+  ).trim();
+  const auditContentServiceValues = [
+    auditContentServiceUrl,
+    auditContentServiceAdminToken,
+    auditContentServiceGovernanceToken,
+    auditContentServiceOrganizationId,
+    auditContentServiceExportKey,
+  ];
+  if (auditContentServiceValues.some(Boolean)
+      && !auditContentServiceValues.every(Boolean)) {
+    throw new Error(
+      "ADMIN_AUDIT_CONTENT_SERVICE_URL, ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN, "
+      + "ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN, "
+      + "ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID and "
+      + "ADMIN_AUDIT_CONTENT_EXPORT_KEY are required together",
+    );
+  }
+  if (auditContentServiceAdminToken
+      && auditContentServiceAdminToken.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+    );
+  }
+  if (auditContentServiceGovernanceToken
+      && auditContentServiceGovernanceToken.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+    );
+  }
+  if (auditContentServiceAdminToken
+      && auditContentServiceAdminToken === auditContentServiceGovernanceToken) {
+    throw new Error(
+      "ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN and "
+      + "ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN must differ",
+    );
+  }
+  if (auditContentServiceOrganizationId
+      && !/^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/.test(
+        auditContentServiceOrganizationId,
+      )) {
+    throw new Error("ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID is invalid");
+  }
+  let auditContentServiceExportKeyBytes = Buffer.alloc(0);
+  if (auditContentServiceExportKey) {
+    if (/^[a-f0-9]{64}$/i.test(auditContentServiceExportKey)) {
+      auditContentServiceExportKeyBytes = Buffer.from(auditContentServiceExportKey, "hex");
+    } else {
+      try {
+        auditContentServiceExportKeyBytes = Buffer.from(auditContentServiceExportKey, "base64");
+      } catch {
+        throw new Error("ADMIN_AUDIT_CONTENT_EXPORT_KEY must be 32-byte base64 or hex");
+      }
+      const canonical = auditContentServiceExportKeyBytes.toString("base64");
+      if (canonical !== auditContentServiceExportKey) {
+        throw new Error("ADMIN_AUDIT_CONTENT_EXPORT_KEY must be 32-byte base64 or hex");
+      }
+    }
+    if (auditContentServiceExportKeyBytes.length !== 32) {
+      throw new Error("ADMIN_AUDIT_CONTENT_EXPORT_KEY must be 32-byte base64 or hex");
     }
   }
   const stepUpClientId = String(env.ADMIN_STEP_UP_OIDC_CLIENT_ID || "").trim();
@@ -319,6 +400,51 @@ export function loadConfig(env = process.env) {
         32 * 1024 * 1024,
       ),
     },
+    auditContentService: {
+      enabled: Boolean(auditContentServiceUrl),
+      url: auditContentServiceUrl
+        ? url(env, "ADMIN_AUDIT_CONTENT_SERVICE_URL")
+        : "",
+      adminToken: auditContentServiceAdminToken,
+      governanceToken: auditContentServiceGovernanceToken,
+      organizationId: auditContentServiceOrganizationId,
+      exportKey: auditContentServiceExportKeyBytes,
+      timeoutMs: integer(
+        env,
+        "ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS",
+        5000,
+        500,
+        30000,
+      ),
+      maxResponseBytes: integer(
+        env,
+        "ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES",
+        4 * 1024 * 1024,
+        16 * 1024,
+        32 * 1024 * 1024,
+      ),
+      maxExportBytes: integer(
+        env,
+        "ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES",
+        32 * 1024 * 1024,
+        64 * 1024,
+        128 * 1024 * 1024,
+      ),
+    },
+     securityService: {
+       enabled: Boolean(String(env.ADMIN_SECURITY_SERVICE_URL || "").trim()),
+       url: String(env.ADMIN_SECURITY_SERVICE_URL || "").trim()
+         ? url(env, "ADMIN_SECURITY_SERVICE_URL")
+         : "",
+       token: String(env.ADMIN_SECURITY_SERVICE_TOKEN || "").trim(),
+       timeoutMs: integer(
+         env,
+         "ADMIN_SECURITY_SERVICE_TIMEOUT_MS",
+         5000,
+         500,
+         30000,
+       ),
+     },
     approvalCallback: {
       enabled: Boolean(approvalCallbackSecret),
       secret: approvalCallbackSecret,

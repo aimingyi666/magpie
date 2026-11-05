@@ -23,6 +23,9 @@ type translator struct {
 	// the turn failed: its <synthetic> row's result is told, and the
 	// turn_duration after it says nothing more
 	failed bool
+	// tap has the streams of the messages (tap.go): a message is told
+	// after its stream has begun, and a turn's end after its streams'
+	tap *tap
 }
 
 func newTranslator(out emitter) *translator { return &translator{out: out} }
@@ -36,6 +39,7 @@ func (t *translator) row(b []byte) {
 	var r struct {
 		Type          string          `json:"type"`
 		Subtype       string          `json:"subtype"`
+		UUID          string          `json:"uuid"`
 		IsSidechain   bool            `json:"isSidechain"`
 		IsMeta        bool            `json:"isMeta"`
 		RequestID     string          `json:"requestId"`
@@ -68,6 +72,7 @@ func (t *translator) row(b []byte) {
 		}
 	case "assistant":
 		var m struct {
+			ID      string `json:"id"`
 			Model   string `json:"model"`
 			Content []struct {
 				Type string `json:"type"`
@@ -75,7 +80,15 @@ func (t *translator) row(b []byte) {
 			} `json:"content"`
 		}
 		_ = json.Unmarshal(r.Message, &m)
+		if m.Model != "<synthetic>" && m.ID != "" {
+			t.tap.before(m.ID)
+		}
 		line := map[string]any{"type": "assistant", "message": r.Message}
+		// the row's place in the session, as -p tells it: the bridge
+		// branches a conversation off there (cutSession)
+		if r.UUID != "" {
+			line["uuid"] = r.UUID
+		}
 		if r.RequestID != "" {
 			line["request_id"] = r.RequestID
 		}
@@ -96,10 +109,14 @@ func (t *translator) row(b []byte) {
 			t.out.emit(map[string]any{"type": "rate_limit_event", "rate_limit_info": r.APIParams.RateLimitInfo})
 		}
 		t.failed = true
+		t.tap.settle()
 		t.out.turnOver()
 		t.out.emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
 			"result": text, "api_error_status": r.APIStatus})
 	case "system":
+		if r.Subtype == "turn_duration" {
+			t.tap.settle()
+		}
 		if r.Subtype == "turn_duration" && !t.failed {
 			t.out.emit(map[string]any{"type": "result", "subtype": "success", "is_error": false})
 		}

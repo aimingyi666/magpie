@@ -9,6 +9,7 @@ let auditCursor = "";
 let selectedNotificationChannel = null;
 let selectedNotificationRule = null;
 let selectedNotificationDeliveryId = "";
+let contentStreamCursor = "";
 
 class ApiError extends Error {
   constructor(payload, status) {
@@ -1897,6 +1898,554 @@ async function loadNotificationOperations() {
   }
 }
 
+function contentScope(form) {
+  return jsonObject(fieldValue(form, "scope"), "Scope");
+}
+
+function contentApprovalBody(form) {
+  return {
+    approvalId: fieldValue(form, "approvalId"),
+    reason: fieldValue(form, "reason"),
+  };
+}
+
+function appendContentSummary(target, entries) {
+  clear(target);
+  const summary = node("dl", "", "export-summary");
+  for (const [label, value] of entries) {
+    const item = node("div");
+    appendText(item, "dt", label);
+    appendText(item, "dd", value == null ? "" : value);
+    summary.append(item);
+  }
+  target.append(summary);
+}
+
+async function loadContentStream(streamId) {
+  const detail = document.querySelector("#content-stream-detail");
+  if (!detail) return;
+  detail.textContent = `Loading ${streamId}...`;
+  try {
+    const payload = await api(
+      `/api/v1/admin/audit/content/streams/${encodeURIComponent(streamId)}`,
+    );
+    detail.textContent = JSON.stringify(payload.stream || {}, null, 2);
+  } catch (error) {
+    detail.textContent = `${error.message || "Content stream unavailable"} `
+      + `[${error.code || "request_failed"}].`;
+  }
+}
+
+function renderContentStreams(records) {
+  const target = document.querySelector("#content-stream-list");
+  if (!target) return;
+  clear(target);
+  if (records.length === 0) {
+    target.append(node("p", "No audit content streams matched these filters."));
+    return;
+  }
+  target.append(dataTable(
+    [
+      "Created",
+      "Stream",
+      "User",
+      "Department",
+      "Device",
+      "Kind",
+      "Status",
+      "Chunks",
+      "Bytes",
+      "Content ref",
+    ],
+    records.map((stream) => [
+      stream.createdAt,
+      stream.streamId,
+      stream.userId,
+      stream.departmentId,
+      stream.deviceId,
+      stream.contentKind,
+      stream.effectiveStatus || stream.status,
+      stream.chunkCount,
+      stream.bytes,
+      stream.contentRef,
+    ]),
+    records.map((stream) => ({
+      label: "Inspect",
+      run: () => loadContentStream(stream.streamId),
+    })),
+  ));
+}
+
+async function loadContentStreams(cursor = "") {
+  const form = document.querySelector("#content-stream-filter");
+  if (!form) return;
+  const params = queryFromForm(form);
+  if (cursor) params.set("cursor", cursor);
+  setResult(form, "Loading audit content metadata.", "pending");
+  try {
+    const payload = await api(`/api/v1/admin/audit/content/streams?${params}`);
+    contentStreamCursor = String(payload.nextCursor || "");
+    const next = document.querySelector("#content-stream-next");
+    if (next) next.hidden = !contentStreamCursor;
+    renderContentStreams(payload.streams || []);
+    setResult(form, `${(payload.streams || []).length} content stream(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
+function renderContentRetention(payload) {
+  const target = document.querySelector("#content-retention-result");
+  if (!target) return;
+  const summary = payload.summary || payload;
+  appendContentSummary(target, [
+    ["Dry run", summary.dryRun === true],
+    ["Scanned", summary.scanned],
+    ["Content deleted", summary.contentDeleted],
+    ["Metadata redacted", summary.metadataRedacted],
+    ["Skipped for legal hold", summary.skippedLegalHold],
+    ["Exports expired", summary.exportsExpired],
+    ["Errors", summary.errors],
+  ]);
+}
+
+async function runContentRetention(form) {
+  const key = fieldValue(form, "idempotencyKey") || idempotencyKey();
+  setBusy(form, true);
+  setResult(form, `Running content retention with Idempotency-Key ${key}.`, "pending");
+  try {
+    const payload = await api("/api/v1/admin/audit/content/retention/run", {
+      method: "POST",
+      idempotencyKey: key,
+      body: {
+        dryRun: fieldValue(form, "dryRun") === "true",
+        limit: Number(fieldValue(form, "limit")),
+        ...contentApprovalBody(form),
+      },
+    });
+    renderContentRetention(payload);
+    setResult(
+      form,
+      `Content retention ${payload.replayed ? "replayed" : "completed"} for `
+        + `${Number(payload.summary?.scanned) || 0} record(s).`,
+      "result",
+    );
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function deleteContent(form) {
+  const contentRef = fieldValue(form, "contentRef");
+  const key = fieldValue(form, "idempotencyKey") || idempotencyKey();
+  setBusy(form, true);
+  setResult(form, `Deleting content with Idempotency-Key ${key}.`, "pending");
+  try {
+    const payload = await api(
+      `/api/v1/admin/audit/content/${encodeURIComponent(contentRef)}`,
+      {
+        method: "DELETE",
+        idempotencyKey: key,
+        body: {
+          contentRef,
+          force: fieldValue(form, "force") === "true",
+          ...contentApprovalBody(form),
+        },
+      },
+    );
+    const deletion = payload.deletion || {};
+    const target = document.querySelector("#content-delete-result");
+    if (target) {
+      appendContentSummary(target, [
+        ["Duplicate", payload.replayed === true || payload.duplicate === true],
+        ["Deletion ID", deletion.deletionId],
+        ["Content ref", deletion.contentRef],
+        ["Deleted at", deletion.deletedAt],
+        ["Object bytes", deletion.objectBytes],
+        ["Retention expires", deletion.retentionExpiresAt],
+      ]);
+    }
+    setResult(
+      form,
+      `Content deletion ${payload.replayed === true || payload.duplicate === true
+        ? "replayed"
+        : "recorded"}.`,
+      "result",
+    );
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+function selectContentDeletion(deletion) {
+  const form = document.querySelector("#content-deletion-verify-form");
+  const fieldNode = field(form, "deletionId");
+  if (fieldNode) fieldNode.value = deletion.deletionId || "";
+  form?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function renderContentDeletions(records) {
+  const target = document.querySelector("#content-deletion-list");
+  if (!target) return;
+  clear(target);
+  if (records.length === 0) {
+    target.append(node("p", "No deletion proofs matched these filters."));
+    return;
+  }
+  target.append(dataTable(
+    ["Deleted", "Deletion", "Content ref", "Actor", "Bytes", "Retention expires"],
+    records.map((deletion) => [
+      deletion.deletedAt,
+      deletion.deletionId,
+      deletion.contentRef,
+      deletion.actorId,
+      deletion.objectBytes,
+      deletion.retentionExpiresAt,
+    ]),
+    records.map((deletion) => ({
+      label: "Verify",
+      run: () => selectContentDeletion(deletion),
+    })),
+  ));
+}
+
+async function loadContentDeletions() {
+  const form = document.querySelector("#content-deletion-filter");
+  if (!form) return;
+  setResult(form, "Loading deletion proofs.", "pending");
+  try {
+    const params = queryFromForm(form);
+    const payload = await api(`/api/v1/admin/audit/content/deletions?${params}`);
+    renderContentDeletions(payload.deletions || []);
+    setResult(form, `${(payload.deletions || []).length} deletion proof(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
+async function verifyContentDeletion(form) {
+  const deletionId = fieldValue(form, "deletionId");
+  setBusy(form, true);
+  try {
+    const payload = await api(
+      `/api/v1/admin/audit/content/deletions/${encodeURIComponent(deletionId)}/verify`,
+      { method: "POST", body: {} },
+    );
+    const verification = payload.verification || {};
+    setResult(
+      form,
+      `Deletion ${payload.deletionId || deletionId} is `
+        + `${verification.valid === true ? "valid" : "not valid"}; `
+        + `proof ${verification.proofDigest || "not returned"}.`,
+      verification.valid === true ? "result" : "error",
+    );
+  } catch (error) {
+    showError(form, error);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function createContentLegalHold(form) {
+  let scope;
+  try {
+    scope = contentScope(form);
+  } catch (error) {
+    setResult(form, error.message, "error");
+    return;
+  }
+  const key = fieldValue(form, "idempotencyKey") || idempotencyKey();
+  const body = {
+    scope,
+    custodianId: fieldValue(form, "custodianId"),
+    expiresAt: fieldValue(form, "expiresAt"),
+    ...contentApprovalBody(form),
+  };
+  if (fieldValue(form, "startsAt")) body.startsAt = fieldValue(form, "startsAt");
+  setBusy(form, true);
+  try {
+    const payload = await api("/api/v1/admin/audit/content/legal-holds", {
+      method: "POST",
+      body,
+      idempotencyKey: key,
+    });
+    setResult(
+      form,
+      `Legal hold ${payload.hold?.holdId || "unknown"} `
+        + `${payload.replayed === true || payload.duplicate === true ? "replayed" : "created"}.`,
+      "result",
+    );
+    await loadContentLegalHolds();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+function selectContentLegalHold(hold) {
+  const form = document.querySelector("#content-hold-release-form");
+  const holdField = field(form, "holdId");
+  if (holdField) holdField.value = hold.holdId || "";
+  form?.scrollIntoView({ behavior: "smooth", block: "center" });
+}
+
+function renderContentLegalHolds(records) {
+  const target = document.querySelector("#content-hold-list");
+  if (!target) return;
+  clear(target);
+  if (records.length === 0) {
+    target.append(node("p", "No content legal holds matched these filters."));
+    return;
+  }
+  target.append(dataTable(
+    ["Created", "Hold", "Status", "Scope", "Custodian", "Starts", "Expires"],
+    records.map((hold) => [
+      hold.createdAt,
+      hold.holdId,
+      hold.effectiveStatus || hold.status,
+      JSON.stringify(hold.scope || {}),
+      hold.custodianId,
+      hold.startsAt,
+      hold.expiresAt,
+    ]),
+    records.map((hold) => ({
+      label: "Select",
+      run: () => selectContentLegalHold(hold),
+    })),
+  ));
+}
+
+async function loadContentLegalHolds() {
+  const form = document.querySelector("#content-hold-filter");
+  if (!form) return;
+  setResult(form, "Loading content legal holds.", "pending");
+  try {
+    const params = queryFromForm(form);
+    const payload = await api(`/api/v1/admin/audit/content/legal-holds?${params}`);
+    renderContentLegalHolds(payload.holds || []);
+    setResult(form, `${(payload.holds || []).length} legal hold(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
+async function releaseContentLegalHold(form) {
+  const holdId = fieldValue(form, "holdId");
+  const key = idempotencyKey();
+  setBusy(form, true);
+  try {
+    const payload = await api(
+      `/api/v1/admin/audit/content/legal-holds/${encodeURIComponent(holdId)}/release`,
+      {
+        method: "POST",
+        idempotencyKey: key,
+        body: contentApprovalBody(form),
+      },
+    );
+    setResult(
+      form,
+      `Legal hold ${payload.hold?.holdId || holdId} is now `
+        + `${payload.hold?.effectiveStatus || payload.hold?.status || "released"}.`,
+      "result",
+    );
+    await loadContentLegalHolds();
+  } catch (error) {
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+async function readContentOnce(form) {
+  const contentRef = fieldValue(form, "contentRef");
+  const key = fieldValue(form, "idempotencyKey") || idempotencyKey();
+  const target = document.querySelector("#content-read-result");
+  if (target) target.textContent = "";
+  const body = {
+    contentRef,
+    purpose: fieldValue(form, "purpose"),
+    ...contentApprovalBody(form),
+  };
+  const ttl = fieldValue(form, "ttlSeconds");
+  if (ttl) body.ttlSeconds = Number(ttl);
+  setBusy(form, true);
+  setResult(form, `Requesting one-time content read with Idempotency-Key ${key}.`, "pending");
+  try {
+    const response = await fetch(
+      `/api/v1/admin/audit/content/${encodeURIComponent(contentRef)}/read`,
+      {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "content-type": "application/json",
+          "x-csrf-token": csrfToken,
+          "idempotency-key": key,
+        },
+        body: JSON.stringify(body),
+      },
+    );
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new ApiError(payload, response.status);
+    }
+    const text = await response.text();
+    if (target) target.textContent = text;
+    setResult(form, "Content was returned once and is now displayed below.", "result");
+  } catch (error) {
+    if (target) target.textContent = "";
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+function renderContentExportResult(payload, token) {
+  const target = document.querySelector("#content-export-result");
+  if (!target) return;
+  clear(target);
+  const exportRecord = payload.export || payload;
+  appendContentSummary(target, [
+    ["Export ID", exportRecord.exportId],
+    ["Status", exportRecord.status],
+    ["Bytes", exportRecord.byteLength],
+    ["Expires", exportRecord.expiresAt],
+  ]);
+  let downloadToken = String(token || "");
+  const button = node("button", "Download once");
+  button.type = "button";
+  button.disabled = !downloadToken || !exportRecord.downloadPath;
+  button.addEventListener("click", async () => {
+    const currentToken = downloadToken;
+    downloadToken = "";
+    button.disabled = true;
+    if (!currentToken) {
+      appendText(
+        target,
+        "p",
+        "The one-time export token is no longer retained. Reuse a ready export from a new approved request.",
+        "notice",
+      );
+      return;
+    }
+    try {
+      const response = await fetch(exportRecord.downloadPath, {
+        credentials: "same-origin",
+        headers: { "x-magpie-download-token": currentToken },
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => ({}));
+        throw new ApiError(errorPayload, response.status);
+      }
+      const blob = await response.blob();
+      const href = URL.createObjectURL(blob);
+      const anchor = node("a");
+      anchor.href = href;
+      anchor.download = exportRecord.fileName || `${exportRecord.exportId}.mge.enc`;
+      document.body.append(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(href), 30000);
+      appendText(
+        target,
+        "p",
+        "Encrypted export download started. This token cannot be used again.",
+        "notice",
+      );
+    } catch (error) {
+      showError(target, error);
+    }
+  });
+  target.append(button);
+}
+
+async function createContentExport(form) {
+  let scope;
+  try {
+    scope = contentScope(form);
+  } catch (error) {
+    setResult(form, error.message, "error");
+    return;
+  }
+  const key = fieldValue(form, "idempotencyKey") || idempotencyKey();
+  const body = {
+    scope,
+    purpose: fieldValue(form, "purpose"),
+    ...contentApprovalBody(form),
+  };
+  const ttl = fieldValue(form, "ttlSeconds");
+  if (ttl) body.ttlSeconds = Number(ttl);
+  setBusy(form, true);
+  setResult(form, `Creating content export with Idempotency-Key ${key}.`, "pending");
+  try {
+    const response = await fetch("/api/v1/admin/audit/content/exports", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        "content-type": "application/json",
+        "x-csrf-token": csrfToken,
+        "idempotency-key": key,
+      },
+      body: JSON.stringify(body),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new ApiError(payload, response.status);
+    const token = String(response.headers.get("x-magpie-download-token") || "");
+    renderContentExportResult(payload, token);
+    setResult(
+      form,
+      `Content export ${payload.export?.exportId || "unknown"} is ready. `
+        + "The one-time token is held only in this page's memory.",
+      "result",
+    );
+    await loadContentExports();
+  } catch (error) {
+    renderContentExportResult({}, "");
+    showError(form, error, key);
+  } finally {
+    setBusy(form, false);
+  }
+}
+
+function renderContentExports(records) {
+  const target = document.querySelector("#content-export-list");
+  if (!target) return;
+  clear(target);
+  if (records.length === 0) {
+    target.append(node("p", "No content exports matched these filters."));
+    return;
+  }
+  target.append(dataTable(
+    ["Created", "Export", "Status", "Bytes", "Expires", "Consumed"],
+    records.map((record) => [
+      record.createdAt,
+      record.exportId,
+      record.status,
+      record.byteLength,
+      record.expiresAt,
+      record.consumedAt,
+    ]),
+  ));
+}
+
+async function loadContentExports() {
+  const form = document.querySelector("#content-export-filter");
+  if (!form) return;
+  setResult(form, "Loading content exports.", "pending");
+  try {
+    const params = queryFromForm(form);
+    const payload = await api(`/api/v1/admin/audit/content/exports?${params}`);
+    renderContentExports(payload.exports || []);
+    setResult(form, `${(payload.exports || []).length} content export(s) loaded.`, "result");
+  } catch (error) {
+    showError(form, error);
+  }
+}
+
 document.addEventListener("click", (event) => {
   const button = event.target.closest?.(".row-action[data-write-action]");
   if (!button) return;
@@ -1931,7 +2480,11 @@ document.addEventListener("submit", async (event) => {
     + "#notification-delivery-filter, #notification-dead-letter-filter, "
     + "#notification-replay-form, #notification-rule-form, "
     + "#notification-rule-filter, #notification-operations-filter, "
-    + "#resource-sync-filter",
+    + "#resource-sync-filter, #content-stream-filter, #content-read-form, "
+    + "#content-retention-form, #content-delete-form, "
+    + "#content-deletion-filter, #content-deletion-verify-form, "
+    + "#content-hold-create-form, #content-hold-filter, "
+    + "#content-hold-release-form, #content-export-form, #content-export-filter",
   );
   if (!known) return;
   event.preventDefault();
@@ -1987,6 +2540,29 @@ document.addEventListener("submit", async (event) => {
     await loadNotificationOperations();
   } else if (form.id === "resource-sync-filter") {
     await loadResourceSyncVisibility(form);
+  } else if (form.id === "content-stream-filter") {
+    contentStreamCursor = "";
+    await loadContentStreams();
+  } else if (form.id === "content-read-form") {
+    await readContentOnce(form);
+  } else if (form.id === "content-retention-form") {
+    await runContentRetention(form);
+  } else if (form.id === "content-delete-form") {
+    await deleteContent(form);
+  } else if (form.id === "content-deletion-filter") {
+    await loadContentDeletions();
+  } else if (form.id === "content-deletion-verify-form") {
+    await verifyContentDeletion(form);
+  } else if (form.id === "content-hold-create-form") {
+    await createContentLegalHold(form);
+  } else if (form.id === "content-hold-filter") {
+    await loadContentLegalHolds();
+  } else if (form.id === "content-hold-release-form") {
+    await releaseContentLegalHold(form);
+  } else if (form.id === "content-export-form") {
+    await createContentExport(form);
+  } else if (form.id === "content-export-filter") {
+    await loadContentExports();
   }
 });
 
@@ -2001,6 +2577,10 @@ document.querySelector("#operation-next")?.addEventListener("click", () => {
 
 document.querySelector("#audit-next")?.addEventListener("click", () => {
   if (auditCursor) loadAuditLogs(auditCursor);
+});
+
+document.querySelector("#content-stream-next")?.addEventListener("click", () => {
+  if (contentStreamCursor) loadContentStreams(contentStreamCursor);
 });
 
 document.querySelector("#notification-channel-test")?.addEventListener("click", () => {
@@ -2030,3 +2610,7 @@ document.querySelector("#notification-dead-letter-filter")?.requestSubmit();
 document.querySelector("#notification-rule-filter")?.requestSubmit();
 document.querySelector("#notification-operations-filter")?.requestSubmit();
 document.querySelector("#resource-sync-filter")?.requestSubmit();
+document.querySelector("#content-stream-filter")?.requestSubmit();
+document.querySelector("#content-deletion-filter")?.requestSubmit();
+document.querySelector("#content-hold-filter")?.requestSubmit();
+document.querySelector("#content-export-filter")?.requestSubmit();

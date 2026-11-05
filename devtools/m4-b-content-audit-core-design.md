@@ -1,5 +1,7 @@
 # M4-B 内容采集与脱敏对象存储核心设计冻结
 
+> 历史说明：旧静态正文读取令牌已被 M4-C 一次性 grant 取代，本文仅作历史记录。
+
 状态：实现前冻结版 v1，2026-11-02  
 分支：`codex/m4-b-content-audit-core`  
 依赖：`codex/m4-a-audit-event-pipeline`

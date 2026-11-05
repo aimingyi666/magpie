@@ -13,6 +13,7 @@ import (
 	_ "github.com/yetone/magpie/plugins/rotation"
 	_ "github.com/yetone/magpie/plugins/routing"
 	_ "github.com/yetone/magpie/plugins/search"
+	_ "github.com/yetone/magpie/plugins/securitydetect"
 	_ "github.com/yetone/magpie/plugins/sessions"
 	_ "github.com/yetone/magpie/plugins/tools"
 	_ "github.com/yetone/magpie/plugins/usage"

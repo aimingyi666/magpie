@@ -10,19 +10,29 @@ import {
   validateContentStreamId,
   validateContentStreamRequest,
 } from "./content-schema.js";
-import { sha256Text } from "./events.js";
+import { canonicalJson, sha256Text } from "./events.js";
 
-const STORE_VERSION = 1;
+const STORE_VERSION = 2;
 const MAGIC = Buffer.from("MAGPIE-CONTENT-1", "utf8");
 const NONCE_BYTES = 12;
 const TAG_BYTES = 16;
 const STREAM_ID_PATTERN = /^str_[A-Za-z0-9_-]{43}$/;
 const CONTENT_REF_PATTERN = /^ct_[A-Za-z0-9_-]{43}$/;
 const SHA256_PATTERN = /^[a-f0-9]{64}$/;
-const AUTHORIZATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@-]{7,127}$/;
+const AUTHORIZATION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@_-]{7,127}$/;
+const GRANT_ID_PATTERN = /^grt_[A-Za-z0-9_-]{43}$/;
+const HOLD_ID_PATTERN = /^hld_[A-Za-z0-9_-]{43}$/;
+const DELETION_ID_PATTERN = /^del_[A-Za-z0-9_-]{43}$/;
+const EXPORT_ID_PATTERN = /^exp_[A-Za-z0-9_-]{43}$/;
+const SAFE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:@+-]{0,127}$/;
+const PURPOSE_PATTERN = /^[a-z][a-z0-9_]{0,63}$/;
 const SOURCE_HASH_PATTERN = /^sha256:[a-f0-9]{64}$/;
 const ERROR_CODE_PATTERN = /^[a-z][a-z0-9._-]{0,63}$/;
+const PROOF_MAC_PATTERN = /^[A-Za-z0-9_-]{43}$/;
+const SESSION_HASH_PATTERN = /^[a-f0-9]{64}$/;
+const STAGING_PATTERN = /^\.staging-(ct_[A-Za-z0-9_-]{43})-(del_[A-Za-z0-9_-]{43})\.bin$/;
 const MAX_ACCESS_RECORDS = 10_000;
+const DELETION_POLICY_VERSION = "m4d-retention-v1";
 
 export class ContentStoreError extends Error {
   constructor(statusCode, code, message, retryable = false) {
@@ -48,12 +58,102 @@ function requiredString(value, maximum = 1024) {
     && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
+function timestamp(value) {
+  if (!requiredString(value, 64)) return false;
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+function retentionWindow(contentExpiresAt, metadataExpiresAt) {
+  if (!timestamp(contentExpiresAt) || !timestamp(metadataExpiresAt)) return false;
+  return new Date(metadataExpiresAt).getTime()
+    >= new Date(contentExpiresAt).getTime();
+}
+
 function safeInteger(value, minimum = 0, maximum = Number.MAX_SAFE_INTEGER) {
   return Number.isSafeInteger(value) && value >= minimum && value <= maximum;
 }
 
 function randomId(prefix) {
   return `${prefix}${crypto.randomBytes(32).toString("base64url")}`;
+}
+
+function redactedRequest(request) {
+  return {
+    schemaVersion: AUDIT_CONTENT_SCHEMA_VERSION,
+    requestId: "req_redacted0000",
+    sessionId: "ses_redacted0000",
+    userId: "redacted",
+    departmentId: "redacted",
+    deviceId: "redacted",
+    agentId: "redacted",
+    contentKind: request.contentKind,
+    mediaType: "text/plain",
+    auditLevel: "L2",
+    collection: {
+      purpose: request.collection.purpose,
+      authorizationId: "apr_redacted",
+      confirmed: true,
+      retentionDays: request.collection.retentionDays,
+      metadataRetentionDays: request.collection.metadataRetentionDays
+        ?? request.collection.retentionDays,
+    },
+  };
+}
+
+function expiresAt(startedAt, days) {
+  const started = new Date(startedAt).getTime();
+  if (!Number.isFinite(started)) throw new Error("Invalid content retention start");
+  return new Date(started + days * 24 * 60 * 60 * 1000).toISOString();
+}
+
+function sessionHash(secret, adminId, organizationId, sessionId) {
+  return crypto.createHmac("sha256", secret)
+    .update(`session\u0000${adminId}\u0000${organizationId}\u0000${sessionId}`)
+    .digest("hex");
+}
+
+function proofFields(proof) {
+  return {
+    deletionId: proof.deletionId,
+    contentRef: proof.contentRef,
+    streamId: proof.streamId,
+    deletedAt: proof.deletedAt,
+    plaintextSha256: proof.plaintextSha256,
+    objectBytes: proof.objectBytes,
+    retentionExpiresAt: proof.retentionExpiresAt,
+    actorType: proof.actorType,
+    actorId: proof.actorId,
+    organizationId: proof.organizationId,
+    sessionHash: proof.sessionHash,
+    requestId: proof.requestId,
+    sourceHash: proof.sourceHash,
+    reason: proof.reason,
+    approvalId: proof.approvalId,
+    policyVersion: proof.policyVersion,
+  };
+}
+
+function proofMac(secret, proof) {
+  return crypto.createHmac("sha256", secret)
+    .update(canonicalJson(proofFields(proof)))
+    .digest("base64url");
+}
+
+export function contentSessionHash(secret, adminId, organizationId, sessionId) {
+  return sessionHash(secret, adminId, organizationId, sessionId);
+}
+
+export function contentDeletionProofMac(secret, proof) {
+  return proofMac(secret, proof);
+}
+
+function compareStreamsDesc(left, right) {
+  if (left.createdAt !== right.createdAt) {
+    return left.createdAt < right.createdAt ? 1 : -1;
+  }
+  if (left.streamId === right.streamId) return 0;
+  return left.streamId < right.streamId ? 1 : -1;
 }
 
 function idempotencyKeyHash(scope, key) {
@@ -88,11 +188,18 @@ function emptyIndex() {
     objects: {},
     access: {},
     idempotency: {},
+    legalHolds: {},
+    deletionProofs: {},
+    exports: {},
+    governanceIdempotency: {},
     stats: {
       streamsCreated: 0,
       chunksAccepted: 0,
       objectsFinalized: 0,
       streamsFailed: 0,
+      contentDeleted: 0,
+      metadataRedacted: 0,
+      exportsCreated: 0,
     },
   };
 }
@@ -113,6 +220,11 @@ function streamFields() {
     "plaintextSha256",
     "finalizedAt",
     "failureCode",
+    "contentRetentionExpiresAt",
+    "metadataRetentionExpiresAt",
+    "deletedAt",
+    "deletionId",
+    "metadataRedactedAt",
   ]);
 }
 
@@ -131,17 +243,19 @@ function objectFields() {
     "redaction",
     "createdAt",
     "retentionDays",
+    "contentRetentionExpiresAt",
+    "metadataRetentionExpiresAt",
   ]);
 }
 
-function validateStream(streamId, stream) {
+function validateStream(streamId, stream, version = STORE_VERSION) {
   if (!STREAM_ID_PATTERN.test(streamId)
       || !isPlainObject(stream)
       || Object.keys(stream).some((key) => !streamFields().has(key))
       || stream.streamId !== streamId
-      || !["collecting", "finalized", "failed"].includes(stream.status)
-      || !requiredString(stream.createdAt, 64)
-      || !requiredString(stream.updatedAt, 64)
+      || !["collecting", "finalized", "failed", "deleted"].includes(stream.status)
+      || !timestamp(stream.createdAt)
+      || !timestamp(stream.updatedAt)
       || !safeInteger(stream.nextSequence, 0, 99_999)
       || !safeInteger(stream.chunkCount, 0, 99_999)
       || !safeInteger(stream.bytes, 0, 32 * 1024 * 1024)
@@ -159,14 +273,32 @@ function validateStream(streamId, stream) {
   } catch {
     throw new ContentStoreError(500, "content_store_corrupt", `Content stream ${streamId} request is invalid`);
   }
-  if (stream.status === "finalized") {
+  if (stream.status === "finalized" || stream.status === "deleted") {
     if (!CONTENT_REF_PATTERN.test(stream.contentRef || "")
         || !SHA256_PATTERN.test(stream.plaintextSha256 || "")
-        || !requiredString(stream.finalizedAt, 64)
-        || stream.failureCode !== undefined) {
+        || !timestamp(stream.finalizedAt)
+        || stream.failureCode !== undefined
+        || (version >= 2
+          && !retentionWindow(
+            stream.contentRetentionExpiresAt,
+            stream.metadataRetentionExpiresAt,
+          ))) {
       throw new ContentStoreError(500, "content_store_corrupt", `Content stream ${streamId} final state is invalid`);
     }
     redactionSummary(stream.redaction);
+  }
+  if (stream.status === "deleted"
+      && (!DELETION_ID_PATTERN.test(stream.deletionId || "")
+        || !timestamp(stream.deletedAt))) {
+    throw new ContentStoreError(500, "content_store_corrupt", `Content stream ${streamId} deletion state is invalid`);
+  }
+  if (stream.status !== "deleted"
+      && (stream.deletionId !== undefined || stream.deletedAt !== undefined)) {
+    throw new ContentStoreError(500, "content_store_corrupt", `Content stream ${streamId} deletion state is invalid`);
+  }
+  if (stream.metadataRedactedAt !== undefined
+      && (!timestamp(stream.metadataRedactedAt) || stream.status !== "deleted")) {
+    throw new ContentStoreError(500, "content_store_corrupt", `Content stream ${streamId} metadata redaction state is invalid`);
   }
   if (stream.status === "failed"
       && !ERROR_CODE_PATTERN.test(stream.failureCode || "")) {
@@ -174,7 +306,7 @@ function validateStream(streamId, stream) {
   }
 }
 
-function validateObject(contentRef, object) {
+function validateObject(contentRef, object, version = STORE_VERSION) {
   if (!CONTENT_REF_PATTERN.test(contentRef)
       || !isPlainObject(object)
       || Object.keys(object).some((key) => !objectFields().has(key))
@@ -188,8 +320,13 @@ function validateObject(contentRef, object) {
       || !requiredString(object.contentKind, 64)
       || !requiredString(object.requestId, 136)
       || !requiredString(object.sessionId, 136)
-      || !requiredString(object.createdAt, 64)
-      || !safeInteger(object.retentionDays, 1, 3650)) {
+      || !timestamp(object.createdAt)
+      || !safeInteger(object.retentionDays, 1, 3650)
+      || (version >= 2
+        && !retentionWindow(
+          object.contentRetentionExpiresAt,
+          object.metadataRetentionExpiresAt,
+        ))) {
     throw new ContentStoreError(500, "content_store_corrupt", `Content object ${contentRef} is invalid`);
   }
   redactionSummary(object.redaction);
@@ -206,6 +343,11 @@ function validateAccessRecord(record) {
         "sourceHash",
         "outcome",
         "errorCode",
+        "grantId",
+        "adminId",
+        "organizationId",
+        "purpose",
+        "approvalId",
       ].includes(key))
       || !/^acc_[A-Za-z0-9_-]{43}$/.test(record.accessId || "")
       || !requiredString(record.accessedAt, 64)
@@ -215,16 +357,309 @@ function validateAccessRecord(record) {
       || !requiredString(record.requestId, 136)
       || !SOURCE_HASH_PATTERN.test(record.sourceHash || "")
       || !["success", "failed"].includes(record.outcome)
+      || (record.grantId !== undefined && !GRANT_ID_PATTERN.test(record.grantId))
+      || (record.adminId !== undefined && !SAFE_ID_PATTERN.test(record.adminId))
+      || (record.organizationId !== undefined && !SAFE_ID_PATTERN.test(record.organizationId))
+      || (record.purpose !== undefined && !PURPOSE_PATTERN.test(record.purpose))
+      || (record.approvalId !== undefined
+        && !AUTHORIZATION_ID_PATTERN.test(record.approvalId))
       || (record.outcome === "failed" && !ERROR_CODE_PATTERN.test(record.errorCode || ""))
       || (record.outcome === "success" && record.errorCode !== undefined)) {
     throw new ContentStoreError(500, "content_store_corrupt", "Content access audit is invalid");
   }
 }
 
-function validateIndex(index) {
+const HOLD_SCOPE_FIELDS = new Set([
+  "contentRef",
+  "streamId",
+  "userId",
+  "departmentId",
+  "deviceId",
+  "agentId",
+]);
+const HOLD_FIELDS = new Set([
+  "holdId",
+  "scope",
+  "reason",
+  "approvalId",
+  "custodianId",
+  "startsAt",
+  "expiresAt",
+  "createdAt",
+  "createdBy",
+  "organizationId",
+  "sessionHash",
+  "status",
+  "releasedAt",
+  "releasedBy",
+  "releaseReason",
+  "releaseApprovalId",
+]);
+const PROOF_FIELDS = new Set([
+  "deletionId",
+  "contentRef",
+  "streamId",
+  "deletedAt",
+  "plaintextSha256",
+  "objectBytes",
+  "retentionExpiresAt",
+  "actorType",
+  "actorId",
+  "organizationId",
+  "sessionHash",
+  "requestId",
+  "sourceHash",
+  "reason",
+  "approvalId",
+  "policyVersion",
+  "proofMac",
+]);
+const EXPORT_SCOPE_FIELDS = new Set([
+  "contentRefs",
+  "userId",
+  "departmentId",
+  "from",
+  "to",
+]);
+const EXPORT_EVENT_FIELDS = new Set([
+  "eventId",
+  "type",
+  "occurredAt",
+  "actorId",
+  "reason",
+]);
+const EXPORT_FIELDS = new Set([
+  "exportId",
+  "createdAt",
+  "expiresAt",
+  "organizationId",
+  "adminId",
+  "sessionHash",
+  "purpose",
+  "reason",
+  "approvalId",
+  "scope",
+  "scopeHash",
+  "auditEventId",
+  "watermark",
+  "objectCount",
+  "bytes",
+  "objectFile",
+  "status",
+  "downloadConsumedAt",
+  "downloadCount",
+  "events",
+]);
+const EVENT_ID_PATTERN = /^evt_[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/;
+
+function validateScope(scope) {
+  if (!isPlainObject(scope)
+      || Object.keys(scope).length === 0
+      || Object.keys(scope).some((key) => !HOLD_SCOPE_FIELDS.has(key))) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold scope is invalid");
+  }
+  if (scope.contentRef !== undefined && !CONTENT_REF_PATTERN.test(scope.contentRef)) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold scope is invalid");
+  }
+  if (scope.streamId !== undefined && !STREAM_ID_PATTERN.test(scope.streamId)) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold scope is invalid");
+  }
+  for (const field of ["userId", "departmentId", "deviceId", "agentId"]) {
+    if (scope[field] !== undefined && !SAFE_ID_PATTERN.test(scope[field])) {
+      throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold scope is invalid");
+    }
+  }
+}
+
+function validateLegalHold(holdId, hold) {
+  if (!HOLD_ID_PATTERN.test(holdId)
+      || !isPlainObject(hold)
+      || Object.keys(hold).some((key) => !HOLD_FIELDS.has(key))
+      || hold.holdId !== holdId
+      || !requiredString(hold.reason, 1024)
+      || hold.reason.length < 8
+      || !AUTHORIZATION_ID_PATTERN.test(hold.approvalId || "")
+      || !SAFE_ID_PATTERN.test(hold.custodianId || "")
+      || !timestamp(hold.createdAt)
+      || !SAFE_ID_PATTERN.test(hold.createdBy || "")
+      || !SAFE_ID_PATTERN.test(hold.organizationId || "")
+      || !SESSION_HASH_PATTERN.test(hold.sessionHash || "")
+      || !["active", "released"].includes(hold.status)) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold is invalid");
+  }
+  validateScope(hold.scope);
+  try {
+    if (!timestamp(hold.startsAt) || !timestamp(hold.expiresAt)) {
+      throw new Error("invalid legal hold time");
+    }
+    const startsAt = new Date(hold.startsAt).getTime();
+    const expiresAtMs = new Date(hold.expiresAt).getTime();
+    if (!Number.isFinite(startsAt) || !Number.isFinite(expiresAtMs) || expiresAtMs <= startsAt) {
+      throw new Error("invalid legal hold range");
+    }
+  } catch {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold is invalid");
+  }
+  if (hold.status === "released") {
+    if (!timestamp(hold.releasedAt)
+        || !SAFE_ID_PATTERN.test(hold.releasedBy || "")
+        || !requiredString(hold.releaseReason, 1024)
+        || hold.releaseReason.length < 8
+        || !AUTHORIZATION_ID_PATTERN.test(hold.releaseApprovalId || "")) {
+      throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold release is invalid");
+    }
+  } else if (hold.releasedAt !== undefined
+      || hold.releasedBy !== undefined
+      || hold.releaseReason !== undefined
+      || hold.releaseApprovalId !== undefined) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content legal hold release is invalid");
+  }
+}
+
+function validateDeletionProof(deletionId, proof, secret) {
+  if (!DELETION_ID_PATTERN.test(deletionId)
+      || !isPlainObject(proof)
+      || Object.keys(proof).some((key) => !PROOF_FIELDS.has(key))
+      || proof.deletionId !== deletionId
+      || !CONTENT_REF_PATTERN.test(proof.contentRef || "")
+      || !STREAM_ID_PATTERN.test(proof.streamId || "")
+      || !timestamp(proof.deletedAt)
+      || !SHA256_PATTERN.test(proof.plaintextSha256 || "")
+      || !safeInteger(proof.objectBytes)
+      || !timestamp(proof.retentionExpiresAt)
+      || !["manual", "system"].includes(proof.actorType)
+      || !SAFE_ID_PATTERN.test(proof.actorId || "")
+      || !SAFE_ID_PATTERN.test(proof.organizationId || "")
+      || !SESSION_HASH_PATTERN.test(proof.sessionHash || "")
+      || !requiredString(proof.requestId, 136)
+      || !SOURCE_HASH_PATTERN.test(proof.sourceHash || "")
+      || !requiredString(proof.reason, 1024)
+      || proof.reason.length < 8
+      || !AUTHORIZATION_ID_PATTERN.test(proof.approvalId || "")
+      || proof.policyVersion !== DELETION_POLICY_VERSION
+      || !PROOF_MAC_PATTERN.test(proof.proofMac || "")) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content deletion proof is invalid");
+  }
+  if (secret && proof.proofMac !== proofMac(secret, proof)) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content deletion proof failed verification");
+  }
+}
+
+function validateExportScope(scope) {
+  if (!isPlainObject(scope)
+      || Object.keys(scope).length === 0
+      || Object.keys(scope).some((key) => !EXPORT_SCOPE_FIELDS.has(key))) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export scope is invalid");
+  }
+  if (scope.contentRefs !== undefined
+      && (!Array.isArray(scope.contentRefs)
+        || scope.contentRefs.length === 0
+        || scope.contentRefs.length > 100
+        || scope.contentRefs.some((value) => !CONTENT_REF_PATTERN.test(value))
+        || new Set(scope.contentRefs).size !== scope.contentRefs.length)) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export scope is invalid");
+  }
+  for (const field of ["userId", "departmentId"]) {
+    if (scope[field] !== undefined && !SAFE_ID_PATTERN.test(scope[field])) {
+      throw new ContentStoreError(500, "content_store_corrupt", "Content export scope is invalid");
+    }
+  }
+  for (const field of ["from", "to"]) {
+    if (scope[field] !== undefined && !timestamp(scope[field])) {
+      throw new ContentStoreError(500, "content_store_corrupt", "Content export scope is invalid");
+    }
+  }
+  if (scope.from && scope.to && scope.from > scope.to) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export scope is invalid");
+  }
+}
+
+function validateExportEvent(event) {
+  if (!isPlainObject(event)
+      || Object.keys(event).some((key) => !EXPORT_EVENT_FIELDS.has(key))
+      || !EVENT_ID_PATTERN.test(event.eventId || "")
+      || !["created", "downloaded", "download_rejected", "expired"].includes(event.type)
+      || !timestamp(event.occurredAt)
+      || !SAFE_ID_PATTERN.test(event.actorId || "")
+      || (event.reason !== undefined
+        && (!requiredString(event.reason, 1024) || event.reason.length < 8))) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export event is invalid");
+  }
+}
+
+function validateExport(exportId, record) {
+  if (!EXPORT_ID_PATTERN.test(exportId)
+      || !isPlainObject(record)
+      || Object.keys(record).some((key) => !EXPORT_FIELDS.has(key))
+      || record.exportId !== exportId
+      || !timestamp(record.createdAt)
+      || !timestamp(record.expiresAt)
+      || record.expiresAt <= record.createdAt
+      || !SAFE_ID_PATTERN.test(record.organizationId || "")
+      || !SAFE_ID_PATTERN.test(record.adminId || "")
+      || !SESSION_HASH_PATTERN.test(record.sessionHash || "")
+      || !PURPOSE_PATTERN.test(record.purpose || "")
+      || !requiredString(record.reason, 1024)
+      || record.reason.length < 8
+      || !AUTHORIZATION_ID_PATTERN.test(record.approvalId || "")
+      || !SHA256_PATTERN.test(record.scopeHash || "")
+      || !EVENT_ID_PATTERN.test(record.auditEventId || "")
+      || !requiredString(record.watermark, 256)
+      || !safeInteger(record.objectCount, 1, 100)
+      || !safeInteger(record.bytes)
+      || record.objectFile !== `${exportId}.mge`
+      || !["active", "downloaded", "expired"].includes(record.status)
+      || !safeInteger(record.downloadCount)
+      || !Array.isArray(record.events)
+      || record.events.length === 0
+      || record.events.length > 10_000) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export is invalid");
+  }
+  validateExportScope(record.scope);
+  record.events.forEach(validateExportEvent);
+  if (record.status === "active" && record.downloadConsumedAt !== undefined) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export download state is invalid");
+  }
+  if (record.status === "downloaded" && record.downloadConsumedAt === undefined) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export download state is invalid");
+  }
+  if (record.downloadConsumedAt !== undefined && !timestamp(record.downloadConsumedAt)) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content export download state is invalid");
+  }
+}
+
+function validateGovernanceIdempotency(record) {
+  if (!isPlainObject(record)
+      || Object.keys(record).some((key) => !["operation", "fingerprint", "resultId"].includes(key))
+      || !["legal_hold_create", "content_delete", "export_create"].includes(record.operation)
+      || !SHA256_PATTERN.test(record.fingerprint || "")) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content governance idempotency index is invalid");
+  }
+  const patterns = {
+    legal_hold_create: HOLD_ID_PATTERN,
+    content_delete: DELETION_ID_PATTERN,
+    export_create: EXPORT_ID_PATTERN,
+  };
+  if (!patterns[record.operation].test(record.resultId || "")) {
+    throw new ContentStoreError(500, "content_store_corrupt", "Content governance idempotency index is invalid");
+  }
+}
+
+function validateIndex(index, version = STORE_VERSION, options = {}) {
   if (!isPlainObject(index)
-      || Object.keys(index).some((key) => !["version", "streams", "objects", "access", "idempotency", "stats"].includes(key))
-      || index.version !== STORE_VERSION
+      || Object.keys(index).some((key) => ![
+        "version",
+        "streams",
+        "objects",
+        "access",
+        "idempotency",
+        "legalHolds",
+        "deletionProofs",
+        "exports",
+        "governanceIdempotency",
+        "stats",
+      ].includes(key))
+      || index.version !== version
       || !isPlainObject(index.streams)
       || !isPlainObject(index.objects)
       || !isPlainObject(index.access)
@@ -232,8 +667,30 @@ function validateIndex(index) {
       || !isPlainObject(index.stats)) {
     throw new ContentStoreError(500, "content_store_corrupt", "Content store index is invalid");
   }
-  for (const [streamId, stream] of Object.entries(index.streams)) validateStream(streamId, stream);
-  for (const [contentRef, object] of Object.entries(index.objects)) validateObject(contentRef, object);
+  if (version === 1) {
+    for (const [streamId, stream] of Object.entries(index.streams)) validateStream(streamId, stream, 1);
+    for (const [contentRef, object] of Object.entries(index.objects)) validateObject(contentRef, object, 1);
+  } else {
+    if (!isPlainObject(index.legalHolds)
+        || !isPlainObject(index.deletionProofs)
+        || !isPlainObject(index.exports)
+        || !isPlainObject(index.governanceIdempotency)) {
+      throw new ContentStoreError(500, "content_store_corrupt", "Content store index is invalid");
+    }
+    for (const [streamId, stream] of Object.entries(index.streams)) validateStream(streamId, stream);
+    for (const [contentRef, object] of Object.entries(index.objects)) validateObject(contentRef, object);
+    for (const [holdId, hold] of Object.entries(index.legalHolds)) validateLegalHold(holdId, hold);
+    for (const [deletionId, proof] of Object.entries(index.deletionProofs)) {
+      validateDeletionProof(deletionId, proof, options.proofSecret);
+    }
+    for (const [exportId, record] of Object.entries(index.exports)) validateExport(exportId, record);
+    for (const [key, record] of Object.entries(index.governanceIdempotency)) {
+      if (!SHA256_PATTERN.test(key)) {
+        throw new ContentStoreError(500, "content_store_corrupt", "Content governance idempotency index is invalid");
+      }
+      validateGovernanceIdempotency(record);
+    }
+  }
   for (const [contentRef, records] of Object.entries(index.access)) {
     if (!CONTENT_REF_PATTERN.test(contentRef)
         || !Array.isArray(records)
@@ -254,11 +711,56 @@ function validateIndex(index) {
       throw new ContentStoreError(500, "content_store_corrupt", "Content idempotency index is invalid");
     }
   }
-  for (const key of ["streamsCreated", "chunksAccepted", "objectsFinalized", "streamsFailed"]) {
+  const stats = version === 1
+    ? ["streamsCreated", "chunksAccepted", "objectsFinalized", "streamsFailed"]
+    : [
+        "streamsCreated",
+        "chunksAccepted",
+        "objectsFinalized",
+        "streamsFailed",
+        "contentDeleted",
+        "metadataRedacted",
+        "exportsCreated",
+      ];
+  for (const key of stats) {
     if (!safeInteger(index.stats[key])) {
       throw new ContentStoreError(500, "content_store_corrupt", "Content store statistics are invalid");
     }
   }
+}
+
+function migrateV1(index) {
+  for (const [contentRef, object] of Object.entries(index.objects)) {
+    const stream = index.streams[object.streamId];
+    const startedAt = stream?.finalizedAt || object.createdAt;
+    object.contentRetentionExpiresAt = expiresAt(startedAt, object.retentionDays);
+    object.metadataRetentionExpiresAt = object.contentRetentionExpiresAt;
+    if (!CONTENT_REF_PATTERN.test(contentRef)) {
+      throw new ContentStoreError(500, "content_store_corrupt", "Content store index is invalid");
+    }
+  }
+  for (const stream of Object.values(index.streams)) {
+    if (stream.request?.collection
+        && stream.request.collection.metadataRetentionDays === undefined) {
+      stream.request.collection.metadataRetentionDays = stream.request.collection.retentionDays;
+    }
+    if (stream.status === "finalized"
+        && stream.contentRetentionExpiresAt === undefined) {
+      const retentionDays = stream.request.collection.retentionDays;
+      const metadataRetentionDays = stream.request.collection.metadataRetentionDays;
+      stream.contentRetentionExpiresAt = expiresAt(stream.finalizedAt, retentionDays);
+      stream.metadataRetentionExpiresAt = expiresAt(stream.finalizedAt, metadataRetentionDays);
+    }
+  }
+  index.version = STORE_VERSION;
+  index.legalHolds = {};
+  index.deletionProofs = {};
+  index.exports = {};
+  index.governanceIdempotency = {};
+  index.stats.contentDeleted = 0;
+  index.stats.metadataRedacted = 0;
+  index.stats.exportsCreated = 0;
+  return index;
 }
 
 async function writeFileAtomic(filePath, data, mode) {
@@ -293,6 +795,13 @@ export class ContentStore {
     this.objectsDirectory = path.join(this.directory, "objects");
     this.indexPath = path.join(this.directory, "index.json");
     this.key = Buffer.from(options.key);
+    if (options.proofSecret !== undefined
+        && (typeof options.proofSecret !== "string"
+          || options.proofSecret.length < 32
+          || options.proofSecret.length > 4096)) {
+      throw new Error("ContentStore proofSecret must be from 32 to 4096 characters");
+    }
+    this.proofSecret = options.proofSecret || "";
     this.now = options.now || Date.now;
     this.maxStreamBytes = options.maxStreamBytes ?? 1024 * 1024;
     this.index = null;
@@ -313,6 +822,7 @@ export class ContentStore {
     } catch (error) {
       if (error.code !== "ENOENT") throw error;
       this.index = emptyIndex();
+      await this.recoverStagingFiles();
       await this.persist();
       return;
     }
@@ -322,9 +832,21 @@ export class ContentStore {
     } catch {
       throw new ContentStoreError(500, "content_store_corrupt", "Content store index is not valid JSON");
     }
-    validateIndex(parsed);
-    this.index = parsed;
+    if (!isPlainObject(parsed)
+        || ![1, STORE_VERSION].includes(parsed.version)) {
+      throw new ContentStoreError(500, "content_store_corrupt", "Content store index is invalid");
+    }
     let changed = false;
+    if (parsed.version === 1) {
+      validateIndex(parsed, 1);
+      this.index = migrateV1(parsed);
+      validateIndex(this.index, STORE_VERSION, { proofSecret: this.proofSecret || undefined });
+      changed = true;
+    } else {
+      validateIndex(parsed, STORE_VERSION, { proofSecret: this.proofSecret || undefined });
+      this.index = parsed;
+    }
+    changed = await this.recoverStagingFiles() || changed;
     for (const stream of Object.values(this.index.streams)) {
       if (stream.status === "collecting") {
         stream.status = "failed";
@@ -335,6 +857,39 @@ export class ContentStore {
       }
     }
     if (changed) await this.persist();
+  }
+
+  async recoverStagingFiles() {
+    let changed = false;
+    const entries = await fs.readdir(this.objectsDirectory, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const match = STAGING_PATTERN.exec(entry.name);
+      if (!match) continue;
+      const [, contentRef, deletionId] = match;
+      const stagingPath = path.join(this.objectsDirectory, entry.name);
+      const object = this.index.objects[contentRef];
+      const proof = this.index.deletionProofs[deletionId];
+      if (!object || (proof && proof.contentRef !== contentRef)) {
+        await fs.unlink(stagingPath).catch(() => {});
+        changed = true;
+        continue;
+      }
+      const objectPath = path.join(this.objectsDirectory, object.objectFile);
+      try {
+        await fs.access(objectPath);
+        await fs.unlink(stagingPath);
+        changed = true;
+      } catch (error) {
+        if (error.code !== "ENOENT") throw error;
+        try {
+          await fs.rename(stagingPath, objectPath);
+        } catch (renameError) {
+          if (renameError.code !== "ENOENT") throw renameError;
+        }
+      }
+    }
+    return changed;
   }
 
   assertLoaded() {
@@ -410,6 +965,40 @@ export class ContentStore {
     const normalized = validateContentStreamId(streamId);
     const stream = this.index.streams[normalized];
     return stream ? this.clone(stream) : null;
+  }
+
+  async searchStreams(filters = {}, after = null, limit = 51) {
+    this.assertLoaded();
+    if (!safeInteger(limit, 1, 201)) {
+      throw new ContentStoreError(400, "invalid_content_query", "Content query limit is invalid");
+    }
+    const matches = (stream) => {
+      const request = stream.request || {};
+      return (!filters.userId || request.userId === filters.userId)
+        && (!filters.departmentId || request.departmentId === filters.departmentId)
+        && (!filters.deviceId || request.deviceId === filters.deviceId)
+        && (!filters.agentId || request.agentId === filters.agentId)
+        && (!filters.modelId || request.modelId === filters.modelId)
+        && (!filters.mcpServerId || request.mcpServerId === filters.mcpServerId)
+        && (!filters.toolName || request.toolName === filters.toolName)
+        && (!filters.contentKind || request.contentKind === filters.contentKind)
+        && (!filters.status || stream.status === filters.status)
+        && (!filters.from || stream.createdAt >= filters.from)
+        && (!filters.to || stream.createdAt <= filters.to);
+    };
+    return Object.values(this.index.streams)
+      .filter(matches)
+      .sort(compareStreamsDesc)
+      .filter((stream) => !after || stream.createdAt < after.createdAt
+        || (stream.createdAt === after.createdAt && stream.streamId < after.streamId))
+      .slice(0, limit)
+      .map((stream) => this.clone(stream));
+  }
+
+  async hasObject(contentRef) {
+    this.assertLoaded();
+    const normalized = validateContentRef(contentRef);
+    return Boolean(this.index.objects[normalized]);
   }
 
   async acceptChunk(streamId, sequence, chunkFingerprintSha256, idempotencyKey, byteLength) {
@@ -568,6 +1157,15 @@ export class ContentStore {
         redaction: summary,
         createdAt: now,
         retentionDays: stream.request.collection.retentionDays,
+        contentRetentionExpiresAt: expiresAt(
+          now,
+          stream.request.collection.retentionDays,
+        ),
+        metadataRetentionExpiresAt: expiresAt(
+          now,
+          stream.request.collection.metadataRetentionDays
+            ?? stream.request.collection.retentionDays,
+        ),
       };
       Object.assign(stream, {
         status: "finalized",
@@ -577,6 +1175,8 @@ export class ContentStore {
         bytes,
         updatedAt: now,
         finalizedAt: now,
+        contentRetentionExpiresAt: object.contentRetentionExpiresAt,
+        metadataRetentionExpiresAt: object.metadataRetentionExpiresAt,
       });
       delete stream.failureCode;
       this.index.objects[contentRef] = object;
@@ -639,15 +1239,28 @@ export class ContentStore {
       sourceHash: context.sourceHash,
       outcome,
       ...(errorCode ? { errorCode } : {}),
+      ...(context.grantId ? { grantId: context.grantId } : {}),
+      ...(context.adminId ? { adminId: context.adminId } : {}),
+      ...(context.organizationId ? { organizationId: context.organizationId } : {}),
+      ...(context.purpose ? { purpose: context.purpose } : {}),
+      ...(context.approvalId ? { approvalId: context.approvalId } : {}),
     };
     validateAccessRecord(record);
-    const records = this.index.access[contentRef] || [];
+    const existing = this.index.access[contentRef];
+    const records = existing ? existing.slice() : [];
+    if (existing) this.index.access[contentRef] = records;
+    else this.index.access[contentRef] = records;
     records.push(record);
     if (records.length > MAX_ACCESS_RECORDS) {
       records.splice(0, records.length - MAX_ACCESS_RECORDS);
     }
-    this.index.access[contentRef] = records;
-    await this.persist();
+    try {
+      await this.persist();
+    } catch (error) {
+      if (existing) this.index.access[contentRef] = existing;
+      else delete this.index.access[contentRef];
+      throw error;
+    }
     return this.clone(record);
   }
 
@@ -657,7 +1270,13 @@ export class ContentStore {
         || context.reason.length < 8
         || !AUTHORIZATION_ID_PATTERN.test(context.authorizationId || "")
         || !requiredString(context.requestId, 136)
-        || !SOURCE_HASH_PATTERN.test(context.sourceHash || "")) {
+        || !SOURCE_HASH_PATTERN.test(context.sourceHash || "")
+        || (context.grantId !== undefined && !GRANT_ID_PATTERN.test(context.grantId))
+        || (context.adminId !== undefined && !SAFE_ID_PATTERN.test(context.adminId))
+        || (context.organizationId !== undefined && !SAFE_ID_PATTERN.test(context.organizationId))
+        || (context.purpose !== undefined && !PURPOSE_PATTERN.test(context.purpose))
+        || (context.approvalId !== undefined
+          && !AUTHORIZATION_ID_PATTERN.test(context.approvalId))) {
       throw new ContentStoreError(400, "invalid_content_access", "Content access context is invalid");
     }
   }
@@ -735,6 +1354,39 @@ export class ContentStore {
       .slice(0, limit));
   }
 
+  async redactStreamMetadata(streamId, redactedAt = this.timestamp(), guard = null) {
+    return this.withMutation(async () => {
+      const normalized = validateContentStreamId(streamId);
+      const stream = this.index.streams[normalized];
+      if (!stream) {
+        throw new ContentStoreError(404, "content_stream_not_found", "Content stream not found");
+      }
+      if (stream.status !== "deleted") {
+        throw new ContentStoreError(409, "content_object_not_deleted", "Content must be deleted before metadata redaction");
+      }
+      if (stream.metadataRedactedAt) {
+        return { stream: this.clone(stream), redacted: false };
+      }
+      if (guard) guard(this.clone(stream));
+      if (!requiredString(redactedAt, 64)) {
+        throw new ContentStoreError(400, "invalid_content_governance_request", "Metadata redaction time is invalid");
+      }
+      const previous = this.clone(stream);
+      stream.request = redactedRequest(stream.request);
+      stream.metadataRedactedAt = redactedAt;
+      stream.updatedAt = redactedAt;
+      this.index.stats.metadataRedacted += 1;
+      try {
+        await this.persist();
+      } catch (error) {
+        this.index.streams[normalized] = previous;
+        this.index.stats.metadataRedacted -= 1;
+        throw error;
+      }
+      return { stream: this.clone(stream), redacted: true };
+    });
+  }
+
   async status() {
     this.assertLoaded();
     return {
@@ -744,6 +1396,9 @@ export class ContentStore {
       collecting: Object.values(this.index.streams)
         .filter((stream) => stream.status === "collecting").length,
       stats: this.clone(this.index.stats),
+      legalHolds: Object.keys(this.index.legalHolds).length,
+      deletionProofs: Object.keys(this.index.deletionProofs).length,
+      exports: Object.keys(this.index.exports).length,
     };
   }
 

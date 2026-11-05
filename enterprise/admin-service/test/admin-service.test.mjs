@@ -54,6 +54,32 @@ const RESOURCE_PLATFORM_ID = `res_${"a".repeat(16)}`;
 const RESOURCE_SALES_ID = `res_${"b".repeat(16)}`;
 const RESOURCE_GLOBAL_ID = `res_${"c".repeat(16)}`;
 const RELEASE_PLATFORM_ID = `rel_${"a".repeat(16)}`;
+const CONTENT_REF = `ct_${"a".repeat(43)}`;
+const CONTENT_STREAM_ID = `str_${"b".repeat(43)}`;
+const CONTENT_DELETION_ID = `del_${"c".repeat(43)}`;
+const CONTENT_HOLD_ID = `hld_${"d".repeat(43)}`;
+const CONTENT_UPSTREAM_EXPORT_ID = `exp_${"e".repeat(43)}`;
+const CONTENT_GRANT = `${"grant".repeat(6)}.${"f".repeat(43)}`;
+const CONTENT_UPSTREAM_EXPORT_TOKEN = `${"export".repeat(5)}.${"g".repeat(43)}`;
+const TEST_CONTENT_ADMIN_TOKEN = [
+  "admin",
+  "test",
+  "audit",
+  "content",
+  "admin",
+  "fixture",
+  "material",
+].join("-");
+const TEST_CONTENT_GOVERNANCE_TOKEN = [
+  "admin",
+  "test",
+  "audit",
+  "content",
+  "governance",
+  "fixture",
+  "material",
+].join("-");
+const TEST_CONTENT_EXPORT_KEY = "7".repeat(64);
 
 function adminConfigEnv(overrides = {}) {
   return {
@@ -75,6 +101,17 @@ function adminConfigEnv(overrides = {}) {
     ADMIN_STEP_UP_AUTH_TIME_MAX_AGE_SECONDS: "120",
     ...overrides,
   };
+}
+
+function auditContentConfigEnv(overrides = {}) {
+  return adminConfigEnv({
+    ADMIN_AUDIT_CONTENT_SERVICE_URL: "https://audit-content.corp.example",
+    ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN: TEST_CONTENT_ADMIN_TOKEN,
+    ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: TEST_CONTENT_GOVERNANCE_TOKEN,
+    ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID: "org-enterprise",
+    ADMIN_AUDIT_CONTENT_EXPORT_KEY: TEST_CONTENT_EXPORT_KEY,
+    ...overrides,
+  });
 }
 
 function listen(server, host = "127.0.0.1") {
@@ -982,11 +1019,207 @@ function createMockResourceService(expectedToken) {
   };
 }
 
+function createFakeAuditContentService() {
+  const future = new Date(Date.now() + 3600 * 1000).toISOString();
+  const state = {
+    failRead: false,
+    streamLists: [],
+    issues: [],
+    reads: [],
+    retention: [],
+    deletions: [],
+    holds: [],
+    exports: [],
+    downloads: [],
+  };
+  const stream = {
+    streamId: CONTENT_STREAM_ID,
+    contentRef: CONTENT_REF,
+    userId: "usr_alice",
+    departmentId: "org-platform",
+    status: "retained",
+    content: "STREAM-BODY-MUST-NOT-LEAK",
+    grant: "STREAM-GRANT-MUST-NOT-LEAK",
+    downloadToken: "STREAM-DOWNLOAD-TOKEN-MUST-NOT-LEAK",
+    ciphertext: "STREAM-CIPHERTEXT-MUST-NOT-LEAK",
+    nested: {
+      payload: "STREAM-PAYLOAD-MUST-NOT-LEAK",
+      safeCount: 2,
+    },
+  };
+  const deletion = {
+    deletionId: CONTENT_DELETION_ID,
+    contentRef: CONTENT_REF,
+    streamId: CONTENT_STREAM_ID,
+    deletedAt: "2026-10-30T00:00:00.000Z",
+    plaintextSha256: "1".repeat(64),
+    objectBytes: 4096,
+    retentionExpiresAt: new Date(Date.now() + 30 * 86400000).toISOString(),
+    actorType: "manual",
+    actorId: "adm_test",
+    organizationId: "org-enterprise",
+    requestId: "req_content_delete_1",
+    reason: "Delete content after an approved investigation",
+    approvalId: "apr_content_delete",
+    policyVersion: "CONTENT-RETENTION-v1",
+  };
+  const hold = {
+    holdId: CONTENT_HOLD_ID,
+    scope: { userId: "usr_alice" },
+    reason: "Preserve content for an active legal matter",
+    approvalId: "apr_content_hold",
+    custodianId: "legal@corp.example",
+    startsAt: "2026-10-01T00:00:00.000Z",
+    expiresAt: "2027-10-01T00:00:00.000Z",
+    createdAt: "2026-11-03T00:00:00.000Z",
+    createdBy: "admin@corp.example",
+    organizationId: "org-enterprise",
+    status: "active",
+    effectiveStatus: "active",
+  };
+  return {
+    enabled: true,
+    state,
+    async listStreams(identity, query) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(query.userId, "usr_alice");
+      state.streamLists.push({ identity: structuredClone(identity), query: structuredClone(query) });
+      return { streams: [structuredClone(stream)], nextCursor: "cursor_content_1" };
+    },
+    async getStream(identity, streamId) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(streamId, CONTENT_STREAM_ID);
+      return structuredClone(stream);
+    },
+    async issueGrant(identity, contentRef, body) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(contentRef, CONTENT_REF);
+      state.issues.push({ identity: structuredClone(identity), body: structuredClone(body) });
+      return {
+        grant: CONTENT_GRANT,
+        grantId: `grt_${"h".repeat(43)}`,
+        contentRef,
+        issuedAt: new Date().toISOString(),
+        expiresAt: future,
+      };
+    },
+    async readContent(identity, contentRef, grant) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(contentRef, CONTENT_REF);
+      assert.equal(grant, CONTENT_GRANT);
+      if (state.failRead) throw new Error("fixture read failure");
+      state.reads.push({ identity: structuredClone(identity), contentRef, grant });
+      return {
+        contentRef,
+        streamId: CONTENT_STREAM_ID,
+        content: "CONTENT-BODY-ONLY-ONCE",
+        mediaType: "text/plain",
+        auditLevel: "L2",
+        requestId: "req_content_read_1",
+        sessionId: "ses_content_read_1",
+      };
+    },
+    async runRetention(identity, body) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      state.retention.push(structuredClone(body));
+      return {
+        dryRun: body.dryRun === true,
+        scanned: 4,
+        contentDeleted: 1,
+        metadataRedacted: 1,
+        skippedLegalHold: 0,
+        exportsExpired: 0,
+        errors: 0,
+      };
+    },
+    async deleteContent(identity, contentRef, body, idempotencyKey) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(contentRef, CONTENT_REF);
+      assert.ok(idempotencyKey);
+      state.deletions.push({ contentRef, body: structuredClone(body) });
+      return { duplicate: false, deletion: structuredClone(deletion) };
+    },
+    async listDeletions(identity, query) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(query.contentRef, CONTENT_REF);
+      return [structuredClone(deletion)];
+    },
+    async getDeletion(identity, deletionId) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(deletionId, CONTENT_DELETION_ID);
+      return structuredClone(deletion);
+    },
+    async verifyDeletion(identity, deletionId) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(deletionId, CONTENT_DELETION_ID);
+      return {
+        valid: true,
+        deletionId,
+        contentRef: CONTENT_REF,
+        deletedAt: deletion.deletedAt,
+        proofDigest: "2".repeat(64),
+      };
+    },
+    async createLegalHold(identity, body, idempotencyKey) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.ok(idempotencyKey);
+      state.holds.push(structuredClone(body));
+      return { duplicate: false, hold: structuredClone(hold) };
+    },
+    async listLegalHolds(identity, query) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(query.effectiveStatus, "active");
+      return [structuredClone(hold)];
+    },
+    async releaseLegalHold(identity, holdId, body) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(holdId, CONTENT_HOLD_ID);
+      return {
+        ...structuredClone(hold),
+        status: "released",
+        effectiveStatus: "released",
+        releasedAt: new Date().toISOString(),
+        releasedBy: "admin@corp.example",
+        releaseReason: body.reason,
+        releaseApprovalId: body.approvalId,
+      };
+    },
+    async createExport(identity, body, idempotencyKey) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.ok(idempotencyKey);
+      state.exports.push(structuredClone(body));
+      return {
+        duplicate: false,
+        export: {
+          exportId: CONTENT_UPSTREAM_EXPORT_ID,
+          objectCount: 2,
+          expiresAt: future,
+        },
+        token: CONTENT_UPSTREAM_EXPORT_TOKEN,
+      };
+    },
+    async downloadExport(identity, exportId, token) {
+      assert.match(identity.adminId, /^adm_[a-f0-9]{24}$/);
+      assert.equal(exportId, CONTENT_UPSTREAM_EXPORT_ID);
+      assert.equal(token, CONTENT_UPSTREAM_EXPORT_TOKEN);
+      state.downloads.push({ exportId, token });
+      return {
+        bytes: Buffer.from("UPSTREAM-AUDIT-EXPORT-CONTENT", "utf8"),
+        contentType: "application/octet-stream",
+        watermark: "fixture",
+        requestId: "req_content_export_1",
+        receivedAt: new Date().toISOString(),
+      };
+    },
+  };
+}
+
 async function fixture(options = {}) {
   const temp = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-admin-test-"));
   let oidc = null;
   let auth = null;
   let resource = null;
+  let auditContent = null;
   let admin = null;
   try {
     const usagePath = path.join(temp, "usage.jsonl");
@@ -1005,6 +1238,10 @@ async function fixture(options = {}) {
     if (resourceEnabled) {
       resource = createMockResourceService(TEST_RESOURCE_SERVICE_TOKEN);
       resourceBase = await listen(resource.server);
+    }
+    const auditContentEnabled = options.auditContentEnabled === true;
+    if (auditContentEnabled) {
+      auditContent = options.auditContentService || createFakeAuditContentService();
     }
     const callbackDisabled = options.callbackEnabled === false;
     const callbackSecret = options.callbackSecret !== undefined
@@ -1058,6 +1295,16 @@ async function fixture(options = {}) {
           ADMIN_RESOURCE_SERVICE_TIMEOUT_MS: "1000",
         }
         : {}),
+      ...(auditContentEnabled
+        ? {
+          ADMIN_AUDIT_CONTENT_SERVICE_URL: "https://audit-content.corp.example",
+          ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN: TEST_CONTENT_ADMIN_TOKEN,
+          ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: TEST_CONTENT_GOVERNANCE_TOKEN,
+          ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID: "org-enterprise",
+          ADMIN_AUDIT_CONTENT_EXPORT_KEY: TEST_CONTENT_EXPORT_KEY,
+          ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS: "1000",
+        }
+        : {}),
       ADMIN_APPROVAL_CALLBACK_SECRET: callbackSecret,
       ADMIN_APPROVAL_CALLBACK_ISSUER: callbackIssuer,
       ADMIN_APPROVAL_CALLBACK_AUDIENCE: callbackAudience,
@@ -1085,7 +1332,10 @@ async function fixture(options = {}) {
       ADMIN_NOTIFICATION_HTTP_MAX_RESPONSE_BYTES: "65536",
       ADMIN_NOTIFICATION_HTTP_MAX_REDIRECTS: "3",
     });
-    admin = await createEnterpriseAdminServer(config, options.adminServerOptions || {});
+    admin = await createEnterpriseAdminServer(config, {
+      ...(options.adminServerOptions || {}),
+      ...(auditContent ? { auditContentService: auditContent } : {}),
+    });
     const base = await listen(admin.server);
     config.publicUrl = base;
     config.oidc.redirectUri = `${base}/admin/oauth/callback`;
@@ -1097,6 +1347,7 @@ async function fixture(options = {}) {
       oidc,
       auth,
       resource,
+      auditContent,
       config,
       admin,
       base,
@@ -1109,6 +1360,8 @@ async function fixture(options = {}) {
         accessToken: MOCK_ACCESS_TOKEN,
         serviceToken,
         resourceServiceToken: TEST_RESOURCE_SERVICE_TOKEN,
+        contentAdminToken: TEST_CONTENT_ADMIN_TOKEN,
+        contentGovernanceToken: TEST_CONTENT_GOVERNANCE_TOKEN,
         sessionSecret: config.sessionSecret,
         callbackSecret,
       },
@@ -1599,6 +1852,74 @@ function adminPatch(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
   return adminRequest(f, jar, "PATCH", pathname, body, csrfToken, extraHeaders);
 }
 
+function adminDelete(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
+  return adminRequest(f, jar, "DELETE", pathname, body, csrfToken, extraHeaders);
+}
+
+async function adminContentPost(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
+  const response = await fetch(`${f.base}${pathname}`, {
+    method: "POST",
+    headers: {
+      cookie: jar.header(),
+      origin: f.base,
+      "content-type": "application/json",
+      ...(csrfToken ? { "x-csrf-token": csrfToken } : {}),
+      ...extraHeaders,
+    },
+    body: JSON.stringify(body),
+  });
+  const contentType = String(response.headers.get("content-type") || "");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return {
+    response,
+    bytes,
+    body: contentType.includes("application/json")
+      ? JSON.parse(new TextDecoder().decode(bytes))
+      : new TextDecoder().decode(bytes),
+  };
+}
+
+async function adminContentDelete(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
+  const response = await fetch(`${f.base}${pathname}`, {
+    method: "DELETE",
+    headers: {
+      cookie: jar.header(),
+      origin: f.base,
+      "content-type": "application/json",
+      ...(csrfToken ? { "x-csrf-token": csrfToken } : {}),
+      ...extraHeaders,
+    },
+    body: JSON.stringify(body),
+  });
+  const contentType = String(response.headers.get("content-type") || "");
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  return {
+    response,
+    bytes,
+    body: contentType.includes("application/json")
+      ? JSON.parse(new TextDecoder().decode(bytes))
+      : new TextDecoder().decode(bytes),
+  };
+}
+
+async function contentDownload(f, jar, pathname, token = "") {
+  const response = await fetch(`${f.base}${pathname}`, {
+    headers: {
+      ...(jar ? { cookie: jar.header() } : {}),
+      ...(token ? { "x-magpie-download-token": token } : {}),
+    },
+  });
+  const bytes = new Uint8Array(await response.arrayBuffer());
+  const contentType = String(response.headers.get("content-type") || "");
+  return {
+    response,
+    bytes,
+    body: contentType.includes("application/json")
+      ? JSON.parse(new TextDecoder().decode(bytes))
+      : new TextDecoder().decode(bytes),
+  };
+}
+
 async function downloadExport(f, jar, pathname, token, headers = {}) {
   const response = await fetch(`${f.base}${pathname}`, {
     headers: {
@@ -1614,7 +1935,7 @@ async function downloadExport(f, jar, pathname, token, headers = {}) {
   };
 }
 
-function assertNoWriteSecrets(value, f, jar) {
+function assertNoWriteSecrets(value, f, jar, options = {}) {
   const serialized = JSON.stringify(value);
   for (const forbidden of [
     "should-not-leak-gateway-key",
@@ -1628,8 +1949,21 @@ function assertNoWriteSecrets(value, f, jar) {
     "sk-magpie-issued-",
     "mdev_",
     "tokenHash",
+    CONTENT_GRANT,
+    CONTENT_UPSTREAM_EXPORT_TOKEN,
+    TEST_CONTENT_ADMIN_TOKEN,
+    TEST_CONTENT_GOVERNANCE_TOKEN,
+    "CONTENT-BODY-ONLY-ONCE",
+    "UPSTREAM-AUDIT-EXPORT-CONTENT",
+    "STREAM-BODY-MUST-NOT-LEAK",
+    "STREAM-GRANT-MUST-NOT-LEAK",
+    "STREAM-DOWNLOAD-TOKEN-MUST-NOT-LEAK",
+    "STREAM-CIPHERTEXT-MUST-NOT-LEAK",
+    "STREAM-PAYLOAD-MUST-NOT-LEAK",
     f.secrets.serviceToken,
     ...(f.secrets.resourceServiceToken ? [f.secrets.resourceServiceToken] : []),
+    ...(f.secrets.contentAdminToken ? [f.secrets.contentAdminToken] : []),
+    ...(f.secrets.contentGovernanceToken ? [f.secrets.contentGovernanceToken] : []),
     f.secrets.oidcClientSecret,
     f.secrets.accessToken,
     ...(f.secrets.stepUpOidcClientSecret ? [f.secrets.stepUpOidcClientSecret] : []),
@@ -1637,6 +1971,7 @@ function assertNoWriteSecrets(value, f, jar) {
     jar.cookies.get(f.config.sessionCookieName) || "__no_cookie__",
     jar.cookies.get(f.config.stepUpCookieName) || "__no_step_up_cookie__",
   ]) {
+    if (forbidden === "tokenHash" && options.allowTokenHash === true) continue;
     assert.ok(!serialized.includes(forbidden), `response must not contain ${forbidden}`);
   }
 }
@@ -8141,6 +8476,135 @@ test("M3-C-2 configuration requires the resource service URL and token together"
   );
 });
 
+test("M4-E audit content configuration is all-or-nothing and validates boundaries", () => {
+  const boundaries = loadConfig(auditContentConfigEnv({
+    ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS: "500",
+    ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES: "16384",
+    ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES: "65536",
+  }));
+  assert.equal(boundaries.auditContentService.enabled, true);
+  assert.equal(boundaries.auditContentService.timeoutMs, 500);
+  assert.equal(boundaries.auditContentService.maxResponseBytes, 16384);
+  assert.equal(boundaries.auditContentService.maxExportBytes, 65536);
+  assert.equal(boundaries.auditContentService.exportKey.length, 32);
+
+  const upper = loadConfig(auditContentConfigEnv({
+    ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS: "30000",
+    ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES: "33554432",
+    ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES: "134217728",
+  }));
+  assert.equal(upper.auditContentService.timeoutMs, 30000);
+  assert.equal(upper.auditContentService.maxResponseBytes, 33554432);
+  assert.equal(upper.auditContentService.maxExportBytes, 134217728);
+
+  const disabled = loadConfig(adminConfigEnv());
+  assert.equal(disabled.auditContentService.enabled, false);
+  assert.equal(disabled.auditContentService.url, "");
+  assert.equal(disabled.auditContentService.adminToken, "");
+  assert.equal(disabled.auditContentService.governanceToken, "");
+  assert.equal(disabled.auditContentService.organizationId, "");
+  assert.equal(disabled.auditContentService.exportKey.length, 0);
+
+  const requiredNames = [
+    "ADMIN_AUDIT_CONTENT_SERVICE_URL",
+    "ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN",
+    "ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN",
+    "ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID",
+    "ADMIN_AUDIT_CONTENT_EXPORT_KEY",
+  ];
+  for (const name of requiredNames) {
+    assert.throws(
+      () => loadConfig(auditContentConfigEnv({ [name]: "" })),
+      /ADMIN_AUDIT_CONTENT_SERVICE_URL, ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN, .* are required together/,
+      `${name} must be part of the all-or-nothing configuration`,
+    );
+  }
+
+  assert.throws(
+    () => loadConfig(auditContentConfigEnv({
+      ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN: "short",
+    })),
+    /ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN must be at least 32 characters/,
+  );
+  assert.throws(
+    () => loadConfig(auditContentConfigEnv({
+      ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: "short",
+    })),
+    /ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN must be at least 32 characters/,
+  );
+  assert.throws(
+    () => loadConfig(auditContentConfigEnv({
+      ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: TEST_CONTENT_ADMIN_TOKEN,
+    })),
+    /ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN and ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN must differ/,
+  );
+
+  assert.throws(
+    () => loadConfig(auditContentConfigEnv({
+      ADMIN_AUDIT_CONTENT_SERVICE_URL: "not-a-url",
+    })),
+    /ADMIN_AUDIT_CONTENT_SERVICE_URL must be an absolute URL/,
+  );
+  assert.throws(
+    () => loadConfig(auditContentConfigEnv({
+      ADMIN_AUDIT_CONTENT_SERVICE_URL: "ftp://audit-content.corp.example",
+    })),
+    /ADMIN_AUDIT_CONTENT_SERVICE_URL must use http or https/,
+  );
+  assert.throws(
+    () => loadConfig(auditContentConfigEnv({
+      ADMIN_AUDIT_CONTENT_SERVICE_URL:
+        "https://user:pass@audit-content.corp.example",
+    })),
+    /ADMIN_AUDIT_CONTENT_SERVICE_URL must not contain credentials/,
+  );
+
+  for (const organizationId of ["-org", "org name", "org/name", "a".repeat(129)]) {
+    assert.throws(
+      () => loadConfig(auditContentConfigEnv({
+        ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID: organizationId,
+      })),
+      /ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID is invalid/,
+    );
+  }
+
+  for (const exportKey of [
+    "7".repeat(63),
+    Buffer.alloc(31).toString("hex"),
+    Buffer.alloc(32).toString("base64").replace(/=+$/, ""),
+  ]) {
+    assert.throws(
+      () => loadConfig(auditContentConfigEnv({
+        ADMIN_AUDIT_CONTENT_EXPORT_KEY: exportKey,
+      })),
+      /ADMIN_AUDIT_CONTENT_EXPORT_KEY must be 32-byte base64 or hex/,
+    );
+  }
+
+  for (const [name, invalid, expected] of [
+    [
+      "ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS",
+      "499",
+      /ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS must be an integer from 500 to 30000/,
+    ],
+    [
+      "ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES",
+      "16383",
+      /ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES must be an integer from 16384 to 33554432/,
+    ],
+    [
+      "ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES",
+      "65535",
+      /ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES must be an integer from 65536 to 134217728/,
+    ],
+  ]) {
+    assert.throws(
+      () => loadConfig(auditContentConfigEnv({ [name]: invalid })),
+      expected,
+    );
+  }
+});
+
 test("M3-C-2 resource and sync APIs project only allowlisted scoped metadata", {
   timeout: 30000,
 }, async (t) => {
@@ -8409,6 +8873,646 @@ test("M3-C-2 admin UI exposes scoped resource and sync panels without inline scr
   assert.ok(deniedHtml.includes("Resources and client sync"));
   assert.ok(!deniedHtml.includes('id="resource-sync-filter"'));
   assert.ok(!deniedHtml.includes('id="resource-list"'));
+  assert.ok(!/<script(?![^>]*\bsrc=)/i.test(deniedHtml));
+});
+
+test("M4-E content governance fails closed without configuration, role, scope, CSRF, step-up, or break-glass", {
+  timeout: 30000,
+}, async (t) => {
+  const disabled = await fixture();
+  t.after(() => disabled.close());
+  const unavailable = await adminGet(
+    disabled,
+    new CookieJar(),
+    "/api/v1/admin/audit/content/streams",
+  );
+  assert.equal(unavailable.response.status, 503);
+  assert.equal(unavailable.body.error.code, "audit_content_unavailable");
+
+  const f = await fixture({ auditContentEnabled: true });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const anonymous = await adminGet(
+    f,
+    new CookieJar(),
+    "/api/v1/admin/audit/content/streams",
+  );
+  assert.equal(anonymous.response.status, 401);
+  assert.equal(anonymous.body.error.code, "not_signed_in");
+
+  const jar = await adminLogin(f);
+  let current = await me(f, jar);
+  const listed = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/streams?userId=usr_alice`,
+  );
+  assert.equal(listed.response.status, 200, JSON.stringify(listed.body));
+  assert.equal(listed.body.streams.length, 1);
+  assert.equal(listed.body.streams[0].streamId, CONTENT_STREAM_ID);
+  assertNoWriteSecrets(listed.body, f, jar);
+
+  const breakGlass = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    { breakGlassId: "bgr_content_not_allowed" },
+    current.body.csrfToken,
+    { "idempotency-key": "content-break-glass-denied" },
+  );
+  assert.equal(breakGlass.response.status, 403);
+  assert.equal(breakGlass.body.error.code, "content_break_glass_forbidden");
+
+  const mismatchedTarget = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    { contentRef: `ct_${"z".repeat(43)}` },
+    current.body.csrfToken,
+    { "idempotency-key": "content-target-mismatch" },
+  );
+  assert.equal(mismatchedTarget.response.status, 400);
+  assert.equal(mismatchedTarget.body.error.code, "invalid_content_target");
+
+  await bindRole(f, current.body.user.id, "security_admin", "*");
+  const roleDenied = await adminContentPost(
+    f,
+    jar,
+    "/api/v1/admin/audit/content/retention/run",
+    { dryRun: true, limit: 10, reason: "Run approved content retention" },
+    current.body.csrfToken,
+    { "idempotency-key": "content-role-denied" },
+  );
+  assert.equal(roleDenied.response.status, 403);
+  assert.equal(roleDenied.body.error.code, "forbidden_role");
+
+  await bindRole(f, current.body.user.id, "super_admin", "org-platform");
+  const scopeDenied = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/streams?userId=usr_alice`,
+  );
+  assert.equal(scopeDenied.response.status, 403);
+  assert.equal(scopeDenied.body.error.code, "forbidden_scope");
+
+  await bindRole(f, current.body.user.id, "super_admin", "*");
+  if (f.stepUpEnabled) await stepUp(f, jar);
+  const approver = await independentApprover(f, { role: "super_admin" });
+  const reason = "Investigate an approved security incident";
+  const approval = await requestApproval(f, jar, current, {
+    action: "audit.content.read_request",
+    contentRef: CONTENT_REF,
+    purpose: "security_investigation",
+    reason,
+  });
+  await decideApproval(f, approver, approval.approvalId);
+
+  const missingCsrf = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    {
+      contentRef: CONTENT_REF,
+      purpose: "security_investigation",
+      reason,
+      approvalId: approval.approvalId,
+    },
+    "",
+    { "idempotency-key": "content-read-missing-csrf" },
+  );
+  assert.equal(missingCsrf.response.status, 403);
+  assert.equal(missingCsrf.body.error.code, "csrf_invalid");
+
+  const noStepUpJar = await adminLogin(f, new CookieJar(), undefined, {
+    stepUp: false,
+  });
+  const noStepUpCurrent = await me(f, noStepUpJar);
+  const missingStepUp = await adminContentPost(
+    f,
+    noStepUpJar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    {
+      contentRef: CONTENT_REF,
+      purpose: "security_investigation",
+      reason,
+      approvalId: approval.approvalId,
+    },
+    noStepUpCurrent.body.csrfToken,
+    { "idempotency-key": "content-read-missing-step-up" },
+  );
+  assert.equal(missingStepUp.response.status, 403);
+  assert.equal(missingStepUp.body.error.code, "step_up_required");
+
+  f.auditContent.state.failRead = true;
+  const failedReadBody = {
+    contentRef: CONTENT_REF,
+    purpose: "security_investigation",
+    reason,
+    approvalId: approval.approvalId,
+  };
+  const failedRead = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    failedReadBody,
+    current.body.csrfToken,
+    { "idempotency-key": "content-read-provider-failure" },
+  );
+  assert.equal(failedRead.response.status, 503);
+  assert.equal(failedRead.body.error.code, "audit_content_unavailable");
+
+  const failedData = await readAdminData(f);
+  assert.equal(
+    failedData.approvalRequests[approval.approvalId].status,
+    "consumed",
+  );
+  const failedRequest = Object.values(failedData.adminContentReadRequests)
+    .find((request) => request.approvalId === approval.approvalId);
+  assert.equal(failedRequest.status, "failed");
+  const failedAudit = failedData.adminAuditLogs.find((record) => (
+    record.action === "audit.content.read_request"
+      && record.approvalId === approval.approvalId
+      && record.phase === "result"
+  ));
+  assert.equal(failedAudit.result, "failed");
+  assert.equal(failedAudit.errorCode, "audit_content_unavailable");
+
+  const consumedApproval = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    failedReadBody,
+    current.body.csrfToken,
+    { "idempotency-key": "content-read-consumed-approval" },
+  );
+  assert.equal(consumedApproval.response.status, 409);
+  assert.equal(consumedApproval.body.error.code, "approval_consumed");
+});
+
+test("M4-E content governance completes approved reads, retention, deletion, holds, and one-time exports", {
+  timeout: 60000,
+}, async (t) => {
+  const f = await fixture({ auditContentEnabled: true });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const approver = await independentApprover(f, { role: "super_admin" });
+  const approveContent = async (body) => {
+    const approval = await requestApproval(f, jar, current, body);
+    await decideApproval(f, approver, approval.approvalId);
+    return approval;
+  };
+
+  const streamList = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/streams?userId=usr_alice`,
+  );
+  assert.equal(streamList.response.status, 200, JSON.stringify(streamList.body));
+  assertNoWriteSecrets(streamList.body, f, jar);
+
+  const streamDetail = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/streams/${CONTENT_STREAM_ID}`,
+  );
+  assert.equal(streamDetail.response.status, 200, JSON.stringify(streamDetail.body));
+  assertNoWriteSecrets(streamDetail.body, f, jar);
+
+  const deletions = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/deletions?contentRef=${CONTENT_REF}`,
+  );
+  assert.equal(deletions.response.status, 200, JSON.stringify(deletions.body));
+  assert.equal(deletions.body.deletions.length, 1);
+  assertNoWriteSecrets(deletions.body, f, jar);
+
+  const deletion = await adminGet(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/deletions/${CONTENT_DELETION_ID}`,
+  );
+  assert.equal(deletion.response.status, 200, JSON.stringify(deletion.body));
+  assertNoWriteSecrets(deletion.body, f, jar);
+
+  const verification = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/deletions/${CONTENT_DELETION_ID}/verify`,
+    {},
+    current.body.csrfToken,
+  );
+  assert.equal(verification.response.status, 200, JSON.stringify(verification.body));
+  assert.equal(verification.body.verification.valid, true);
+  assertNoWriteSecrets(verification.body, f, jar);
+
+  const holds = await adminGet(
+    f,
+    jar,
+    "/api/v1/admin/audit/content/legal-holds?effectiveStatus=active",
+  );
+  assert.equal(holds.response.status, 200, JSON.stringify(holds.body));
+  assert.equal(holds.body.holds.length, 1);
+  assertNoWriteSecrets(holds.body, f, jar);
+
+  const readReason = "Investigate an approved security incident";
+  const readApproval = await approveContent({
+    action: "audit.content.read_request",
+    contentRef: CONTENT_REF,
+    purpose: "security_investigation",
+    ttlSeconds: 60,
+    reason: readReason,
+  });
+  const readBody = {
+    contentRef: CONTENT_REF,
+    purpose: "security_investigation",
+    ttlSeconds: 60,
+    reason: readReason,
+    approvalId: readApproval.approvalId,
+  };
+  const readKey = "content-read-success";
+  const read = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    readBody,
+    current.body.csrfToken,
+    { "idempotency-key": readKey },
+  );
+  assert.equal(read.response.status, 200, JSON.stringify(read.body));
+  assert.match(String(read.response.headers.get("content-type")), /^text\/plain/);
+  assert.equal(read.body, "CONTENT-BODY-ONLY-ONCE");
+
+  const idempotencyConflict = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    { ...readBody, reason: "Attempt a different read with the same key" },
+    current.body.csrfToken,
+    { "idempotency-key": readKey },
+  );
+  assert.equal(idempotencyConflict.response.status, 409);
+  assert.equal(idempotencyConflict.body.error.code, "idempotency_conflict");
+
+  const replayedRead = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    readBody,
+    current.body.csrfToken,
+    { "idempotency-key": readKey },
+  );
+  assert.equal(replayedRead.response.status, 409);
+  assert.equal(replayedRead.body.error.code, "content_read_replayed");
+
+  const reusedReadApproval = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}/read`,
+    readBody,
+    current.body.csrfToken,
+    { "idempotency-key": "content-read-reused-approval" },
+  );
+  assert.equal(reusedReadApproval.response.status, 409);
+  assert.equal(reusedReadApproval.body.error.code, "approval_consumed");
+
+  const retentionReason = "Run approved content retention";
+  const retentionApproval = await approveContent({
+    action: "audit.content.retention.run",
+    dryRun: true,
+    limit: 10,
+    reason: retentionReason,
+  });
+  const retention = await adminContentPost(
+    f,
+    jar,
+    "/api/v1/admin/audit/content/retention/run",
+    {
+      dryRun: true,
+      limit: 10,
+      reason: retentionReason,
+      approvalId: retentionApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "content-retention-success" },
+  );
+  assert.equal(retention.response.status, 200, JSON.stringify(retention.body));
+  assert.equal(retention.body.summary.scanned, 4);
+  assertNoWriteSecrets(retention.body, f, jar);
+
+  const deleteReason = "Delete content after an approved investigation";
+  const deleteApproval = await approveContent({
+    action: "audit.content.delete",
+    contentRef: CONTENT_REF,
+    force: false,
+    reason: deleteReason,
+  });
+  const deleteBody = {
+    contentRef: CONTENT_REF,
+    force: false,
+    reason: deleteReason,
+    approvalId: deleteApproval.approvalId,
+  };
+  const deleteKey = "content-delete-success";
+  const deleted = await adminContentDelete(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}`,
+    deleteBody,
+    current.body.csrfToken,
+    { "idempotency-key": deleteKey },
+  );
+  assert.equal(deleted.response.status, 200, JSON.stringify(deleted.body));
+  assert.equal(deleted.body.deletion.deletionId, CONTENT_DELETION_ID);
+  assertNoWriteSecrets(deleted.body, f, jar);
+
+  const deleteReplay = await adminContentDelete(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/${CONTENT_REF}`,
+    deleteBody,
+    current.body.csrfToken,
+    { "idempotency-key": deleteKey },
+  );
+  assert.equal(deleteReplay.response.status, 200, JSON.stringify(deleteReplay.body));
+  assert.equal(deleteReplay.body.replayed, true);
+
+  const holdBody = {
+    scope: { userId: "usr_alice" },
+    custodianId: "legal@corp.example",
+    expiresAt: new Date(Date.now() + 365 * 86400000).toISOString(),
+  };
+  const holdReason = "Preserve content for an active legal matter";
+  const holdApproval = await approveContent({
+    action: "audit.content.legal_hold.create",
+    ...holdBody,
+    reason: holdReason,
+  });
+  const hold = await adminContentPost(
+    f,
+    jar,
+    "/api/v1/admin/audit/content/legal-holds",
+    {
+      ...holdBody,
+      reason: holdReason,
+      approvalId: holdApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "content-hold-create-success" },
+  );
+  assert.equal(hold.response.status, 201, JSON.stringify(hold.body));
+  assert.equal(hold.body.hold.holdId, CONTENT_HOLD_ID);
+  assertNoWriteSecrets(hold.body, f, jar);
+
+  const releaseReason = "Release the legal hold after matter closure";
+  const releaseApproval = await approveContent({
+    action: "audit.content.legal_hold.release",
+    holdId: CONTENT_HOLD_ID,
+    reason: releaseReason,
+  });
+  const released = await adminContentPost(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/legal-holds/${CONTENT_HOLD_ID}/release`,
+    {
+      holdId: CONTENT_HOLD_ID,
+      reason: releaseReason,
+      approvalId: releaseApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "content-hold-release-success" },
+  );
+  assert.equal(released.response.status, 200, JSON.stringify(released.body));
+  assert.equal(released.body.hold.effectiveStatus, "released");
+  assertNoWriteSecrets(released.body, f, jar);
+
+  const exportBody = {
+    scope: { contentRefs: [CONTENT_REF] },
+    purpose: "compliance_review",
+    ttlSeconds: 300,
+  };
+  const exportReason = "Export selected content for compliance review";
+  const exportApproval = await approveContent({
+    action: "audit.content.export.create",
+    ...exportBody,
+    reason: exportReason,
+  });
+  const exported = await adminContentPost(
+    f,
+    jar,
+    "/api/v1/admin/audit/content/exports",
+    {
+      ...exportBody,
+      reason: exportReason,
+      approvalId: exportApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "content-export-success" },
+  );
+  assert.equal(exported.response.status, 201, JSON.stringify(exported.body));
+  assert.match(exported.body.exportId, /^cexp_/);
+  assert.equal(exported.body.status, "ready");
+  const downloadToken = String(
+    exported.response.headers.get("x-magpie-download-token") || "",
+  );
+  assert.match(downloadToken, /^[A-Za-z0-9_-]{43}$/);
+  assertNoWriteSecrets(exported.body, f, jar);
+  assert.ok(!JSON.stringify(exported.body).includes(downloadToken));
+
+  const downloadPath =
+    `/api/v1/admin/audit/content/exports/${exported.body.exportId}/download`;
+  const missingToken = await contentDownload(f, jar, downloadPath);
+  assert.equal(missingToken.response.status, 403);
+  assert.equal(missingToken.body.error.code, "content_export_unauthorized");
+
+  const tamperedToken = await contentDownload(
+    f,
+    jar,
+    downloadPath,
+    "A".repeat(43),
+  );
+  assert.equal(tamperedToken.response.status, 403);
+  assert.equal(tamperedToken.body.error.code, "content_export_unauthorized");
+
+  const wrongSession = await contentDownload(f, approver.jar, downloadPath, downloadToken);
+  assert.equal(wrongSession.response.status, 403);
+  assert.equal(wrongSession.body.error.code, "content_export_unauthorized");
+
+  const otherExports = await adminGet(
+    f,
+    approver.jar,
+    "/api/v1/admin/audit/content/exports",
+  );
+  assert.equal(otherExports.response.status, 200, JSON.stringify(otherExports.body));
+  assert.deepEqual(otherExports.body.exports, []);
+
+  const downloaded = await contentDownload(f, jar, downloadPath, downloadToken);
+  assert.equal(downloaded.response.status, 200, JSON.stringify(downloaded.body));
+  assert.equal(
+    Buffer.from(downloaded.bytes).subarray(0, 15).toString("utf8"),
+    "MAGPIE-EXPORT-1",
+  );
+  assert.ok(!Buffer.from(downloaded.bytes).includes(
+    Buffer.from("UPSTREAM-AUDIT-EXPORT-CONTENT", "utf8"),
+  ));
+  assert.ok(!Buffer.from(downloaded.bytes).includes(Buffer.from(downloadToken, "utf8")));
+
+  const reused = await contentDownload(f, jar, downloadPath, downloadToken);
+  assert.equal(reused.response.status, 409);
+  assert.equal(reused.body.error.code, "content_export_token_reused");
+
+  const exportList = await adminGet(
+    f,
+    jar,
+    "/api/v1/admin/audit/content/exports",
+  );
+  assert.equal(exportList.response.status, 200, JSON.stringify(exportList.body));
+  assert.equal(exportList.body.exports.length, 1);
+  assert.equal(exportList.body.exports[0].status, "consumed");
+  assertNoWriteSecrets(exportList.body, f, jar);
+
+  const expiringApproval = await approveContent({
+    action: "audit.content.export.create",
+    ...exportBody,
+    reason: exportReason,
+  });
+  const expiringExport = await adminContentPost(
+    f,
+    jar,
+    "/api/v1/admin/audit/content/exports",
+    {
+      ...exportBody,
+      reason: exportReason,
+      approvalId: expiringApproval.approvalId,
+    },
+    current.body.csrfToken,
+    { "idempotency-key": "content-export-expiry" },
+  );
+  assert.equal(expiringExport.response.status, 201, JSON.stringify(expiringExport.body));
+  const expiringToken = String(
+    expiringExport.response.headers.get("x-magpie-download-token") || "",
+  );
+  await f.admin.store.mutate((state) => {
+    const exportRecord = state.adminContentExports[expiringExport.body.exportId];
+    const exportToken = Object.values(state.adminContentExportTokens)
+      .find((token) => token.exportId === exportRecord.id);
+    const expiresAt = new Date(Date.now() - 3600000).toISOString();
+    const createdAt = new Date(Date.parse(expiresAt) - 3600000).toISOString();
+    exportRecord.createdAt = createdAt;
+    exportRecord.updatedAt = createdAt;
+    exportRecord.expiresAt = expiresAt;
+    exportToken.createdAt = createdAt;
+    exportToken.expiresAt = expiresAt;
+    for (const request of Object.values(state.adminContentGovernanceRequests)) {
+      if (request.action === "audit.content.export.create"
+          && request.result?.exportId === exportRecord.id) {
+        request.result.createdAt = createdAt;
+        request.result.expiresAt = expiresAt;
+      }
+    }
+  });
+  const expiredDownload = await contentDownload(
+    f,
+    jar,
+    `/api/v1/admin/audit/content/exports/${expiringExport.body.exportId}/download`,
+    expiringToken,
+  );
+  assert.equal(expiredDownload.response.status, 410);
+  assert.equal(expiredDownload.body.error.code, "content_export_expired");
+
+  const data = await readAdminData(f);
+  const persisted = await fs.readFile(f.config.storePath, "utf8");
+  assertNoWriteSecrets([data, persisted], f, jar, { allowTokenHash: true });
+  assert.ok(!persisted.includes(readKey));
+  assert.ok(!persisted.includes(downloadToken));
+  assert.ok(!persisted.includes("CONTENT-BODY-ONLY-ONCE"));
+  assert.ok(!persisted.includes("UPSTREAM-AUDIT-EXPORT-CONTENT"));
+});
+
+test("M4-E admin UI exposes content governance only for global content roles without leaking secrets", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture({ auditContentEnabled: true });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  const page = await fetch(`${f.base}/admin/`, {
+    headers: { cookie: jar.header() },
+  });
+  assert.equal(page.status, 200);
+  const html = await page.text();
+  for (const expected of [
+    "Audit content governance",
+    'id="content-stream-filter"',
+    'id="content-stream-list"',
+    'id="content-stream-detail"',
+    'id="content-read-form"',
+    'id="content-retention-form"',
+    'id="content-delete-form"',
+    'id="content-deletion-filter"',
+    'id="content-deletion-verify-form"',
+    'id="content-hold-create-form"',
+    'id="content-hold-filter"',
+    'id="content-hold-release-form"',
+    'id="content-export-form"',
+    'id="content-export-filter"',
+    'src="/admin/app.js"',
+  ]) {
+    assert.ok(html.includes(expected), `admin page should include ${expected}`);
+  }
+  assert.ok(!/<script(?![^>]*\bsrc=)/i.test(html));
+  assert.ok(!/\son[a-z]+\s*=/i.test(html));
+  assert.ok(!html.includes("CONTENT-BODY-ONLY-ONCE"));
+  assert.ok(!html.includes("UPSTREAM-AUDIT-EXPORT-CONTENT"));
+  assert.ok(!html.includes(TEST_CONTENT_ADMIN_TOKEN));
+  assert.ok(!html.includes(TEST_CONTENT_GOVERNANCE_TOKEN));
+  assert.ok(!html.includes(CONTENT_UPSTREAM_EXPORT_TOKEN));
+
+  const appScript = await fs.readFile(new URL("../src/admin-app.js", import.meta.url), "utf8");
+  for (const functionName of [
+    "loadContentStreams",
+    "readContentOnce",
+    "runContentRetention",
+    "deleteContent",
+    "loadContentDeletions",
+    "verifyContentDeletion",
+    "createContentLegalHold",
+    "releaseContentLegalHold",
+    "createContentExport",
+    "loadContentExports",
+  ]) {
+    assert.match(appScript, new RegExp(`function ${functionName}\\(`));
+  }
+
+  await bindRole(f, current.body.user.id, "super_admin", "org-platform");
+  const scopedPage = await fetch(`${f.base}/admin/`, {
+    headers: { cookie: jar.header() },
+  });
+  assert.equal(scopedPage.status, 200);
+  const scopedHtml = await scopedPage.text();
+  assert.ok(scopedHtml.includes("Audit content access requires global organization scope."));
+  assert.ok(!scopedHtml.includes('id="content-stream-filter"'));
+  assert.ok(!scopedHtml.includes('id="content-read-form"'));
+  assert.ok(!scopedHtml.includes('id="content-export-form"'));
+
+  await bindRole(f, current.body.user.id, "employee", "*");
+  const deniedPage = await fetch(`${f.base}/admin/`, {
+    headers: { cookie: jar.header() },
+  });
+  assert.equal(deniedPage.status, 200);
+  const deniedHtml = await deniedPage.text();
+  assert.ok(deniedHtml.includes("Audit content governance"));
+  assert.ok(deniedHtml.includes("Your role cannot use audit content governance."));
+  assert.ok(!deniedHtml.includes('id="content-stream-filter"'));
+  assert.ok(!deniedHtml.includes('id="content-read-form"'));
+  assert.ok(!deniedHtml.includes('id="content-delete-form"'));
+  assert.ok(!deniedHtml.includes('id="content-export-form"'));
   assert.ok(!/<script(?![^>]*\bsrc=)/i.test(deniedHtml));
 });
 

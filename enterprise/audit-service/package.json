@@ -1,9 +1,9 @@
 {
   "name": "@magpie-enterprise/audit-service",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "type": "module",
-  "description": "Magpie Enterprise M4-A/M4-B audit event and content pipeline core",
+  "description": "Magpie Enterprise M4-A/M4-B/M4-C audit event, content retrieval and one-time grant core",
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test test/*.test.mjs"

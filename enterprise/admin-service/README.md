@@ -16,13 +16,18 @@
 稳定映射为 `503 resource_service_unavailable`，绝不渲染成空列表。该能力只读，不包含
 资源发布/回滚 UI、审批联动或本地 helper 产品入口。
 
+**M4-E 管理员内容治理**已接入：管理台可以在默认关闭的内容审计边界上检索 L2 脱敏正文流
+元数据、经审批和独立 step-up 一次性读取正文、执行留存清扫、删除/脱敏、查询并验证 HMAC
+删除证明、管理法律保留，以及创建和一次性下载双层加密导出包。所有动作要求全局组织范围
+`*`，break-glass 明确禁止用于内容治理；服务端令牌不会进入浏览器。
+
 管理写接口已接入管理会话、CSRF、RBAC、组织子树、必填 `reason`、原子幂等预留、
 `operationId` 和先写 intent 后调用依赖的审计门禁。成功和失败写操作都会写 result 管理审计；
 审计不可用时失败关闭，不返回成功。C4-01 的网关机器协议已实现并通过本地测试；C4-02
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 119 项管理测试通过（92 项管理服务集成测试 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）。
+当前总计 133 项管理测试通过（96 项管理服务集成测试 + 5 项内容治理客户端专项 + 5 项内容治理存储专项 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）。
 auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
@@ -34,7 +39,8 @@ CSRF、`Idempotency-Key`、理由和 `expectedVersion`，并只在完整证据�
 策略流 E2E 已通过，覆盖双设备独立 Key、真实限额/模型拒绝、多凭证部分失败、refresh/rotate
 继承、故障后 pending、Journal/孤儿 Key 撤销和恢复同步；Docker/共享卷、真实企业 IdP、
 反向代理和浏览器 E2E 仍未验收。当前是“可演示 + 受控技术试点”，不是完整管理台或企业
-生产完成，也仍没有对话正文审计。
+生产完成。M4-E 提供的是默认关闭、受审批/step-up/全局范围约束的脱敏正文治理核心；
+真实网关正文采集、浏览器 E2E 和生产验收仍未完成。
 
 APR-01b 已提供带 HMAC-SHA256、时间窗、nonce 防重放、issuer/audience、事件幂等和职责
 分离的 **Mock 外部审批回调适配器**。真实飞书/OA/ServiceNow/Jira 的字段映射、网络、
@@ -73,6 +79,8 @@ APR-01c 已提供独立 OIDC Client 的 step-up：`prompt=login`、`max_age`、e
 - 用户与部门使用显式 `userOrgUnits` 映射，不按邮箱或姓名猜部门。
 - 用量只读挂载企业网关数据卷，按 `callerKeyId -> credential -> user -> 组织` 归属；不返回
   对话正文或任何 Key/token 材料。
+- M4-E 内容治理客户端只由 admin-service 服务端使用独立审计令牌访问 `audit-service`；
+  浏览器的读取正文/下载导出 token 均为一次性且不持久化。
 - M3-C-2 只读资源/同步 API：`GET /api/v1/admin/resources`（`resources.read`）、
   `GET /api/v1/admin/resources/{resourceId}`、`GET /api/v1/admin/resource-sync/reports`
   和 `GET /api/v1/admin/resource-sync/reports/{deviceId}`（`devices.read`）。资源按 `"*"`
@@ -191,8 +199,8 @@ M2-C4 工作包。
 | --- | --- |
 | `employee` | 无管理权限 |
 | `department_admin` | 指定组织单元及子单元内的只读视图、用户/设备/凭证受控写操作、`quota.write`/`models.write` 策略写入和审批申请/读取；仍需真实 IdP、代理和网关验收 |
-| `enterprise_admin` | 全企业治理，但不默认获得正文审计权限 |
-| `auditor` | 只读审计和用量 |
+| `enterprise_admin` | 全企业治理；内容治理仍要求显式 RBAC 和全局范围 |
+| `auditor` | 只读审计和用量；可按角色读取脱敏正文元数据和删除证明 |
 | `security_admin` | 设备、凭据、告警和人员停用 |
 | `ops_admin` | 健康、设备和运维处置 |
 | `super_admin` | 全域治理和高风险权限 |
@@ -390,6 +398,47 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 | `GET` | `/api/v1/admin/exports/{id}/download` | 使用响应中的一次性 Bearer export token 下载；必须同时携带同一管理员会话 Cookie |
 | `GET` | `/api/v1/admin/notifications/deliveries` | 查询 outbox 投递；要求 `notifications.read`，只返回脱敏状态；当前无 cursor，`count` 为当前页数量 |
 | `POST` | `/api/v1/admin/notifications/deliveries/{ntd_id}/retry` | 重放死信；要求 `notifications.replay`、CSRF、理由和 `Idempotency-Key`，并写系统审计 |
+| `GET` | `/api/v1/admin/audit/content/streams` | 检索 L2 脱敏正文流元数据；要求 `audit.content.search` 和全局组织范围 |
+| `GET` | `/api/v1/admin/audit/content/streams/{streamId}` | 读取内容流元数据详情；不返回正文 |
+| `POST` | `/api/v1/admin/audit/content/{contentRef}/read` | 申请一次性正文读取；要求审批、fresh step-up、CSRF、理由、幂等和全局范围 |
+| `POST` | `/api/v1/admin/audit/content/retention/run` | 执行内容留存清扫；支持 `dryRun`，要求审批和 `audit.content.retention` |
+| `DELETE` | `/api/v1/admin/audit/content/{contentRef}` | 幂等删除或元数据脱敏；活动法律保留会阻止操作 |
+| `GET` | `/api/v1/admin/audit/content/deletions` | 查询删除证明；需要 `audit.content.deletion_read` |
+| `GET` | `/api/v1/admin/audit/content/deletions/{deletionId}` | 读取删除证明详情 |
+| `POST` | `/api/v1/admin/audit/content/deletions/{deletionId}/verify` | 验证 HMAC 删除证明 |
+| `POST` | `/api/v1/admin/audit/content/legal-holds` | 创建法律保留；要求 `audit.content.legal_hold`、审批和关键 step-up |
+| `GET` | `/api/v1/admin/audit/content/legal-holds` | 查询法律保留 |
+| `POST` | `/api/v1/admin/audit/content/legal-holds/{holdId}/release` | 释放法律保留；要求审批和关键 step-up |
+| `POST` | `/api/v1/admin/audit/content/exports` | 创建双层 AES-256-GCM 加密内容导出包；要求 `audit.content.export`、审批和 step-up |
+| `GET` | `/api/v1/admin/audit/content/exports` | 查询当前管理员可见的内容导出元数据 |
+| `GET` | `/api/v1/admin/audit/content/exports/{exportId}/download` | 一次性下载，必须使用同一管理员会话 Cookie 和响应中的一次性 token |
+
+M4-E 内容治理配置默认关闭，以下五项必须成组设置：
+
+```text
+ADMIN_AUDIT_CONTENT_SERVICE_URL
+ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN
+ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN
+ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID
+ADMIN_AUDIT_CONTENT_EXPORT_KEY
+```
+
+前两个服务令牌均至少 32 字符且必须不同。admin token 对应 audit-service 的
+`AUDIT_CONTENT_ADMIN_TOKEN`，governance token 对应 `AUDIT_CONTENT_GOVERNANCE_TOKEN`，
+组织 ID 对应 `AUDIT_CONTENT_ORGANIZATION_ID`。`ADMIN_AUDIT_CONTENT_EXPORT_KEY` 必须是
+独立的 32 字节 base64/64 位 hex 密钥，用于 admin-service 外层 AES-256-GCM 加密，不能与
+`AUDIT_CONTENT_EXPORT_KEY`、OIDC secret 或任何服务令牌复用。可选限制：
+
+```text
+ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS=5000
+ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES=4194304
+ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES=33554432
+```
+
+内容治理只允许全局范围 `*`，组织局部管理员必须在每个内容动作上被拒绝。正文读取返回
+脱敏正文和一次性 grant；导出先由 audit-service 产生 `.mge`，admin-service 再用独立密钥
+加密为 `.mge.enc`。前端不持久化下载 token，重复或过期下载返回 `410`。break-glass
+明确禁止用于内容治理动作。
 
 受限 CSV 导出约定：
 
@@ -519,11 +568,12 @@ Get-ChildItem src\*.js | ForEach-Object {
   & $node --check $_.FullName
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
-& $node --test test\admin-service.test.mjs test\model-catalog.test.mjs test\notification-channels.test.mjs test\notification-rules.test.mjs test\notification-siem.test.mjs
+& $node --test test\*.test.mjs
 ```
 
-2026-11-06 的实际结果：`119 passed, 0 failed`（92 项管理服务集成测试 + 7 项目录专项测试 +
-7 项通知渠道专项测试 + 7 项通知规则专项测试 + 6 项 SIEM 专项测试）。
+2026-11-06 合并 main 后的实际结果：`133 passed, 0 failed`（96 项管理服务集成测试 + 5 项
+内容治理客户端专项测试 + 5 项内容治理存储专项测试 + 7 项目录专项测试 + 7 项通知渠道专项测试 +
+7 项通知规则专项测试 + 6 项 SIEM 专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
 拒绝、用户详情跨范围拒绝、会话过期、IP fail-closed、依赖不可用、凭证元数据、用量归属、
@@ -555,11 +605,16 @@ essential `auth_time`/ACR 请求、未配置时失败关闭、站外返回路径
 幂等、租约恢复、并发串行、1/5/15/60/360 分钟退避、死信、deliveries 脱敏查询、受审计
 人工重放、审批/结果审计与 outbox 原子提交、渠道 RBAC/CSRF/step-up/理由/幂等/审计、
 渠道投影与收件人限制、Webhook HMAC、HTTPS/allowlist/DNS 固定解析、SSRF 和重定向拒绝、
-fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。NOTIFY-01d 新增覆盖规则
+fanout 去重、渠道测试记录，以及有/无 transport 时的启动行为。M4-E 新增覆盖内容治理依赖
+客户端成组配置、固定路由、GET/写方法、禁止重定向、超时/大小上限、响应白名单、服务令牌
+不进入浏览器、全局范围校验、break-glass 禁止、审批/payload 绑定、step-up、幂等和
+operation/audit 链路；双层加密导出、一次性 body grant 和下载 token、法律保留、HMAC
+删除证明验证以及依赖失败失败关闭。NOTIFY-01d 新增覆盖规则
 CRUD、组织范围、`expectedUpdatedAt` 冲突、抑制窗口、聚合维度、阈值/延迟升级、单条升级失败
 隔离、aggregates/suppressions/escalations 查询、dead-letter 幂等重放和运营页面静态契约。
-管理服务当前为 `119 passed, 0 failed`（92 项管理集成 + 7 项目录专项 + 7 项通知渠道专项 +
-7 项通知规则专项 + 6 项 SIEM 专项），
+管理服务当前为 `133 passed, 0 failed`（96 项管理集成 + 5 项内容治理客户端 +
+5 项内容治理存储 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 +
+6 项 SIEM 专项），
 auth-service 为 `26 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，三者合计
 `160 passed, 0 failed`。
 
@@ -605,7 +660,9 @@ auth-service 为 `26 passed, 0 failed`，gateway-control 为 `15 passed, 0 faile
 - 基础筛选、分页和受限 CSV 导出已接入 M2-D 管理页；费用趋势看板、Excel、对象存储、
   异步大批量导出和完整运营体验仍未实现。
 - IPv6 允许列表当前只支持精确 `/128`。
-- 没有任何对话正文；完整内容审计属于 M4，必须单独授权和审计。
+- 内容治理默认关闭，只能读取 audit-service 已接收的 L2 脱敏正文；当前没有真实 Magpie
+  网关正文采集、生产浏览器 E2E、WORM/KMS、PostgreSQL/HA 或生产验收，不能等同于完整
+  M4/生产内容审计系统。
 - M2-C2/C3 的管理 API 已接入会话、CSRF、RBAC、组织范围、理由、幂等和 intent/result
   管理审计；C4-03c 已完成额度/模型 API 到 auth-service、gateway-control、apply/readback
   和同步后交付的 Mock/故障链路，C4-04 已通过完整管理到真实 Magpie 策略流 E2E。

@@ -94,6 +94,7 @@ func devRoutes(mux *http.ServeMux) {
 		rw.Header().Set("Content-Type", "text/javascript")
 		rw.Write([]byte(reloadJS))
 	})
+	devHandoverRoute(mux)
 }
 
 // devPage injects the reload script into index.html and turns off caching.
@@ -123,18 +124,27 @@ func devListen(h http.Handler) {
 	if addr == "" {
 		return
 	}
-	ln, err := gateway.Listen(addr)
-	if err != nil {
-		log.Println("dev ui:", err)
-		return
+	ln := devInheritedListener("ui", addr)
+	if ln == nil {
+		var err error
+		ln, err = gateway.Listen(addr)
+		if err != nil {
+			log.Println("dev ui:", err)
+			return
+		}
 	}
 	log.Println("dev ui:", "http://"+addr+"/?theme=dark")
 	devUI = &http.Server{Handler: h}
+	devUILn = ln
 	go devUI.Serve(ln)
 }
 
-// devUI is the page served on MAGPIE_DEV_UI, nil when it isn't.
-var devUI *http.Server
+// devUI is the page served on MAGPIE_DEV_UI, nil when it isn't. devUILn is
+// its listener, for a restart that hands it over (dev_handover_windows.go).
+var (
+	devUI   *http.Server
+	devUILn net.Listener
+)
 
 // devRole is this process's half of `make dev`: "backend", "shell", or ""
 // for the whole app in one process.
@@ -150,15 +160,23 @@ func devRole() string { return os.Getenv("MAGPIE_DEV_ROLE") }
 func devBackend(handler func(Windows) http.Handler) error {
 	gateway.Handover = handoverSignal != nil
 	addr := os.Getenv("MAGPIE_DEV_BACKEND")
+	// a Windows restart starts this backend with the listeners the one
+	// before it served on (dev_handover_windows.go); the gateway takes its
+	// own before the handler starts it
+	devPrepareInherited()
 	h := handler(remoteWindows(os.Getenv("MAGPIE_DEV_CONTROL")))
-	ln, err := gateway.Listen(addr)
-	if err != nil {
-		return err
+	ln := devInheritedListener("backend", addr)
+	if ln == nil {
+		var err error
+		ln, err = gateway.Listen(addr)
+		if err != nil {
+			return err
+		}
 	}
 	log.Println("dev backend:", "http://"+addr)
 	srv := &http.Server{Handler: h}
 	if handoverSignal == nil {
-		return srv.Serve(ln)
+		return devServeBackend(srv, ln)
 	}
 	go srv.Serve(ln)
 	sig := make(chan os.Signal, 1)

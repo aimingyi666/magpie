@@ -36,16 +36,21 @@ MCP 端点、工具级 allow/deny、健康检查、上游凭据隔离和元数�
 `enterprise/client-sync` 包也提供签名 desired-state、原子安装、失败保留旧版本、离线缓存、
 强制/推荐策略和漂移检测核心；M3-C-2 已把资源目录和设备同步报告以只读、按组织范围过滤的
 方式接入管理页，并把依赖失败稳定映射为 `503 resource_service_unavailable`。`gateway-control`
-已通过 15 项 Mock/故障测试；
-auth-service 已通过 26 项测试；admin-service 已通过 119 项测试（92 项管理服务集成测试 +
-7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
-已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 14 项
+已通过 38 项 Mock/故障测试；
+auth-service 已通过 26 项测试；admin-service 已通过 133 项测试（96 项管理服务集成测试 +
+5 项内容治理客户端专项 + 5 项内容治理存储专项 + 7 项目录专项 + 7 项通知渠道专项 +
+7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
+已通过 15 项单元/Mock 集成测试（11 核心 + 4 控制面）；mcp-gateway 已通过 17 项
 单元/Mock 集成测试；client-sync 已通过 26 项单元/Mock 集成测试（18 核心 + 8 传输）；
 local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
-+ 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 34 项
-隔离测试（20 项 L0/L1 事件管道 + 14 项内容审计核心）；magpie-plugin 已通过 30 项隔离
-测试（员工页、管理员页、PKCE、路由白名单与页面/翻译检查）；当前九套合计 339 项通过、
-0 失败，由 `.github/workflows/test.yml` 的 `enterprise` job 在 CI 上逐包执行。
++ 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 67 项
+隔离测试（20 项 L0/L1 事件管道 + 27 项内容审计、检索与一次性授权核心 + 20 项留存、
+法律保留、删除证明和加密导出核心）；security-service 已通过 44 项隔离测试（固定事件
+allowlist、秘密扫描、八条稳定检测规则、确定性 finding/聚合、抑制标记、幂等重放和
+原子持久化，M5-B 覆盖响应动作状态机、审批、幂等、撤销和 hash-chain 审计）；
+magpie-plugin 已通过 34 项隔离测试（员工页、管理员页、资源页、主题跟随、PKCE 与页面检查）；
+网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、插件生命周期 3、
+身份/来源地址映射 1）；当前十套合计 460 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
@@ -68,9 +73,18 @@ NOTIFY-01d 的规则/抑制、聚合、升级、受审计重放和通知运营�
 M3-A、M3-B、M3-C-1 与 M3-C-2 核心/控制面/只读管理可见性已实现；M3-D 受控本地 MCP
 运行时、`LocalMcpHelper`、回环 HTTP server、stdio bridge、Codex 配置映射和
 `setupLocalMcpClient()` 一键配置编排核心已实现，但安装器/Windows 服务、生产 launcher/
-token 轮换、管理台员工产品流、真实外部沙箱和生产验收尚未完成。M4-A 审计事件管道核心和
-M4-B 内容审计核心已实现；M4-C/M4-D、M5 和 M6 仍未实现；
-M2-D 核心已实现，生产验收未完成。M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
+token 轮换、管理台员工产品流、真实外部沙箱和生产验收尚未完成。M4-A 审计事件管道核心、
+M4-B 内容审计核心、M4-C 内容检索/一次性授权后端核心和 M4-D 留存/法律保留/删除证明/
+加密导出后端核心已实现；M4-E 已把管理员内容检索、一次性正文读取、留存/删除、法律保留和
+双层加密导出接入 admin-service、管理台、审批、step-up、幂等、operation 和审计链路，
+但默认关闭且真实网关正文采集、浏览器 E2E 和生产验收未完成；M5-A 检测规则引擎和网关
+元数据投递核心已实现，规则服务 17 项隔离测试及网关侧 12 项 Go 测试通过，提供八条规则、
+确定性 finding/聚合、原始事件保留、抑制标记和默认关闭的元数据导出器；导出器只发送网关
+Key 身份、Agent、Token 用量和 HMAC 源地址，不发送 Prompt、回复、Cookie、Authorization、
+网关密钥或原始 IP，但管理台安全运营页面、自动响应、OTel/Prometheus/Grafana、生产 SIEM、
+值班手册、HA、Docker/Compose、真实反向代理来源地址和运行中端到端投递仍未实现或未验证；
+M5-B 响应动作状态机与受控模拟执行核心已实现，但真实网关阻断/吊销、真实厂商工单、管理 UI 和生产验收未完成；M5-C 和 M6 仍未实现；M2-D 核心已实现，生产验收未完成。
+M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-C-1/M3-C-2 已接入只读同步报告/资源目录页面，但尚未接入资源发布/回滚 UI、审批联动和本地
 helper 产品流，MCP 审批 nonce 仍是
 单进程内存状态，审计与注册表也不是同一事务；Compose 也未实机验收。当前不是生产就绪版本。
@@ -562,9 +576,11 @@ token 最长 8 小时、空闲 30 分钟失效，可手动退出；首期不做�
 3. 当前用量是网关 `usage.jsonl` 的元数据汇总，可按授权范围查看请求元数据和用量统计；
    模型列表来自只读正式目录；admin-service 在写入前把选择器展开为稳定模型 ID，
    auth-service 以这些 ID 作为用户级授权事实。
-   管理员目前**不能通过管理台查看员工对话正文**。M4-A 的 L0/L1 元数据审计管道核心
-   和 M4-B 的 L2 脱敏正文后端核心已实现，但 M4-B 默认关闭，真实网关正文采集、管理员
-   OIDC/RBAC/组织范围、检索/查看 UI、留存删除和导出均未接入；M4-C/M4-D 仍未实现。
+  管理员可以在默认关闭、显式 RBAC、全局组织范围、审批和 fresh step-up 约束下，
+  通过管理台检索脱敏正文流元数据并一次性读取脱敏正文；留存清扫、删除/脱敏、HMAC
+  删除证明、法律保留和双层加密导出也已接入审批、幂等、operation 和审计链路。
+  break-glass 不得用于内容治理。当前仍未接入真实 Magpie 网关正文采集，也没有生产浏览器
+  E2E、WORM/KMS/HA、备份恢复演练和正式生产验收。
 4. M2-C1/C2 已提供四个受控写 API：停用/启用用户、吊销设备、轮换当前凭证。API 要求管理
    会话、CSRF、RBAC、组织范围和非空理由；M2-C3 已接入幂等、`operationId` 和
    intent/result 管理审计。管理页已提供对应基础操作入口，真实环境仍需浏览器 E2E 验收。
@@ -605,7 +621,12 @@ token 最长 8 小时、空闲 30 分钟失效，可手动退出；首期不做�
 适配器和 APR-01c step-up 门禁；C4-04 的真实管理链路 E2E 已通过，但仍缺少完整审批/运营
 体验、失败恢复入口、真实 OA 连接器、生产 break-glass 告警/复核、通知、Docker/共享卷、
 真实企业 IdP、浏览器和生产验收；M3-C-2 已提供只读资源/同步可见性，M3-B/M3-C-1 仍未接入
-可写管理台、真实审批联动和员工产品流。
+可写管理台、真实审批联动和员工产品流。M5-A 已提供固定事件 allowlist、八条检测规则、
+确定性 finding/聚合、抑制标记、只接收哈希源 IP 的规则核心，以及默认关闭的网关元数据
+导出器；导出器在每次路由尝试后发送已认证 Key、Agent、Token 用量和 HMAC peer 地址，但
+不信任转发头且不会发送正文或凭据。管理台安全运营页面、告警/阻断/吊销/设备锁定/工单、
+生产 SIEM、可观测性、Docker/Compose、真实反向代理来源地址、运行中端到端、值班演练和
+生产验收尚未完成；M5-B 当前只做受控模拟执行，不能视为真实阻断能力已交付；M5-C 不能视为已交付。
 在 M2-D 生产验收、M2-E 剩余项、M3/M4 和生产验收完成前，整体只能描述为“可演示、可受控
 技术试点”。
 
@@ -692,10 +713,12 @@ enterprise/
   gateway-control/           C4-02 受控 Key describe/policy apply 适配器
   resource-service/          M3-A 资源目录、不可变版本和签名 manifest
   mcp-gateway/               M3-B 远程 MCP 注册、策略代理和健康检查
-  audit-service/             M4-A + M4-B 审计事件与内容管道核心（默认仅元数据）
+  audit-service/             M4-A + M4-B + M4-C + M4-D 审计事件、内容与治理核心
+                             M4-E 由 admin-service/管理台编排
+  security-service/          M5-A 检测规则/ingest 与 M5-B 响应动作状态机/模拟执行核心
   client-sync/               M3-C-1 签名资源同步核心和 HTTP 传输
   local-mcp/                 M3-D 受控本地 MCP 运行时核心
-  magpie-plugin/             员工端 Magpie 插件页：设备/同步/资源状态 + 立即同步
+  magpie-plugin/             客户端插件页：员工状态/同步/资源 + 管理员视图与主题跟随
   scripts/
     provision-user.ps1      服务端：开通/配置员工密钥
     join-client.ps1         客户端：加入企业网关

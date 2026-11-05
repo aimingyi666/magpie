@@ -2,6 +2,7 @@ package usage
 
 import (
 	"net/http"
+	"net/netip"
 	"slices"
 	"sync"
 )
@@ -48,6 +49,12 @@ type Request struct {
 	// Kind its call kind ("web_search", "vision", …), "auxiliary" for
 	// Claude's tool-less small helper calls, "" for an agent's own turn
 	Kind string
+	// CallerKeyID, CallerKeyName and CallerIssuerID identify the gateway
+	// key that authenticated the request. They are metadata, never secrets.
+	CallerKeyID, CallerKeyName, CallerIssuerID string
+	// SourceAddr is the connection peer address. Forwarding headers are not
+	// trusted; zero when the connection did not carry an address.
+	SourceAddr netip.Addr
 	// Plain is a loopback request with no gateway key, not passed on from
 	// another magpie: one the agent's own transcript can hold
 	Plain bool

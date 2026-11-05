@@ -1,13 +1,17 @@
 import crypto from "node:crypto";
 import http from "node:http";
+import path from "node:path";
 
 import { McpAuditLog } from "./audit.js";
 import { ApiError, McpGatewayRegistry } from "./registry.js";
 import { McpRegistryStore } from "./store.js";
+import { McpPermissionStore, McpPermissionChecker } from "./permissions.js";
+import { McpCallAuditStore } from "./call-audit.js";
 import { UpstreamError, UpstreamMcpClient } from "./upstream.js";
 
 const SERVER_VERSION = "0.1.0";
 const ADMIN_PREFIX = "/api/v1/admin/mcp";
+const DATA_PREFIX = "/api/v1/mcp";
 const IDEMPOTENCY_KEY = /^[\u0021-\u007e]{1,128}$/;
 
 class FixedWindowRateLimiter {
@@ -157,12 +161,24 @@ function parseAdminRoute(pathname) {
   if (pathname === `${ADMIN_PREFIX}/servers`) return { name: "servers" };
   if (pathname === `${ADMIN_PREFIX}/clients`) return { name: "clients" };
   if (pathname === `${ADMIN_PREFIX}/audit-logs`) return { name: "audit-logs" };
-  let match = /^\/api\/v1\/admin\/mcp\/servers\/(srv_[a-z0-9]{16,64})$/.exec(pathname);
+  if (pathname === `${ADMIN_PREFIX}/permissions`) return { name: "permissions" };
+  if (pathname === `${ADMIN_PREFIX}/call-audit`) return { name: "call-audit" };
+  let match = /^\/api\/v1\/admin\/mcp\/permissions\/(mcp_perm_[a-z0-9]{16,64})$/.exec(pathname);
+  if (match) return { name: "permission", permissionId: match[1] };
+  match = /^\/api\/v1\/admin\/mcp\/call-audit\/(maud_call_[a-z0-9]{16,64})$/.exec(pathname);
+  if (match) return { name: "call-audit-detail", callAuditId: match[1] };
+  match = /^\/api\/v1\/admin\/mcp\/servers\/(srv_[a-z0-9]{16,64})$/.exec(pathname);
   if (match) return { name: "server", serverId: match[1] };
   match = /^\/api\/v1\/admin\/mcp\/servers\/(srv_[a-z0-9]{16,64})\/check$/.exec(pathname);
   if (match) return { name: "server-check", serverId: match[1] };
   match = /^\/api\/v1\/admin\/mcp\/clients\/(cli_[a-z0-9]{16,64})\/revoke$/.exec(pathname);
   if (match) return { name: "client-revoke", clientId: match[1] };
+  return null;
+}
+
+function parseDataRoute(pathname) {
+  if (pathname === `${DATA_PREFIX}/available`) return { name: "available" };
+  if (pathname === `${DATA_PREFIX}/call`) return { name: "call" };
   return null;
 }
 
@@ -241,9 +257,12 @@ export async function createMcpGatewayServer(config, {
   store = new McpRegistryStore(config.storePath),
   audit = new McpAuditLog(config.auditPath),
   upstream = new UpstreamMcpClient(config),
+  permissionStore = new McpPermissionStore(path.join(path.dirname(config.storePath), "mcp-permissions.json")),
+  callAuditStore = new McpCallAuditStore(config.auditPath || path.join(path.dirname(config.storePath), "mcp-call-audit.jsonl")),
   resolver,
   logger = () => {},
 } = {}) {
+  const permissions = new McpPermissionChecker(permissionStore);
   const registry = new McpGatewayRegistry(config, {
     store,
     audit,
@@ -252,6 +271,8 @@ export async function createMcpGatewayServer(config, {
     logger,
   });
   await registry.initialize();
+  await permissionStore.load();
+  await callAuditStore.load();
 
   const adminLimiter = new FixedWindowRateLimiter(config.rateLimitPerMinute);
   const dataLimiter = new FixedWindowRateLimiter(config.rateLimitPerMinute);
@@ -458,7 +479,120 @@ export async function createMcpGatewayServer(config, {
       return sendJson(res, 200, { auditLogs: await registry.auditLogs(limit) });
     }
 
+    if (route.name === "permissions"
+        || route.name === "permission"
+        || route.name === "call-audit"
+        || route.name === "call-audit-detail") {
+      return await handlePermissions(req, res, route, pathname, context);
+    }
+
     throw new ApiError(404, "not_found", "The admin route was not found");
+  }
+
+  async function handlePermissions(req, res, route, pathname, context) {
+    if (!safeEqual(bearer(req), config.serviceToken)) {
+      throw new ApiError(401, "unauthorized", "A valid service token is required");
+    }
+    const actor = adminActor(req);
+    const limitKey = `${context.remoteAddress}:admin`;
+    if (!adminLimiter.consume(limitKey)) {
+      throw new ApiError(429, "rate_limited", "Too many requests", true);
+    }
+
+    if (route.name === "permissions") {
+      if (req.method === "GET") {
+        const all = await permissionStore.list();
+        return sendJson(res, 200, { permissions: all });
+      }
+      if (req.method !== "POST") methodNotAllowed("GET or POST");
+      const body = await readBody(req, config.maxBodyBytes);
+      const operation = adminOperation(body);
+      const permissionId = String(body.permissionId || `mcp_perm_${crypto.randomUUID().replaceAll("-", "")}`);
+      const { operationId: _, reason: __, permissionId: ___, ...input } = body;
+      const permission = await permissionStore.create(permissionId, input);
+      return sendJson(res, 201, { permission }, {
+        "cache-control": "no-store",
+      });
+    }
+
+    if (route.name === "permission") {
+      if (req.method === "DELETE") {
+        const deleted = await permissionStore.delete(route.permissionId);
+        return sendJson(res, 200, { permission: deleted });
+      }
+      methodNotAllowed("DELETE");
+    }
+
+    if (route.name === "call-audit") {
+      if (req.method !== "GET") methodNotAllowed("GET");
+      const url = new URL(req.url, "http://localhost");
+      const limit = Number(url.searchParams.get("limit") || 100);
+      if (!Number.isInteger(limit) || limit < 1 || limit > 1000) {
+        throw new ApiError(400, "invalid_request", "limit must be from 1 to 1000");
+      }
+      const entries = await callAuditStore.list(limit);
+      return sendJson(res, 200, { callAudit: entries });
+    }
+
+    if (route.name === "call-audit-detail") {
+      if (req.method !== "GET") methodNotAllowed("GET");
+      const entry = await callAuditStore.get(route.callAuditId);
+      if (!entry) {
+        throw new ApiError(404, "not_found", "The call audit entry was not found");
+      }
+      return sendJson(res, 200, { callAudit: entry });
+    }
+
+    throw new ApiError(404, "not_found", "The admin route was not found");
+  }
+
+  async function handleDataRoute(req, res, route, pathname, context) {
+    const rawToken = bearer(req);
+    const client = await registry.authenticateClient(rawToken);
+    if (!client) {
+      throw new ApiError(401, "unauthorized", "A valid MCP client credential is required");
+    }
+
+    if (route.name === "available") {
+      if (req.method !== "GET") methodNotAllowed("GET");
+      const servers = await registry.authorizedServers(client);
+      return sendJson(res, 200, { servers });
+    }
+
+    if (route.name === "call") {
+      if (req.method !== "POST") methodNotAllowed("POST");
+      const body = await readBody(req, config.maxBodyBytes);
+      if (!body
+          || typeof body.serverId !== "string"
+          || typeof body.tool !== "string"
+          || body.arguments != null && typeof body.arguments !== "object") {
+        throw new ApiError(400, "invalid_request", "serverId, tool and optional arguments are required");
+      }
+      const exposedName = `${body.serverId}__${body.tool}`;
+      const auditContext = {
+        requestId: context.requestId,
+        operationId: `${client.id}:${crypto.randomUUID()}`,
+      };
+      let result;
+      try {
+        result = await registry.callTool(
+          client,
+          exposedName,
+          body.arguments || {},
+          String(req.headers["x-magpie-approval-token"] || ""),
+          auditContext,
+        );
+      } catch (error) {
+        if (error instanceof ApiError
+            && error.code === "tool_not_found") {
+          throw new ApiError(404, "tool_not_found", "The MCP tool was not found");
+        }
+        throw error;
+      }
+      return sendJson(res, 200, { result });
+    }
+
+    throw new ApiError(404, "not_found", "The data route was not found");
   }
 
   async function handleData(req, res, context) {
@@ -580,6 +714,10 @@ export async function createMcpGatewayServer(config, {
       const route = parseAdminRoute(url.pathname);
       if (route) {
         return await handleAdmin(req, res, route, url.pathname, context);
+      }
+      const dataRoute = parseDataRoute(url.pathname);
+      if (dataRoute) {
+        return await handleDataRoute(req, res, dataRoute, url.pathname, context);
       }
       throw new ApiError(404, "not_found", "The route was not found");
     } catch (error) {

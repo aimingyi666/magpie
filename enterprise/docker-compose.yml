@@ -26,6 +26,14 @@ services:
       # not a Gateway Key. An empty address turns it off.
       MAGPIE_ADMIN_ADDR: ${MAGPIE_ADMIN_ADDR:-0.0.0.0:3450}
       MAGPIE_ADMIN_TOKEN: ${MAGPIE_ADMIN_TOKEN:-}
+      MAGPIE_SECURITY_DETECTION_ENABLED: ${MAGPIE_SECURITY_DETECTION_ENABLED:-false}
+      MAGPIE_SECURITY_DETECTION_URL: ${MAGPIE_SECURITY_DETECTION_URL:-http://security:3450/api/v1/detection-events}
+      MAGPIE_SECURITY_DETECTION_TOKEN: ${SECURITY_INGEST_TOKEN:-}
+      MAGPIE_SECURITY_DETECTION_ORGANIZATION_ID: ${MAGPIE_SECURITY_DETECTION_ORGANIZATION_ID:-}
+      MAGPIE_SECURITY_DETECTION_IP_HASH_SECRET: ${MAGPIE_SECURITY_DETECTION_IP_HASH_SECRET:-}
+      MAGPIE_SECURITY_DETECTION_QUEUE_SIZE: ${MAGPIE_SECURITY_DETECTION_QUEUE_SIZE:-128}
+      MAGPIE_SECURITY_DETECTION_TIMEOUT_MS: ${MAGPIE_SECURITY_DETECTION_TIMEOUT_MS:-3000}
+      MAGPIE_SECURITY_DETECTION_MAX_RETRIES: ${MAGPIE_SECURITY_DETECTION_MAX_RETRIES:-2}
     volumes:
       - magpie-data:/config
     healthcheck:
@@ -195,10 +203,13 @@ services:
       retries: 3
       start_period: 10s
 
-  # M4-A audit event pipeline core. This service is internal-only: it accepts
-  # L0/L1 metadata events, persists an idempotent queue, and exposes metadata
-  # query endpoints. Gateway/UI integration, administrator OIDC/RBAC, L2/L3
-  # content, retention, HA and production acceptance are not implemented.
+  # M4-A/M4-B/M4-C/M4-D/M4-E audit core. This service is internal-only: it
+  # accepts L0/L1 metadata events, stores optional L2 redacted content, and
+  # exposes filtered content metadata, one-time body grants, retention/legal
+  # holds, deletion proofs and encrypted export packages to admin-service.
+  # M4-E administrator orchestration and the management UI are connected in
+  # admin-service. Real gateway ingestion, enterprise IdP/MFA, TLS/reverse
+  # proxy, WORM/KMS, HA and production acceptance remain incomplete.
   # Start it explicitly with:
   #   docker compose --profile audit up -d audit
   audit:
@@ -227,7 +238,12 @@ services:
       AUDIT_RATE_LIMIT_PER_MINUTE: ${AUDIT_RATE_LIMIT_PER_MINUTE:-6000}
       AUDIT_CONTENT_ENABLED: ${AUDIT_CONTENT_ENABLED:-false}
       AUDIT_CONTENT_ENCRYPTION_KEY: ${AUDIT_CONTENT_ENCRYPTION_KEY:-}
-      AUDIT_CONTENT_READ_TOKEN: ${AUDIT_CONTENT_READ_TOKEN:-}
+      AUDIT_CONTENT_ADMIN_ENABLED: ${AUDIT_CONTENT_ADMIN_ENABLED:-false}
+      AUDIT_CONTENT_ADMIN_TOKEN: ${AUDIT_CONTENT_ADMIN_TOKEN:-}
+      AUDIT_CONTENT_ORGANIZATION_ID: ${AUDIT_CONTENT_ORGANIZATION_ID:-}
+      AUDIT_CONTENT_GRANT_SECRET: ${AUDIT_CONTENT_GRANT_SECRET:-}
+      AUDIT_CONTENT_CURSOR_SECRET: ${AUDIT_CONTENT_CURSOR_SECRET:-}
+      AUDIT_CONTENT_GRANT_TTL_SECONDS: ${AUDIT_CONTENT_GRANT_TTL_SECONDS:-120}
       AUDIT_CONTENT_STORE_DIR: ${AUDIT_CONTENT_STORE_DIR:-/data/audit-content}
       AUDIT_CONTENT_MAX_BODY_BYTES: ${AUDIT_CONTENT_MAX_BODY_BYTES:-393216}
       AUDIT_CONTENT_MAX_CHUNK_BYTES: ${AUDIT_CONTENT_MAX_CHUNK_BYTES:-262144}
@@ -235,6 +251,14 @@ services:
       AUDIT_CONTENT_MAX_BUFFER_BYTES: ${AUDIT_CONTENT_MAX_BUFFER_BYTES:-67108864}
       AUDIT_CONTENT_MAX_ACTIVE_STREAMS: ${AUDIT_CONTENT_MAX_ACTIVE_STREAMS:-256}
       AUDIT_CONTENT_STREAM_TTL_MS: ${AUDIT_CONTENT_STREAM_TTL_MS:-900000}
+      AUDIT_CONTENT_GOVERNANCE_ENABLED: ${AUDIT_CONTENT_GOVERNANCE_ENABLED:-false}
+      AUDIT_CONTENT_GOVERNANCE_TOKEN: ${AUDIT_CONTENT_GOVERNANCE_TOKEN:-}
+      AUDIT_CONTENT_PROOF_SECRET: ${AUDIT_CONTENT_PROOF_SECRET:-}
+      AUDIT_CONTENT_EXPORT_ENABLED: ${AUDIT_CONTENT_EXPORT_ENABLED:-false}
+      AUDIT_CONTENT_EXPORT_SECRET: ${AUDIT_CONTENT_EXPORT_SECRET:-}
+      AUDIT_CONTENT_EXPORT_KEY: ${AUDIT_CONTENT_EXPORT_KEY:-}
+      AUDIT_CONTENT_EXPORT_TTL_SECONDS: ${AUDIT_CONTENT_EXPORT_TTL_SECONDS:-120}
+      AUDIT_CONTENT_RETENTION_SWEEP_INTERVAL_MS: ${AUDIT_CONTENT_RETENTION_SWEEP_INTERVAL_MS:-3600000}
     volumes:
       - audit-data:/data
     read_only: true
@@ -248,6 +272,62 @@ services:
     stop_grace_period: 15s
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3449/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # M5-A detection rules plus the M5-B approval-gated response-action state
+  # machine and controlled simulation adapter. This service remains
+  # internal-only. Real gateway enforcement, vendor ticket creation, the admin
+  # UI, production SIEM, HA and production acceptance are not yet implemented.
+  security:
+    profiles: ["security"]
+    build:
+      context: ./security-service
+      args:
+        SECURITY_UID: ${SECURITY_UID:-10004}
+        SECURITY_GID: ${SECURITY_GID:-10004}
+    container_name: magpie-enterprise-security
+    restart: unless-stopped
+    user: "${SECURITY_UID:-10004}:${SECURITY_GID:-10004}"
+    expose:
+      - "3450"
+    environment:
+      SECURITY_BIND: 0.0.0.0
+      SECURITY_PORT: 3450
+      SECURITY_INGEST_TOKEN: ${SECURITY_INGEST_TOKEN:-}
+      SECURITY_READ_TOKEN: ${SECURITY_READ_TOKEN:-}
+      SECURITY_CONTROL_TOKEN: ${SECURITY_CONTROL_TOKEN:-}
+      SECURITY_STORE_PATH: ${SECURITY_STORE_PATH:-/data/security-store.json}
+      SECURITY_TRUSTED_REGIONS: ${SECURITY_TRUSTED_REGIONS:-}
+      SECURITY_TRUSTED_SOURCE_IP_HASHES: ${SECURITY_TRUSTED_SOURCE_IP_HASHES:-}
+      SECURITY_SUPPRESSION_SECONDS: ${SECURITY_SUPPRESSION_SECONDS:-300}
+      SECURITY_BUDGET_WARNING_RATIO: ${SECURITY_BUDGET_WARNING_RATIO:-0.9}
+      SECURITY_BUDGET_CRITICAL_RATIO: ${SECURITY_BUDGET_CRITICAL_RATIO:-1}
+      SECURITY_USAGE_TOKEN_MULTIPLIER: ${SECURITY_USAGE_TOKEN_MULTIPLIER:-5}
+      SECURITY_USAGE_COST_MULTIPLIER: ${SECURITY_USAGE_COST_MULTIPLIER:-5}
+      SECURITY_USAGE_MINIMUM_TOKENS: ${SECURITY_USAGE_MINIMUM_TOKENS:-100000}
+      SECURITY_USAGE_MINIMUM_COST: ${SECURITY_USAGE_MINIMUM_COST:-10}
+      SECURITY_RATE_LIMIT_PER_MINUTE: ${SECURITY_RATE_LIMIT_PER_MINUTE:-6000}
+      SECURITY_MAX_BODY_BYTES: ${SECURITY_MAX_BODY_BYTES:-65536}
+      SECURITY_MAX_EVENTS: ${SECURITY_MAX_EVENTS:-1000000}
+      SECURITY_MAX_FINDINGS: ${SECURITY_MAX_FINDINGS:-2000000}
+      SECURITY_MAX_RESPONSE_ACTIONS: ${SECURITY_MAX_RESPONSE_ACTIONS:-200000}
+      SECURITY_MAX_STORE_BYTES: ${SECURITY_MAX_STORE_BYTES:-536870912}
+    volumes:
+      - security-data:/data
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    init: true
+    stop_grace_period: 15s
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3450/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -380,6 +460,14 @@ services:
       ADMIN_DESKTOP_TICKET_TTL_SECONDS: ${ADMIN_DESKTOP_TICKET_TTL_SECONDS:-120}
       ADMIN_DESKTOP_TOKEN_TTL_HOURS: ${ADMIN_DESKTOP_TOKEN_TTL_HOURS:-8}
       ADMIN_DESKTOP_IDLE_MINUTES: ${ADMIN_DESKTOP_IDLE_MINUTES:-30}
+      ADMIN_AUDIT_CONTENT_SERVICE_URL: ${ADMIN_AUDIT_CONTENT_SERVICE_URL:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN: ${ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: ${ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID: ${ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID:-}
+      ADMIN_AUDIT_CONTENT_EXPORT_KEY: ${ADMIN_AUDIT_CONTENT_EXPORT_KEY:-}
+      ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS: ${ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS:-5000}
+      ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES: ${ADMIN_AUDIT_CONTENT_SERVICE_MAX_RESPONSE_BYTES:-4194304}
+      ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES: ${ADMIN_AUDIT_CONTENT_SERVICE_MAX_EXPORT_BYTES:-33554432}
       ADMIN_APPROVAL_CALLBACK_SECRET: ${ADMIN_APPROVAL_CALLBACK_SECRET:-}
       ADMIN_APPROVAL_CALLBACK_ISSUER: ${ADMIN_APPROVAL_CALLBACK_ISSUER:-}
       ADMIN_APPROVAL_CALLBACK_AUDIENCE: ${ADMIN_APPROVAL_CALLBACK_AUDIENCE:-}
@@ -419,7 +507,137 @@ services:
       retries: 3
       start_period: 10s
 
+    # M9 employee portal - web portal for one-click agent config, usage stats, tickets
+    employee-portal:
+      profiles: ["employee-portal"]
+      build:
+        context: ./employee-portal
+      container_name: magpie-enterprise-employee-portal
+      restart: unless-stopped
+      depends_on:
+        auth:
+          condition: service_healthy
+      ports:
+        - "${EMPLOYEE_PORTAL_BIND:-0.0.0.0}:${EMPLOYEE_PORTAL_HOST_PORT:-3007}:3007"
+      environment:
+        EMPLOYEE_PUBLIC_URL: ${EMPLOYEE_PUBLIC_URL:-http://127.0.0.1:3007}
+        EMPLOYEE_PORT: 3007
+        EMPLOYEE_BIND: 0.0.0.0
+        EMPLOYEE_STORE_PATH: /data/employee-portal.json
+        EMPLOYEE_SESSION_SECRET: ${EMPLOYEE_SESSION_SECRET:-}
+        EMPLOYEE_SECURE_COOKIE: ${EMPLOYEE_SECURE_COOKIE:-true}
+        EMPLOYEE_SESSION_TTL_HOURS: ${EMPLOYEE_SESSION_TTL_HOURS:-8}
+        EMPLOYEE_RATE_LIMIT_PER_MINUTE: ${EMPLOYEE_RATE_LIMIT_PER_MINUTE:-120}
+        ADMIN_MODEL_CATALOG_URL: http://admin:3445/api/v1/admin/model-catalog
+        ADMIN_MODEL_CATALOG_TOKEN: ${ADMIN_MODEL_CATALOG_TOKEN:-}
+        USAGE_SERVICE_URL: http://admin:3445/api/v1/admin/usage
+        USAGE_SERVICE_TOKEN: ${ADMIN_MODEL_CATALOG_TOKEN:-}
+      volumes:
+        - employee-portal-data:/data
+      healthcheck:
+        test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3007/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+        interval: 30s
+        timeout: 5s
+        retries: 3
+        start_period: 10s
+
+    # Nginx reverse proxy - public-facing entrypoint with TLS termination
+    nginx:
+      profiles: ["nginx"]
+      image: nginx:alpine
+      container_name: magpie-enterprise-nginx
+      restart: unless-stopped
+      ports:
+        - "${NGINX_HOST_PORT:-80}:80"
+        - "${NGINX_SSL_PORT:-443}:443"
+      volumes:
+        - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+        - ./nginx/certs:/etc/nginx/certs:ro
+      depends_on:
+        employee-portal:
+          condition: service_healthy
+        admin:
+          condition: service_healthy
+        auth:
+          condition: service_healthy
+    # Postgres - enterprise metadata database
+    postgres:
+      profiles: ["postgres"]
+      image: postgres:16-alpine
+      container_name: magpie-enterprise-postgres
+      restart: unless-stopped
+      ports:
+        - "${POSTGRES_HOST_PORT:-5432}:5432"
+      environment:
+        POSTGRES_USER: ${POSTGRES_USER:-magpie}
+        POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-magpie-secret}
+        POSTGRES_DB: ${POSTGRES_DB:-magpie_enterprise}
+      volumes:
+        - postgres-data:/var/lib/postgresql/data
+      healthcheck:
+        test: ["CMD-SHELL", "pg_isready -U magpie -d magpie_enterprise"]
+        interval: 30s
+        timeout: 5s
+        retries: 3
+        start_period: 10s
+    # Redis - session cache and message broker
+    redis:
+      profiles: ["redis"]
+      image: redis:7-alpine
+      container_name: magpie-enterprise-redis
+      restart: unless-stopped
+      ports:
+        - "${REDIS_HOST_PORT:-6379}:6379"
+      command: ["redis-server", "--appendonly", "yes"]
+      volumes:
+        - redis-data:/data
+      healthcheck:
+        test: ["CMD", "redis-cli", "ping"]
+        interval: 30s
+        timeout: 3s
+        retries: 3
+        start_period: 5s
+    # Prometheus - metrics collection
+    prometheus:
+      profiles: ["monitoring"]
+      image: prom/prometheus:latest
+      container_name: magpie-enterprise-prometheus
+      restart: unless-stopped
+      ports:
+        - "${PROMETHEUS_HOST_PORT:-9090}:9090"
+      volumes:
+        - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+        - prometheus-data:/prometheus
+      command: --config.file=/etc/prometheus/prometheus.yml --storage.tsdb.path=/prometheus
+      healthcheck:
+        test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:9090/-/healthy"]
+        interval: 30s
+        timeout: 5s
+        retries: 3
+        start_period: 10s
+    # Grafana - observability dashboards
+    grafana:
+      profiles: ["monitoring"]
+      image: grafana/grafana:latest
+      container_name: magpie-enterprise-grafana
+      restart: unless-stopped
+      ports:
+        - "${GRAFANA_HOST_PORT:-3008}:3000"
+      environment:
+        GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:-admin}
+        GF_USERS_ALLOW_SIGN_UP: "false"
+      volumes:
+        - grafana-data:/var/lib/grafana
+      depends_on:
+        prometheus:
+          condition: service_healthy
+
 volumes:
+  employee-portal-data:
+  postgres-data:
+  redis-data:
+  prometheus-data:
+  grafana-data:
   magpie-data:
   auth-data:
   admin-data:
@@ -427,6 +645,7 @@ volumes:
   resource-content:
   mcp-data:
   audit-data:
+  security-data:
 
 secrets:
   resource-signing-key:

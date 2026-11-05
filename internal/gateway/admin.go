@@ -92,6 +92,12 @@ func (s *Server) openAdmin(cfg AdminConfig) (net.Listener, error) {
 	if cfg.Addr == "" || !EnableAdminListener() {
 		return nil, nil
 	}
+	// a dev restart hands this listener over with the gateway's own
+	// (handover.go): the port stays bound while the magpie before this one
+	// finishes its requests
+	if ln := takeInheritedAdmin(cfg.Addr); ln != nil {
+		return ln, nil
+	}
 	ln, err := net.Listen("tcp", cfg.Addr)
 	if err != nil {
 		return nil, fmt.Errorf("administration listener %s: %w", cfg.Addr, err)

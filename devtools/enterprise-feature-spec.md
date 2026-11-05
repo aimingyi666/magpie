@@ -1,12 +1,12 @@
 # Magpie 企业版完整功能方案
 
-状态：完整方案评审版 v3.30（完整需求基线见第 25 节，执行版工作分解见第 26 节；M0 已落地；
+状态：完整方案评审版 v3.36（完整需求基线见第 25 节，执行版工作分解见第 26 节；M0 已落地；
 M1 已完成本地真实链路验收；M2-A 管理身份底座、M2-B 只读治理、M2-C1 Auth 内部写接口、
 M2-C2 管理写 API 和 M2-C3 幂等/管理审计状态机已实现并通过 Mock 集成测试；M2-C4-01
 网关机器协议已实现，并通过 Go 单测、CLI 回归和隔离真实二进制冒烟测试；C4-02
 `gateway-control` 受控适配器已实现，并通过 15 项 Mock/故障测试；C4-03a 正式只读模型
-目录已实现，并通过 7 项目录专项、82 项管理服务集成、7 项通知渠道专项、7 项通知规则专项
-和 6 项 SIEM 专项测试，管理服务总计 119 项通过；
+目录已实现，并通过 7 项目录专项、86 项管理服务集成、5 项内容治理客户端、5 项内容治理
+存储、7 项通知渠道专项、7 项通知规则专项和 6 项 SIEM 专项测试，管理服务总计 123 项通过；
 C4-03b 已在 auth-service 实现用户级策略核心状态机、M1 `unknown` 迁移、分步初始化、
 版本冲突、失败关闭和回读确认接口，auth-service 当前 26 项测试通过；C4-03c 的管理端
 额度/模型 API、幂等签发、issuance journal、自动 apply/readback、同步后交付、失败补偿和
@@ -30,9 +30,13 @@ M3-B 的远程 MCP 注册、企业统一端点、工具级授权、健康检查�
 其中包含经过编排入口的真实子进程
 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` E2E；但安装器/
 Windows 服务、真实 Codex 客户端、管理台员工产品流、真实外部沙箱和生产验收尚未完成；
-M4-A 审计事件管道核心和 M4-B 内容审计核心已实现；M4-C/M4-D、M5 和 M6 尚未实现。M4-B
-默认关闭，当前只是后端核心，未接真实网关正文采集、管理员 OIDC/RBAC/组织范围和管理台
-检索/查看 UI。M3-C-2 已把资源目录和设备同步
+M4-A 审计事件管道核心、M4-B 内容审计核心、M4-C 内容检索/一次性正文授权核心、M4-D
+留存/法律保留/删除证明/加密导出核心和 M4-E 管理侧内容治理已实现；M5-A 检测规则引擎
+和网关元数据投递核心、M5-B 响应动作状态机与受控模拟执行核心已实现，但 M5-B 的真实网关
+阻断/吊销、真实厂商工单、管理 UI 和生产验收尚未完成，M5-C 可观测性和 M6 尚未实现。
+M4-B/M4-C/M4-D/M4-E 默认关闭；M4-E 已接入 admin-service 的管理员 OIDC/RBAC/step-up、
+审批、幂等、operation/审计和管理台检索/查看/治理表单，但真实网关正文采集、生产浏览器
+E2E、WORM/KMS/HA 和正式生产验收仍未完成。M3-C-2 已把资源目录和设备同步
 报告以只读、按组织范围过滤的方式接入管理页，并只投影白名单字段；依赖故障统一返回
 `503 resource_service_unavailable`。M3-A/M3-B 尚未接入 admin-service 真实审批和可写管理台，
 M3-B 的 OIDC 组织分配也未实现；M3-C-1/M3-C-2 已接入员工端短期同步凭证和
@@ -60,7 +64,7 @@ Docker/Compose、
 其中 C4-03a/C4-03b/C4-03c 核心已实现，C4-03d 部分实现，C5 后端和基础页面已实现，
 M2-D 核心已实现并待真实环境验收。
 
-日期：2026-11-02
+日期：2026-11-03
 适用范围：基于 `yetone/magpie` fork 的企业内部二次开发
 目标读者：产品、研发、IT、安全、运维、审计
 
@@ -78,6 +82,12 @@ M2-D 核心已实现并待真实环境验收。
 
 | 版本 | 日期 | 变更 |
 | --- | --- | --- |
+| v3.36 | 2026-11-03 | 记录 M5-B 响应动作状态机与受控模拟执行核心：`security-service` 新增限流、阻断、吊销 Key、锁定设备和开票五类动作，`requested/approved/active/reverted/expired/failed` 状态机，创建、审批、激活、撤销、过期、列表、详情和逐动作审计 API；强制 `SECURITY_CONTROL_TOKEN`、`Idempotency-Key`、组织头、职责分离、授权/动作有效期、source/target 绑定和 fail-closed 校验；每动作使用独立 hash-chain 审计，支持幂等重放、冲突拒绝、组织隔离和重启恢复。执行器当前明确为 `simulation`：返回 `policyApplied: true`、`gatewayApplied: false` 和 `policy_applied_without_gateway_enforcement`，不声称真实网关阻断；`gateway_key` 因无法验证而 fail closed。security-service 30 项测试通过，九套企业 Node/Mock 回归合计 376 项通过。真实网关阻断/吊销、真实厂商工单、安全运营管理 UI、OTel/Prometheus/Grafana、生产 SIEM、完整 OIDC 角色授权和生产验收仍未完成。 |
+| v3.35 | 2026-11-03 | 记录 M5-A 网关元数据投递核心：Magpie 网关通过 `usage.Observer` 在每次路由尝试后向 `security-service` 发送严格 schema v1 检测事件，只包含已认证网关 Key 身份、Agent、Token 用量和 HMAC-SHA256 哈希后的真实连接 peer 地址；不发送 Prompt、回复、Cookie、Authorization、网关密钥或原始 IP，且不信任 `X-Forwarded-For`/`X-Real-IP`。新增默认关闭的 `internal/securitydetect` 导出器和 `plugins/securitydetect` 生命周期插件；使用异步有界队列，饱和时丢弃而不阻塞模型流量；429/5xx 使用有界退避和 `Retry-After`，重试复用同一事件体与 `eventId`，禁止重定向并限制响应大小；启用配置错误只使插件失败。新增 12 项 Go 测试（导出器 8、插件生命周期 3、网关身份/来源地址映射 1），security-service 17 项测试和九套企业 363 项回归继续通过。安全运营管理 UI、自动响应、生产 SIEM、HA、Docker/Compose、真实反向代理来源地址、运行中端到端投递和生产验收仍未完成/未验证。 |
+| v3.34 | 2026-11-03 | 记录 M5-A 检测规则引擎核心：新增独立 `enterprise/security-service/`，只接受严格 allowlist 的检测事件，拒绝 Prompt、回复、附件、正文、Cookie、凭据和未知字段；源 IP 只接受 `sha256:<64 hex>` 哈希；实现敏感数据、异常 Token/费用、预算阈值、直连、授权范围越权、设备不合规、来源 IP 和来源区域八条稳定规则；finding、去重键和聚合 ID 确定性生成；保留原始事件，抑制只标记 finding；使用原子 JSON 存储、幂等重放/同 ID 冲突、秘密扫描、独立 ingest/read token、稳定错误码、请求 ID、限流和优雅关闭；Compose 增加内部 `security` profile、独立 `security-data` 卷和只读/降权容器边界，不发布宿主机端口。security-service 17 项测试通过，企业九套回归合计 363 项通过。M5-B 告警/限流/阻断/吊销/设备锁定/工单、M5-C OTel/Prometheus/Grafana/SIEM/值班手册、真实网关事件投递、管理 UI、生产 SIEM 和生产验收仍未实现或未验收。 |
+| v3.33 | 2026-11-03 | 记录 M4-E 管理员内容治理：admin-service 接入 audit-service 的正文流元数据检索、审批 + fresh step-up + 一次性正文读取、留存清扫、删除/脱敏、HMAC 删除证明、法律保留和加密导出；导出由 audit-service 生成 `.mge` 后由 admin-service 使用独立 AES-256-GCM 密钥加密为 `.mge.enc`；内容治理仅允许全局组织范围 `*`，break-glass 明确禁止；管理台新增检索、正文读取、留存、删除证明、法律保留和导出表单；新增 5 项内容治理客户端和 5 项存储专项测试，admin-service 合计 123 项，audit-service 67 项，八套企业回归 346 项通过。真实 Docker/Compose、企业 OIDC/MFA、TLS/反向代理、浏览器 E2E、真实网关正文采集、WORM/KMS/HA、备份恢复和生产验收仍未完成。 |
+| v3.32 | 2026-11-03 | 记录 M4-D 留存、法律保留、删除证明与加密导出后端核心：正文和元数据留存独立计算；后台/显式 `dryRun` 清扫；活动法律保留阻止删除和元数据脱敏；幂等删除/脱敏、staging 恢复和 HMAC 删除证明列表/详情/验证；AES-256-GCM `.mge` 加密导出、一次性短期下载 token、过期/孤儿清理和导出审计；内容管理与治理令牌分离，治理和导出默认关闭；`ContentStore` 索引 v1 兼容迁移到 v2。新增 20 项专项测试，audit-service 合计 67 项，八套企业回归 332 项通过。管理 UI、真实网关采集、admin-service 审批/step-up 编排、WORM、KMS/HSM、PostgreSQL/HA、Docker/Compose 实机、真实 IdP/MFA、备份恢复和生产验收未完成，不等于完整 M4。 |
+| v3.31 | 2026-11-02 | 记录 M4-C 内容检索与一次性正文授权核心：新增 `GET /api/v1/admin/audit/content/streams`、`POST /api/v1/admin/audit/content/{contentRef}/grants`、`GET /api/v1/admin/audit/content/{contentRef}`；支持按员工、部门、设备、Agent、模型、MCP、工具、内容类型、状态和时间筛选，固定 `createdAt DESC, streamId DESC` 排序，使用 HMAC 签名 cursor 绑定筛选条件和排序版本；正文读取改为 15-300 秒一次性 grant，绑定管理员、组织、会话、目标、用途、理由和审批 ID，消费账本持久化且重启后不可重放；成功、缺失、篡改和读取失败均尝试写访问审计，审计持久化失败返回 `503` 不返回正文。ingest 与内容管理令牌隔离，旧 `AUDIT_CONTENT_READ_TOKEN` 退役并在设置时启动失败。audit-service 47 项、八套企业回归合计 312 项通过。M4-C 默认关闭；真实 Magpie 网关正文采集、管理员 OIDC/RBAC/step-up 编排、管理台 UI、浏览器 E2E、M4-D 留存删除、法律保留、WORM、加密导出、PostgreSQL/HA、Docker/Compose 实机、真实 IdP/MFA、备份恢复和生产验收未完成，不等于完整 M4。 |
 | v3.30 | 2026-11-02 | 记录 M4-B 内容审计核心：`enterprise/audit-service` 新增内部流式上传、分片顺序/偏移校验、幂等重放、冲突/乱序/TTL/容量限制和重启中断恢复；只接受明确开启后的 L2 `text/plain` 脱敏正文，拒绝 L3、附件、二进制和未知字段；完成后统一脱敏私钥、密码、Bearer/JWT、云/厂商 token、URL 凭据、邮箱、手机号、身份证和 Luhn 银行卡，正文对象使用 AES-256-GCM 加密并与索引分目录；读取正文必须同时提供服务令牌、独立读取令牌、理由和授权 ID，成功/失败均写访问审计。健康状态和优雅关闭已接入，Compose 增加内容审计配置。audit-service 34 项、八套企业回归合计 299 项通过。M4-B 默认关闭；真实网关正文采集、管理员 OIDC/RBAC/组织范围、管理台检索/查看、留存删除、删除证明、法律保留、WORM、加密导出、Docker/Compose 实机、真实 IdP、浏览器 E2E 和生产验收未完成，不等于完整 M4。 |
 | v3.29 | 2026-11-02 | 记录 M4-A 审计事件管道核心：新增 `enterprise/audit-service`，接收 schema v1 的 `request`、`response`、`tool_call`、`policy_decision`，只接受严格 allowlist 的 L0/L1 元数据，不接收 Prompt、回复、附件、正文或未知字段；提供 Bearer 服务令牌、`Idempotency-Key`、秘密扫描、规范 UTC 毫秒时间、持久 JSON 队列、批量提交、重启恢复、幂等重放/冲突、会话/请求索引、筛选游标、统计和优雅 drain；Compose 新增内部 `audit` profile 和独立 `audit-data` 卷，不发布宿主机端口。audit-service 20 项，八套企业回归合计 285 项通过。该切片未接入真实网关/UI，未实现管理员 OIDC/RBAC、组织范围、L2/L3 正文、留存/删除证明、HA、Docker/Compose 实机、真实 IdP、浏览器 E2E 和生产验收。 |
 | v3.28 | 2026-11-02 | 记录 M3-D-3 一键配置编排核心：新增 `setupLocalMcpClient()`、`LOCAL_MCP_CLIENT_SETUP_SCHEMA_VERSION=1` 和 `DEFAULT_CLIENT_SETUP_TOKEN_BYTES=32`，串行编排 client-sync 同步、reconcile、快照选包、工具发现、回环 helper 启动/探测、Codex 受管 `config.toml` 写入/严格回读和受控启动器环境注入；`injectLaunchEnvironment` 为强制边界，缺失时返回 `token_injection_required`；未传入 token 时只在进程内生成 32 字节随机 token，成功对象和配置不含 token；多资源要求显式 `resourceId`；任一阶段失败会移除本次受管块、关闭 server 并释放 helper 锁；`inspectCodexAgentConfig()` 严格回读受管 node/bridge/URL/resource/token 变量/超时并拒绝畸形配置。local-mcp 60 项（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 10 client setup + 1 E2E），client-sync 26 项，七套企业回归合计 265 项通过。该切片证明一键配置编排技术链路，不等同于真实 Codex 客户端读取配置；安装器/Windows 服务/MDM/代码签名/升级回滚、生产启动器/Windows ACL/DPAPI/token 轮换、真实 OIDC/审批/Secret Broker/KMS、外部 OS 沙箱、Docker/VM、浏览器 E2E、共享卷、HA 和生产验收未完成。 |
@@ -158,13 +168,13 @@ Magpie 单机 Web UI：
 | MCP 目录、远程/本地 MCP、工具权限 | 是，见第 5.4、6.5 节 | M3-B 远程 MCP 治理核心已实现并通过 14 项测试；M3-C-1 已提供短期同步凭证、desired-state、设备上报、管理员 JSON 查询 API 和 `readActiveResource()`，client-sync 26 项测试通过；M3-D 受控本地 MCP 运行时、helper、回环 HTTP server、stdio bridge、Codex 配置映射和 `setupLocalMcpClient()` 一键配置编排核心已实现并通过 60 项测试（含经过编排入口的真实子进程 E2E），但安装器/Windows 服务、真实 Codex 客户端、管理台员工产品流、admin-service 真实审批联动、OIDC 真实 IdP 验收和生产环境验收未实现 |
 | 中央资源库、版本、签名、同步、漂移 | 是，见第 5.5、6.6 节 | M3-A 资源目录、版本、签名和审计核心已实现；M3-C-1 已实现签名 desired-state、原子安装/失败保留旧版本、离线缓存、强制/推荐、漂移检测、设备上报和管理员 JSON 查询，但资源发布/回滚 UI、审批联动、本地 helper 产品入口、目标 Agent 文件映射、Windows ACL 和产品级自动回滚未实现 |
 | 客户端策略与防绕过 | 是，见第 6.7、9 节 | 只有现有网关和 IP 白名单，完整强制未实现 |
-| 会话/工具审计、脱敏、留存 | 是，见第 5.6、6.9、19 节 | M4-A 的 L0/L1 元数据管道核心和 M4-B 的 L2 脱敏正文后端核心已实现；M4-B 默认关闭，真实网关/UI、管理员 OIDC/RBAC/组织范围、检索二次授权、留存/删除证明、法律保留、加密导出和生产验收未完成；普通管理员仍不能在管理台查看正文 |
+| 会话/工具审计、脱敏、留存 | 是，见第 5.6、6.9、19 节 | M4-A 的 L0/L1 元数据管道核心、M4-B 的 L2 脱敏正文后端核心、M4-C 的检索/一次性正文授权核心、M4-D 的留存/法律保留/删除证明/加密导出核心和 M4-E 管理侧内容治理已实现；M4-E 已接入 admin-service 的 OIDC/RBAC/step-up、全局范围、审批、幂等、operation/审计和管理台检索/查看/治理表单，但默认关闭；M5-A 另有独立的网关元数据检测投递核心，不采集正文；真实网关正文采集、生产浏览器 E2E、WORM/KMS/HA、真实 IdP/MFA、备份恢复和生产验收未完成 |
 | 审批、二次认证、职责分离 | 是，见第 5.11、6.12、8.2、9 节 | APR-01a 的服务端审批、绑定校验、职责分离、组织范围、一次性消费和启动恢复已实现并通过 Mock/故障测试；APR-01b 的 HMAC 外部审批回调适配器已实现并通过 Mock/故障测试，但真实 OA 连接器未验证；APR-01c 独立 OIDC step-up 已实现并通过 Mock IdP 集成测试；APR-01d 审批箱、串行/并行步骤、quorum、转交/撤回和基础管理 UI 已实现；APR-01e break-glass 的 15 分钟单次授权、24 小时复核、提醒、通知、审计、API 和管理页已完成 Mock/集成核心；真实 OA、SIEM/告警、工单、浏览器 E2E、真实 IdP/MFA、反向代理和生产验收未完成 |
 | 通知、告警路由、Webhook/SIEM/工单 | 是，见第 6.10、6.12、20 节 | NOTIFY-01a 的 outbox、租约、幂等、退避、死信、重启恢复、deliveries 查询和人工重放已实现；NOTIFY-01b 的渠道管理 API 与统一 HTTPS 渠道适配器已实现并通过 Mock/故障测试，覆盖邮件网关、企业 IM、HMAC Webhook 和工单网关；NOTIFY-01c 的 `http-collector`/`otlp-http`/`syslog-tls` SIEM transport、固定 L0 schema 和 dead-letters API 已实现并通过 6 项专项测试；NOTIFY-01d 的规则/抑制、聚合、阈值/延迟升级、受审计重放和通知运营页已实现并通过 7 项专项及管理回归测试。真实 SIEM/Collector/Syslog、生产证书、真实厂商连接和生产值班闭环未验收；不得在业务请求中同步发通知 |
 | 部署、备份、灰度、回滚 | 是，见第 10、20、21 节 | Compose 模板已有，Docker/计划任务待实机验收 |
 | 上游同步与 fork 兼容 | 是，见第 14、17 节 | 分支工具可用，但当前 `sync-upstream.yml` 仍是合并后直推 `main`；企业目标态必须改为“同步分支 -> 合并 upstream -> CI -> 自动 PR -> 受保护 main 合并”，并完成规则与回归验收 |
 | 项目职责、协作、分支保护、环境晋级、成本容量和培训 | 是，见 [`enterprise-operating-model.md`](enterprise-operating-model.md) | 完整运营规则已定义；GitHub 规则、预算和人员任命需企业实际落地 |
-| 测试与上线门槛 | 是，见第 13、22、23、25 节 | 已记录 M0/M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3 实测结果；C4-01 有本地单测、CLI 回归和隔离二进制冒烟证据；C4-02 有 15 项 Mock/故障测试证据；C4-03a 有 7 项目录专项和 82 项管理服务集成测试证据；C4-03b/C4-03c 有 26 项 auth-service 测试；M3-A 有 11 项资源目录/签名/存储/幂等/审计测试证据；M3-B 有 14 项注册表、scope、工具授权、审批、SSRF、健康/熔断、边界和审计测试证据；M3-C-1 有 4 项同步凭证/desired-state/report 控制面测试、8 项客户端传输测试和 18 项同步引擎核心测试；M2-C5、M2-D、APR-01a、APR-01b、APR-01c、APR-01d、APR-01e、NOTIFY-01a、NOTIFY-01b、NOTIFY-01c 和 NOTIFY-01d 有 operation/audit/reconcile/export/approval/callback/step-up/inbox/break-glass/outbox/channel/SIEM/rules/aggregation/escalation 的 Mock/故障测试证据；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。M3-D 有 60 项证据：21 项签名包/安装/权限/Secret Broker/JSON-RPC/审计/健康，7 项 helper 集成，9 项 HTTP server，5 项 stdio bridge，7 项 Codex 配置映射，10 项一键配置编排，以及 1 项经过编排入口的 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 真实子进程 E2E。当前总计 admin 109/109、auth 26/26、gateway-control 15/15、resource 15/15、mcp-gateway 14/14、client-sync 26/26、local-mcp 60/60、audit-service 34/34，共 299/299。M4-A 的 audit-service 20 项覆盖 L0/L1 allowlist、幂等队列/重放/冲突、重启恢复、会话/请求索引、查询统计、秘密扫描和错误边界；M4-B 的 audit-service 14 项覆盖默认关闭、L2 text/plain 限制、分片顺序/偏移/幂等/冲突/乱序/TTL/容量、重启中断恢复、完整脱敏、AES-256-GCM 对象存储、独立读取令牌、理由/授权 ID 和成功/失败访问审计；resource 15 = 11 核心 + 4 控制面，client-sync 26 = 18 核心 + 8 传输。浏览器 E2E、真实 Codex 客户端读取配置、真实企业 IdP/OA、break-glass 的 5 分钟告警/工单 SLA 和 24 小时生产复核演练、恢复入口、Docker/共享卷、真实审批、资源发布/回滚 UI、审批联动、helper 安装器/Windows 服务/MDM、生产 launcher/Windows ACL/DPAPI/token 轮换、真实厂商通知连接器、真实 SIEM/Collector/Syslog/证书、M2-C5/M2-D 生产验收、M3-B/M3-C 生产验收和 M3-D/M4-A/M4-B 核心尚无完整生产环境验收证据；M4-B 默认关闭且缺少管理 UI、管理员 OIDC/RBAC/组织范围、留存删除和导出，M4-C/M4-D、M5 和 M6 未实现 |
+| 测试与上线门槛 | 是，见第 13、22、23、25 节 | 已记录 M0/M1/M2-A/M2-B/M2-C1/M2-C2/M2-C3 实测结果；C4-01 有本地单测、CLI 回归和隔离二进制冒烟证据；C4-02 有 15 项 Mock/故障测试证据；C4-03a 有 7 项目录专项和 86 项管理服务集成测试证据；C4-03b/C4-03c 有 26 项 auth-service 测试；M3-A 有 11 项资源目录/签名/存储/幂等/审计测试证据；M3-B 有 14 项注册表、scope、工具授权、审批、SSRF、健康/熔断、边界和审计测试证据；M3-C-1 有 4 项同步凭证/desired-state/report 控制面测试、8 项客户端传输测试和 18 项同步引擎核心测试；M2-C5、M2-D、APR-01a、APR-01b、APR-01c、APR-01d、APR-01e、NOTIFY-01a、NOTIFY-01b、NOTIFY-01c 和 NOTIFY-01d 有 operation/audit/reconcile/export/approval/callback/step-up/inbox/break-glass/outbox/channel/SIEM/rules/aggregation/escalation 的 Mock/故障测试证据；C4-04 完整管理到真实 Magpie 策略流 E2E 已通过。M3-D 有 60 项证据：21 项签名包/安装/权限/Secret Broker/JSON-RPC/审计/健康，7 项 helper 集成，9 项 HTTP server，5 项 stdio bridge，7 项 Codex 配置映射，10 项一键配置编排，以及 1 项经过编排入口的 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge` 真实子进程 E2E。当前总计 admin 123/123、auth 26/26、gateway-control 15/15、resource 15/15、mcp-gateway 14/14、client-sync 26/26、local-mcp 60/60、audit-service 67/67、security-service 30/30，共 376/376；另有 M5-A 网关投递 12 项 Go 测试通过（导出器 8、插件生命周期 3、网关身份/来源地址映射 1）。M4-A 的 audit-service 20 项覆盖 L0/L1 allowlist、幂等队列/重放/冲突、重启恢复、会话/请求索引、查询统计、秘密扫描和错误边界；M4-B 的 audit-service 14 项覆盖默认关闭、L2 text/plain 限制、分片顺序/偏移/幂等/冲突/乱序/TTL/容量、重启中断恢复、完整脱敏、AES-256-GCM 对象存储和成功/失败访问审计；M4-C 的 audit-service 13 项覆盖内容流筛选、固定排序、HMAC cursor 篡改/筛选绑定、管理员/组织/会话/目标不匹配、一次性 grant 的过期/重放/重启、列表不含正文、访问审计失败关闭和 ingest/管理令牌隔离；M4-D 的 audit-service 20 项覆盖正文/元数据留存、dry-run、活动/过期法律保留、幂等删除、staging 恢复、HMAC 证明、v1→v2 迁移、加密导出、一次性 token、持久化失败关闭和清理；M4-E 的管理 10 项覆盖依赖客户端、存储、审批/step-up、全局范围、break-glass 禁止、一次性读取/下载和双层加密；resource 15 = 11 核心 + 4 控制面，client-sync 26 = 18 核心 + 8 传输。浏览器 E2E、真实 Codex 客户端读取配置、真实企业 IdP/OA、break-glass 的 5 分钟告警/工单 SLA 和 24 小时生产复核演练、恢复入口、Docker/共享卷、真实审批、资源发布/回滚 UI、审批联动、helper 安装器/Windows 服务/MDM、生产 launcher/Windows ACL/DPAPI/token 轮换、真实厂商通知连接器、真实 SIEM/Collector/Syslog/证书、M2-C5/M2-D 生产验收、M3-B/M3-C 生产验收和 M3-D/M4-A/M4-B/M4-C/M4-D/M4-E 尚无完整生产环境验收证据；M4-B/M4-C/M4-D/M4-E 默认关闭，真实网关采集、WORM/KMS/HA、备份恢复和生产验收未完成，M5-A 网关投递的 Docker/Compose、反向代理来源地址和运行中端到端验证未完成；M5-B 状态机与模拟执行核心已实现，但真实网关阻断/吊销、真实工单、管理 UI 和生产验收未完成，M5-C 和 M6 未实现 |
 
 ### 0.3 本文档不替代的事实
 
@@ -205,8 +215,8 @@ Magpie 单机 Web UI：
 | E7 MCP 治理 | 中央目录、远程 MCP 代理、本地 MCP、工具级 allow/deny、健康检查、限流和熔断 | M3/M5 | M3-A 可登记 `mcp` 资源类型和签名版本；M3-B 已提供远程 MCP 注册、企业统一端点、工具级 allow/deny、健康检查、限流和每服务器熔断核心；M3-D 已提供运行时、helper、回环 HTTP server、stdio bridge 和 Codex 配置映射核心；管理台、admin-service 真实审批联动、OIDC 组织分配、员工端同步接入、helper 安装器/Windows 服务、真实 Codex 客户端验收和生产验收未实现 |
 | E8 企业资源库 | Skills、Instructions、Subagents、模板、不可变版本、签名、审批、同步、漂移和回滚 | M3 | M3-A 核心后端已实现并通过 11 项测试；M3-C-1 已提供同步凭证、desired-state、设备上报、管理员 JSON 查询和 `readActiveResource()`，叠加签名同步、原子安装、失败保留旧版本、离线缓存、强制/推荐策略和漂移核心，client-sync 26 项测试通过；管理台资源/漂移页、helper 安装器/产品流、目标 Agent 文件映射、真实审批和产品级自动回滚未实现 |
 | E9 客户端策略 | 企业 Provider/网关锁定、最低版本、强制/推荐资源、离线策略和防绕过 | M3/M5 | 现有网关、IP 和 Key 约束可用；M3-C-1 已实现 forced/recommended、最低版本、签名校验、离线缓存和漂移检测，但管理台策略、Windows ACL、MDM/EDR 联动、目标 Agent 文件映射和完整防绕过未实现 |
-| E10 审计与通知 | L0-L3 分级、脱敏、留存、访问审计；transactional outbox、邮件/IM/Webhook/SIEM/工单和死信 | M2-E/M4/M5 | 当前有 L0 元数据、M4-A 审计事件管道核心（L0/L1 allowlist 元数据、幂等队列和查询；真实网关/UI 未接入）、M4-B 内容审计后端核心（默认关闭，L2 `text/plain` 流式拼接/脱敏/AES-256-GCM 对象存储/独立读取令牌/访问审计；无 UI、管理员 OIDC/RBAC 和留存删除）、审批系统审计、NOTIFY-01a outbox 核心、NOTIFY-01b 渠道管理/统一 HTTPS 网关适配器、NOTIFY-01c SIEM transport/固定 L0 schema/dead-letters API，以及 NOTIFY-01d 规则/抑制/聚合/升级/受审计重放和运营页；真实 SIEM/Collector/Syslog/证书、真实厂商连接、完整正文审计、生产值班闭环和生产验收未实现/未验收 |
-| E11 安全运营 | 异常用量、异地、越权、直连、敏感数据规则、告警、阻断、吊销、SIEM 和 break-glass | M2-E/M5 | APR-01a 已为管理写操作提供审批和职责分离，APR-01b 已提供 HMAC 外部审批回调适配器，APR-01c 已提供独立 step-up，APR-01e 已提供 break-glass 核心及使用/复核到期/逾期/完成通知，NOTIFY-01c 已提供 SIEM transport；真实 OA 连接器、真实 IdP/MFA、M5 检测响应、告警/阻断、真实 SIEM 接收端、5 分钟告警/工单 SLA 和 break-glass 生产演练未验收 |
+| E10 审计与通知 | L0-L3 分级、脱敏、留存、访问审计；transactional outbox、邮件/IM/Webhook/SIEM/工单和死信 | M2-E/M4/M5 | 当前有 L0 元数据、M4-A 审计事件管道核心（L0/L1 allowlist 元数据、幂等队列和查询；真实网关正文采集未接入）、M4-B 内容审计后端核心（默认关闭，L2 `text/plain` 流式拼接/脱敏/AES-256-GCM 对象存储）、M4-C 内容检索与一次性正文授权核心、M4-D 留存/法律保留/删除证明/加密导出核心，以及 M4-E admin-service/管理台内容治理（OIDC/RBAC/step-up、全局范围、审批、幂等、operation/审计、一次性读取/下载和双层加密）；真实网关正文采集、WORM/KMS/HA、生产浏览器 E2E、真实 SIEM/Collector/Syslog/证书、真实厂商连接、完整 L3 正文审计、生产值班闭环和生产验收未实现/未验收 |
+| E11 安全运营 | 异常用量、异地、越权、直连、敏感数据规则、告警、阻断、吊销、SIEM 和 break-glass | M2-E/M5 | APR-01a 已为管理写操作提供审批和职责分离，APR-01b 已提供 HMAC 外部审批回调适配器，APR-01c 已提供独立 step-up，APR-01e 已提供 break-glass 核心及使用/复核到期/逾期/完成通知，NOTIFY-01c 已提供 SIEM transport；M5-A 规则引擎和网关元数据投递核心已实现；真实 OA 连接器、真实 IdP/MFA、安全运营 UI、自动告警/阻断、真实 SIEM 接收端、5 分钟告警/工单 SLA 和 break-glass 生产演练未验收 |
 | E12 交付与上游治理 | Compose/MDM/内网更新、备份、灰度、回滚、HA、KMS/mTLS、SBOM、自动 PR 上游同步和发布证据 | 全阶段/M6 | 模板、本地测试和分支工具已有；当前同步 workflow 仍直推 `main`，真实环境、CI 门禁、HA 和供应链未验收 |
 
 实现时必须遵守一条贯穿所有能力域的规则：**控制面接受期望值不等于数据面已经生效**。
@@ -260,15 +270,15 @@ Magpie 单机 Web UI：
 | M0 企业网关基线 | Magpie 现有网关能力 | 企业网关、每员工 Key、模型/额度/IP 策略、用量归属、加入与巡检脚本 | 5-10 人可经企业网关调用并按员工归属用量 | 已有真实 Magpie -> 企业网关 -> Mock 上游、模型调用和用量归属证据 | 公司 TLS、正式 OTLP/SIEM、MDM 分发 | 回到上一网关镜像、配置和旧 Key；不删除撤销记录 |
 | M1 身份与设备 | M0、企业 IdP 测试租户 | OIDC/PKCE、设备注册、短期 Key、刷新、轮换、吊销、Windows 刷新脚本 | 员工 5 分钟加入，长期员工 Key 被短期凭证替代 | 已有 Mock/单元 26/26、真实 issuer 签发/调用/刷新/停用/重启 E2E | 真实企业 IdP、MFA/ACR、Docker、Windows 计划任务、SCIM | 保留旧 Key 迁移窗口；回退 auth 镜像和配置，但不得恢复已泄露 Key |
 | M2-A/M2-B 管理身份与只读治理 | M1、独立管理 OIDC Client | 管理登录、会话、CSRF、IP、RBAC、组织范围、只读用户/设备/凭证/模型/用量 | 管理员按组织子树查看，跨部门读取被拒绝 | 已有管理 Mock 回归覆盖会话、范围、脱敏、损坏和超限用量 | 真实管理 IdP、浏览器、代理、真实用量卷 | 回退管理服务，保留只读数据副本；撤销新增管理会话和角色 |
-| M2-C1/C2/C3 敏感写与管理审计 | M2-A/B、独立内部服务令牌 | 停用/启用、吊销、轮换；管理写 API；幂等、`operationId`、intent/result 审计 | 管理员可安全执行已有四个写操作且失败不伪造成功 | 已有管理 109/109、auth 26/26 中的内部写、权限、审批、幂等、审计失败和脱敏证据 | 真实 IdP/代理/网关、浏览器 E2E、失败恢复入口和生产验收 | 回退服务并停止写入口；保留 operation 和审计证据用于对账 |
-| C4-01/C4-02/C4-03a/C4-03b 策略底座 | M2-C、模型目录、共享卷设计 | schema v1 机器协议、受控适配器、正式目录、用户级策略核心 | 管理端具备可回读、可原子写入、可版本化的策略基础 | 已有 C4-01 Go/CLI/隔离二进制证据、C4-02 15 项 Mock/故障测试、C4-03a 管理 109/109、C4-03b auth 26/26 | Docker/真实共享卷、只读挂载、digest 重启、auth-service 接入、管理端编排 | 保留上一镜像与目录版本；撤销未确认策略，不恢复已撤销凭证 |
-| C4-03c 管理 API、签发同步与交付 | C4-02/C4-03a/C4-03b、C3 | `PUT quota`、`PATCH models`、issuance journal、apply、独立回读、原子持久化、同步后交付、孤儿补偿 | 管理员调额/模型授权可落到真实 Magpie 网关，未同步成功不交付新 Key | 已有管理 109/109、auth 26/26 和 gateway-control 15/15 的 Mock/故障证据，覆盖 payload 绑定幂等、部分成功、失败补偿和启动恢复；C4-04 已用隔离真实 Magpie 覆盖 apply/readback、多凭证部分失败和故障恢复 | 真实 Docker/共享卷、真实企业 IdP、生产反向代理和真实生产故障演练未验收 | journal 恢复到 `issued`/`compensating`；撤销未提交 Key；保留 `pendingRevocations` |
+| M2-C1/C2/C3 敏感写与管理审计 | M2-A/B、独立内部服务令牌 | 停用/启用、吊销、轮换；管理写 API；幂等、`operationId`、intent/result 审计 | 管理员可安全执行已有四个写操作且失败不伪造成功 | 已有管理 123/123、auth 26/26 中的内部写、权限、审批、幂等、审计失败和脱敏证据 | 真实 IdP/代理/网关、浏览器 E2E、失败恢复入口和生产验收 | 回退服务并停止写入口；保留 operation 和审计证据用于对账 |
+| C4-01/C4-02/C4-03a/C4-03b 策略底座 | M2-C、模型目录、共享卷设计 | schema v1 机器协议、受控适配器、正式目录、用户级策略核心 | 管理端具备可回读、可原子写入、可版本化的策略基础 | 已有 C4-01 Go/CLI/隔离二进制证据、C4-02 15 项 Mock/故障测试、C4-03a 管理 123/123、C4-03b auth 26/26 | Docker/真实共享卷、只读挂载、digest 重启、auth-service 接入、管理端编排 | 保留上一镜像与目录版本；撤销未确认策略，不恢复已撤销凭证 |
+| C4-03c 管理 API、签发同步与交付 | C4-02/C4-03a/C4-03b、C3 | `PUT quota`、`PATCH models`、issuance journal、apply、独立回读、原子持久化、同步后交付、孤儿补偿 | 管理员调额/模型授权可落到真实 Magpie 网关，未同步成功不交付新 Key | 已有管理 123/123、auth 26/26 和 gateway-control 15/15 的 Mock/故障证据，覆盖 payload 绑定幂等、部分成功、失败补偿和启动恢复；C4-04 已用隔离真实 Magpie 覆盖 apply/readback、多凭证部分失败和故障恢复 | 真实 Docker/共享卷、真实企业 IdP、生产反向代理和真实生产故障演练未验收 | journal 恢复到 `issued`/`compensating`；撤销未提交 Key；保留 `pendingRevocations` |
 | C4-03d 页面与运营状态 | C4-03c | 管理页/员工页同步状态、失败设备、首次设置、待对账入口 | 管理员和员工看到真实 `unknown/pending/partial_success/dependency_invoked/succeeded` | 管理页已有额度/模型写表单、完整证据链状态和失败证据；员工页已有本人额度/模型/凭证/设备只读门户；M2-D 已接入 operation/audit 查询、人工对账、CSV 导出和基础停用/吊销/轮换页面 | 失败目标恢复入口、浏览器 E2E、完整运营体验和真实审计存储验收未完成 | 回退前端静态资源；保留后端状态和 operation，不篡改审计 |
 | C4-04 真实网关行为 E2E | C4-03a-d | 隔离真实 Magpie 的额度、模型拒绝、多凭证、refresh/rotate、部分失败和故障注入 | 证明不是只改页面，真实请求确实被限额和拒绝 | 已有 `admin-service -> auth-service -> gateway-control -> Magpie -> Mock 上游` 18 阶段 E2E：首次 join 409、管理 OIDC/CSRF、分步策略设置、双设备 Key、真实限额/模型拒绝、`partial_success`、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步、usage 归属和秘密扫描 | Docker/共享卷、真实企业 IdP、反向代理、浏览器自动化、M2-D/C5 生产验收未完成 | 终止隔离进程、删除临时目录；不触碰生产配置和真实 Key |
 | C5 操作、审计查询与对账 | C4-03c/C4-03d/C4-04 | `operations/{id}`、`audit-logs`、过滤分页、人工确认/重试/补偿子 operation | 管理员可追溯失败、部分成功和依赖结果，完成人工对账 | 已有 operation/audit/reconcile Mock/故障测试和 M2-D 基础页面：权限、组织范围、签名 cursor、脱敏、幂等/冲突、旧快照、依赖/审计失败、父子 operation 和原审计不可改写 | 真实审计存储、浏览器 E2E 和生产运维演练未验收 | 保留原 operation 和审计，新增补偿 operation；不覆盖历史结果 |
 | M2-E 审批、step-up 与通知投递 | C3/C5、真实管理 IdP、外部 OA/IM/SIEM | APR-01a-e、NOTIFY-01a-d、外部审批验签、一次性消费、break-glass、outbox 和死信 | 高风险操作有审批和 ACR，通知异步可靠且可运营 | 已有 APR-01a 审批风险/绑定/职责分离/一次性消费/启动恢复、APR-01b HMAC 回调验签/防重放/幂等、APR-01c 独立 step-up/ACR/auth_time/绑定/失败关闭、APR-01d 审批箱/串并行/quorum/转交/撤回、APR-01e 15 分钟单次授权/24 小时复核/提醒/通知、NOTIFY-01a outbox/租约/退避/死信/重启恢复、NOTIFY-01b 渠道管理/HTTPS 适配器/SSRF 防护、NOTIFY-01c SIEM transport/固定 L0 schema/dead-letters API，以及 NOTIFY-01d 规则/抑制/聚合/阈值与延迟升级/受审计重放/运营页的 Mock/故障证据；仍需真实 OA 连接器、真实 IdP/MFA、真实厂商渠道、真实 SIEM/Collector/Syslog/证书、5 分钟告警/工单 SLA 和 24 小时生产复核演练作为生产验收证据 | APR-01b 仅有 HMAC/Mock 适配器，真实 OA/飞书/ServiceNow/Jira 未接入；APR-01e 仅有 Mock/集成核心，真实告警/工单和外部工单 ID 回读未验收；NOTIFY-01d 已实现核心和运营页，真实 SIEM 接入、NOTIFY-01b 的真实厂商连接、浏览器审批流程和生产值班闭环未验收 | 关闭对应审批/通知功能；保留待消费审批、break-glass、outbox 和死信供人工处置 |
-| M2-D 管理体验与员工门户 | C2-C5、M2-E、真实数据卷 | 管理写 UI、用量/成本看板、授权导出、操作历史和员工状态页 | 管理员可日常运营，员工可自助恢复，不暴露秘密 | 已有 119 项管理测试覆盖筛选/分页、operation、人工对账、审批箱/多步骤、break-glass、通知规则/聚合/抑制/升级、用量/审计查询、CSV 导出权限/审批/step-up/一次性下载/幂等/公式注入防护；页面 E2E、真实浏览器和导出生产验收未完成 | C4-03d 已部分交付额度/模型写表单和员工只读状态页；M2-D 核心已实现，浏览器 E2E、失败恢复入口、完整运营体验和大规模异步导出未验收 | 回退前端资源；保留导出审计和 operation，不丢弃已生成证据 |
-| M3-M6 资源、审计、安全与规模化 | R2 生产候选全部通过 | 中央 MCP、资源库、客户端策略、L0-L3 审计、安全运营、PostgreSQL/HA/KMS/mTLS | 50-500+ 人可治理、可审计、可扩展和可恢复 | M3-A 已有 11 项、M3-B 已有 14 项、M3-C-1 相关 resource 已有 15 项、client-sync 已有 26 项单元/Mock 集成测试，M3-C-2 已有 5 项管理服务测试，M3-D 已有 60 项运行时/helper/server/bridge/配置/一键编排/E2E 测试；M3-B 仍有单进程 nonce、注册表/审计事务和真实部署缺口；M3-C-2 只完成只读资源/漂移可见性，资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 IdP、浏览器 E2E 和 Docker/Compose 实机验收仍未完成；M4-A 已有 L0/L1 元数据管道核心，M4-B 已有默认关闭的 L2 脱敏正文/流式拼接/加密对象存储/独立读取与访问审计核心，但真实网关/UI、管理员 OIDC/RBAC/组织范围、完整 L0-L3 审计、留存删除、安全运营、HA 和合规签字仍无证据 | M3-A/M3-B 尚未接入真实审批和可写管理台，M3-C-2 仍未接入发布/回滚和 helper 产品流；M3-D 已有一键配置编排技术 E2E，但真实 Codex 客户端、生产 launcher/安装器和生产验收未完成；M4-A/M4-B 核心已实现，但 M4-C/M4-D、M5 和 M6 未实现，不得引用本表作为上线证明 | 按阶段独立回退；资源回滚到已发布签名版本，MCP 注册表/审计/幂等迁移必须有逆向脚本和隔离恢复演练 |
+| M2-D 管理体验与员工门户 | C2-C5、M2-E、真实数据卷 | 管理写 UI、用量/成本看板、授权导出、操作历史和员工状态页 | 管理员可日常运营，员工可自助恢复，不暴露秘密 | 已有 123 项管理测试覆盖筛选/分页、operation、人工对账、审批箱/多步骤、break-glass、通知规则/聚合/抑制/升级、用量/审计查询、CSV 导出权限/审批/step-up/一次性下载/幂等/公式注入防护，以及 M4-E 内容治理；页面 E2E、真实浏览器和导出生产验收未完成 | C4-03d 已部分交付额度/模型写表单和员工只读状态页；M2-D 核心已实现，浏览器 E2E、失败恢复入口、完整运营体验和大规模异步导出未验收 | 回退前端资源；保留导出审计和 operation，不丢弃已生成证据 |
+| M3-M6 资源、审计、安全与规模化 | R2 生产候选全部通过 | 中央 MCP、资源库、客户端策略、L0-L3 审计、安全运营、PostgreSQL/HA/KMS/mTLS | 50-500+ 人可治理、可审计、可扩展和可恢复 | M3-A 已有 11 项、M3-B 已有 14 项、M3-C-1 相关 resource 已有 15 项、client-sync 已有 26 项单元/Mock 集成测试，M3-C-2 已有 5 项管理服务测试，M3-D 已有 60 项运行时/helper/server/bridge/配置/一键编排/E2E 测试；M3-B 仍有单进程 nonce、注册表/审计事务和真实部署缺口；M3-C-2 只完成只读资源/漂移可见性，资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 IdP、浏览器 E2E 和 Docker/Compose 实机验收仍未完成；M4-A 已有 L0/L1 元数据管道核心，M4-B 已有默认关闭的 L2 脱敏正文/流式拼接/加密对象存储核心，M4-C 已有内容检索、签名 cursor、一次性正文 grant 和持久访问审计核心，M4-D 已有留存、法律保留、删除证明和加密导出核心，M4-E 已接入管理台、OIDC/RBAC/step-up、审批、幂等、operation/审计和双层加密下载，但真实网关正文采集、生产浏览器 E2E、完整 L0-L3 审计、WORM/KMS、安全运营、HA、备份恢复和合规签字仍无证据 | M3-A/M3-B 尚未接入真实审批和可写管理台，M3-C-2 仍未接入发布/回滚和 helper 产品流；M3-D 已有一键配置编排技术 E2E，但真实 Codex 客户端、生产 launcher/安装器和生产验收未完成；M4-A/M4-B/M4-C/M4-D/M4-E 核心已实现，M5-A 规则与网关元数据投递核心、M5-B 响应动作状态机与模拟执行核心已实现，但 M5-B 真实执行/UI/生产验收和 M5-C、M6 未完成，且真实网关正文采集、网关投递运行验证和生产验收未完成，不得引用本表作为上线证明 | 按阶段独立回退；资源回滚到已发布签名版本，MCP 注册表/审计/幂等迁移必须有逆向脚本和隔离恢复演练 |
 
 ## 1. 目标与边界
 
@@ -321,7 +331,7 @@ Magpie 单机 Web UI：
 | OIDC/SSO、设备注册和短期凭证 | M1 已有本地实现；真实 IdP、容器和 Windows 计划任务尚待验收；SCIM 和完整组织架构未实现 |
 | 管理后台多角色 RBAC | M2-A/M2-B 已有管理 OIDC、会话、CSRF、角色、组织范围和只读治理；M2-C1 已有 Auth 内部写接口；M2-C2 已有四个管理写 API、组织范围写校验和理由校验；M2-C3 已实现幂等重放、`operationId` 和 intent/result 管理审计；C4-03c/C4-03d 已部分交付调额/模型授权 API 和写表单；M2-C5 已提供查询/对账后端；完整运营查询/对账体验、失败恢复入口和运营看板未实现 |
 | 员工、部门、设备总览 | M2-B 已提供用户、部门、设备、凭证、模型和用量只读视图及范围过滤；完整筛选、分页、导出和看板未实现 |
-| 对话正文和工具调用审计 | 未实现；当前只有请求元数据 |
+| 对话正文和工具调用审计 | M4-E 已实现受控管理侧核心：默认关闭，只有 L2 脱敏正文、全局范围、显式 RBAC、审批和 step-up 才能读取/治理；真实网关采集、L3、WORM/KMS/HA 和生产验收未完成 |
 | 中央 MCP 目录和下发 | 未实现；当前 MCP 是每台电脑的本地 Library |
 | 中央资源库 | 未实现；当前可手工用 Git/备份同步 |
 | 策略强制和防绕过 | 未完整实现 |
@@ -330,28 +340,28 @@ Magpie 单机 Web UI：
 
 ### 2.3 实现状态（必须和方案分开看）
 
-截至 2026-11-02，仓库中的真实状态如下。不要把“方案已设计”误读为“功能已上线”。
+截至 2026-11-03，仓库中的真实状态如下。不要把“方案已设计”误读为“功能已上线”。
 
 | 阶段 | 代码状态 | 已通过的验证 | 尚未验证或未实现 |
 | --- | --- | --- | --- |
 | M0 企业网关基线 | 已落地在 `enterprise/`，未改上游跟踪文件 | 真实 Magpie 二进制的客户端 → 企业网关 → Mock 上游、模型调用、按员工 Key 归属用量 | 公司正式 TLS 入口、正式 OTLP/SIEM、MDM 分发 |
 | M1 OIDC 与设备身份 | `enterprise/auth-service/`、加入/刷新脚本和真实 issuer E2E 脚本已实现；同设备刷新已串行化；M3-C-1 增加设备短期同步凭证和 OIDC `groups` 组织范围映射 | Node 单元/Mock 集成测试（26/26）、并发刷新和“签发中停用”回归、PowerShell 语法检查、M0 真实 Magpie 链路；真实 issuer E2E 的签发/调用/用量/刷新撤销/停用/重启全部通过 | 真实企业 IdP/groups claim、Docker 构建、Windows 计划任务实机刷新、SCIM |
-| M2-A 管理身份底座 | `enterprise/admin-service/` 已实现独立管理 OIDC、MFA/ACR、会话、CSRF、IP 限制、RBAC、组织范围、内部服务令牌和最小管理页 | Node 语法检查、管理服务 Mock 集成测试（当前回归 109/109，包含 M2-B/M2-C2/M2-C3/M2-C5/M2-D、APR-01a/b/c/d、NOTIFY-01a/b/c/d、C4-03a 目录和 C4-03d 页面测试）、auth 服务 Mock 集成测试（26/26） | 真实 IdP、Docker/浏览器/反向代理、正式角色/组织初始化流程 |
-| M2-B 只读治理 | 用户、部门、设备、凭证、模型和用量只读 API；显式用户-组织映射；只读 `usage.jsonl`；服务端子树过滤和管理页摘要 | 当前管理 `109/109`、auth `26/26`；覆盖跨部门 `403`、用户 `404`、凭证脱敏、用量归属、时间序列和损坏/超限存储 | 真实用量卷、真实 IdP、Docker/浏览器/代理、轮转和大文件验收 |
+| M2-A 管理身份底座 | `enterprise/admin-service/` 已实现独立管理 OIDC、MFA/ACR、会话、CSRF、IP 限制、RBAC、组织范围、内部服务令牌和最小管理页 | Node 语法检查、管理服务 Mock 集成测试（当前回归 123/123，包含 M2-B/M2-C2/M2-C3/M2-C5/M2-D、M4-E、APR-01a/b/c/d、NOTIFY-01a/b/c/d、C4-03a 目录和 C4-03d 页面测试）、auth 服务 Mock 集成测试（26/26） | 真实 IdP、Docker/浏览器/反向代理、正式角色/组织初始化流程 |
+| M2-B 只读治理 | 用户、部门、设备、凭证、模型和用量只读 API；显式用户-组织映射；只读 `usage.jsonl`；服务端子树过滤和管理页摘要 | 当前管理 `123/123`、auth `26/26`；覆盖跨部门 `403`、用户 `404`、凭证脱敏、用量归属、时间序列和损坏/超限存储 | 真实用量卷、真实 IdP、Docker/浏览器/代理、轮转和大文件验收 |
 | M2-C1 Auth 内部写接口 | 停用/启用用户、设备吊销、当前凭证轮换；只接受独立内部服务令牌 | Auth Mock `26/26`：鉴权、目标校验、设备串行化、启用不恢复旧凭据、轮换失败无孤儿 Key、响应不返回秘密，并覆盖同步凭证签发边界 | C1 本身不接入管理会话/RBAC/CSRF/理由；对应管理入口由 C2 提供并由 Mock 覆盖；完整幂等/审计由 C2/C3 提供；真实 IdP、网关、浏览器 E2E 和生产验收未完成 |
-| M2-C2 管理写 API | 四个管理写 API；管理会话/CSRF/RBAC/组织子树/理由校验；目标预检和响应白名单 | 管理 `109/109`；覆盖全域写、子树/兄弟部门、CSRF/理由/幂等键格式/坏 JSON/目标不存在/依赖故障和脱敏 | 真实 IdP/代理/网关、浏览器 E2E、失败恢复入口和生产验收 |
-| M2-C3 幂等、操作状态与管理审计 | 持久化 `Idempotency-Key` 指纹、同键同请求重放、同键异体 `409`、执行中 `409`、`operationId`、intent/result 审计、审计失败阻断 | 管理 `109/109`；覆盖成功/失败重放、同键异体、并发执行中、intent 失败依赖调用为 0、result 审计失败不返回成功、operation 状态和审计脱敏 | 真实 IdP/代理/真实网关未验收；查询/对账接口由 C5 提供，页面已由 M2-D 接入 |
+| M2-C2 管理写 API | 四个管理写 API；管理会话/CSRF/RBAC/组织子树/理由校验；目标预检和响应白名单 | 管理 `123/123`；覆盖全域写、子树/兄弟部门、CSRF/理由/幂等键格式/坏 JSON/目标不存在/依赖故障和脱敏 | 真实 IdP/代理/网关、浏览器 E2E、失败恢复入口和生产验收 |
+| M2-C3 幂等、操作状态与管理审计 | 持久化 `Idempotency-Key` 指纹、同键同请求重放、同键异体 `409`、执行中 `409`、`operationId`、intent/result 审计、审计失败阻断 | 管理 `123/123`；覆盖成功/失败重放、同键异体、并发执行中、intent 失败依赖调用为 0、result 审计失败不返回成功、operation 状态和审计脱敏 | 真实 IdP/代理/真实网关未验收；查询/对账接口由 C5 提供，页面已由 M2-D 接入 |
 | M2-C4-01 网关机器协议 | 当前工作分支已实现 `describe --json` 和原子 `policy apply --json` | Go 单测、CLI 回归和隔离真实二进制冒烟；覆盖 schema v1、64 KiB 输入输出、冲突和回读 | `gateway-control` 调用超时、用户级策略和管理 API 不在此切片 |
 | M2-C4-02 受控适配器 | `enterprise/gateway-control/` 已实现，固定调用 describe/apply、独立回读、服务令牌、64 KiB 和 10 秒超时 | Node 语法检查与 `15 passed, 0 failed`；覆盖鉴权、脱敏、注入式 ID、超时/存储故障 pending、确定性失败、子进程退出和输出超限；C4-04 已验证真实适配器调用链 | Docker/Compose、共享卷文件锁、真实企业 IdP 和独立适配器部署未验收 |
-| M2-C4-03a 正式模型目录 | 只读 `ADMIN_MODEL_CATALOG_PATH`、严格 JSON、schema v1、稳定模型 ID、显式 Provider 通配符、group 展开、2 MiB 上限、SHA-256 digest 和安全状态摘要 | 管理 `109/109`（82 项管理服务集成 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；`GET /api/v1/admin/models` 已使用正式目录，admin-service 把选择器展开为稳定模型 ID | 真实 Docker/共享卷、真实 IdP、浏览器和反向代理未验收 |
+| M2-C4-03a 正式模型目录 | 只读 `ADMIN_MODEL_CATALOG_PATH`、严格 JSON、schema v1、稳定模型 ID、显式 Provider 通配符、group 展开、2 MiB 上限、SHA-256 digest 和安全状态摘要 | 管理 `123/123`（86 项管理服务集成 + 5 项内容治理客户端专项 + 5 项内容治理存储专项 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）；`GET /api/v1/admin/models` 已使用正式目录，admin-service 把选择器展开为稳定模型 ID | 真实 Docker/共享卷、真实 IdP、浏览器和反向代理未验收 |
 | M2-C4-03b 用户级策略核心 | auth-service 的版本化 `gatewayPolicy`、0-5 个额度窗口、旧 M1 `unknown` 迁移、quota/models 分步首次设置、版本冲突、失败关闭和凭证回读确认 | auth-service `26/26`；C4-04 管理链路验证首次设置、双设备回读、refresh/rotate 继承和失败关闭 | 真实部署验收未完成 |
-| M2-C4-03c 管理 API、签发同步与交付 | 管理端额度/模型 API、issuance journal、自动 apply/readback、同步后交付、失败补偿和启动恢复 | 核心已实现；管理 109/109、auth 26/26、gateway-control 15/15 Mock/故障测试通过；C4-04 已通过隔离真实 Magpie 的 apply/readback、多凭证部分失败和故障恢复 | 真实 Docker/共享卷、真实企业 IdP、生产反向代理和生产故障演练 |
+| M2-C4-03c 管理 API、签发同步与交付 | 管理端额度/模型 API、issuance journal、自动 apply/readback、同步后交付、失败补偿和启动恢复 | 核心已实现；管理 123/123、auth 26/26、gateway-control 15/15 Mock/故障测试通过；C4-04 已通过隔离真实 Magpie 的 apply/readback、多凭证部分失败和故障恢复 | 真实 Docker/共享卷、真实企业 IdP、生产反向代理和生产故障演练 |
 | M2-C4-04 完整策略流 E2E | 管理 OIDC/CSRF、quota/models 分步设置、双设备独立 Key、真实模型拒绝/限额、部分失败、refresh/rotate 继承、故障后 pending、Journal/孤儿 Key 撤销、恢复同步和 usage 归属 | 18 阶段 E2E 全部通过；真实 `admin-service -> auth-service -> gateway-control -> Magpie -> Mock 上游` 链路、秘密扫描通过 | Docker/共享卷、真实企业 IdP、反向代理、浏览器自动化、C5/M2-D 的浏览器 E2E 和生产验收 |
 | M2-C4-03d 页面与运营状态 | 管理页/员工页同步状态、失败恢复入口和对账入口 | C4-03d 部分实现：管理页额度/模型写表单、完整证据链状态和员工只读状态门户已通过 Node 页面/API 测试；M2-D 已接入 operation/audit 查询和人工对账基础页面 | 浏览器 E2E、失败目标恢复入口和完整运营体验 |
 | M2-C5 操作/审计查询与对账 | operation 详情、脱敏审计分页、签名 cursor 和四种人工对账动作 | 后端已实现并通过 Mock/故障测试；覆盖权限、组织范围、过滤分页、消费绑定、脱敏、幂等/冲突、旧快照、依赖/审计失败、父子 operation 和原审计不可改写；M2-D 已接入基础查询/对账页面 | 真实审计存储、生产 IdP/代理、完整运营查询/对账体验和人工运维演练未验收 |
-| M2-D 看板与运营 | 用量/审计查询与 cursor 分页、operation 列表/详情、受控人工对账、审批箱/串并行多步骤、用量/审计 CSV 授权导出、员工只读状态页和通知运营页 | 管理 `109/109`；覆盖 RBAC/组织范围、审批绑定、审批箱、serial/parallel、quorum、转交/撤回、fresh step-up、CSRF、理由、幂等、一次性 Bearer token、会话 Cookie 绑定、query-string token 拒绝、下载后消费/过期、CSV BOM/CRLF、公式注入防护、字段/记录/字节上限、L0 脱敏和通知规则/抑制/聚合/升级/死信运营契约 | 失败目标恢复入口、完整运营体验、对象存储、异步大批量导出、Excel、分布式锁、浏览器 E2E、真实 IdP/OA/SIEM、生产负载和留存/删除策略 |
+| M2-D 看板与运营 | 用量/审计查询与 cursor 分页、operation 列表/详情、受控人工对账、审批箱/串并行多步骤、用量/审计 CSV 授权导出、员工只读状态页、通知运营页和 M4-E 内容治理页 | 管理 `123/123`；覆盖 RBAC/组织范围、审批绑定、审批箱、serial/parallel、quorum、转交/撤回、fresh step-up、CSRF、理由、幂等、一次性 Bearer token、会话 Cookie 绑定、query-string token 拒绝、下载后消费/过期、CSV BOM/CRLF、公式注入防护、字段/记录/字节上限、L0 脱敏、内容治理一次性读取/下载和通知规则/抑制/聚合/升级/死信运营契约 | 失败目标恢复入口、完整运营体验、对象存储、异步大批量导出、Excel、分布式锁、浏览器 E2E、真实 IdP/OA/SIEM、生产负载和正式留存/删除验收 |
 | M3 中央 MCP/资源库 | M3-A 资源目录/签名、M3-B 远程 MCP、M3-C-1 同步控制面、M3-C-2 只读管理可见性和 M3-D-3 bridge/Codex 配置/一键配置编排核心已实现 | resource `15/15`（11 核心 + 4 控制面）、mcp-gateway `14/14`、client-sync `26/26`（18 核心 + 8 传输）、local-mcp `60/60`（21 运行时 + 7 helper + 9 server + 5 bridge + 7 Codex 配置 + 10 client setup + 1 真实子进程 E2E）、admin 新增 5 项 M3-C-2 测试；资源发布/回滚 UI、审批联动、M3-B MCP 管理台、helper 安装器/Windows 服务、真实 Codex 客户端、真实 IdP、浏览器 E2E 和 Docker/Compose 实机待完成 | 可写管理 UI、生产验收、灰度/自动回滚 |
-| M4 会话审计 | 方案；当前只有元数据用量 | M0 用法归属 | 正文采集、流式拼接、脱敏、检索、留存 |
+| M4 会话审计 | M4-A/M4-B/M4-C/M4-D 后端核心和 M4-E 管理侧内容治理已实现，默认关闭；M4 整体和生产验收未完成 | 20 项事件管道、14 项内容审计、13 项检索/一次性授权、20 项留存/删除/法律保留/导出，以及 admin-service 10 项内容治理专项 | 真实网关正文采集、生产浏览器 E2E、WORM/KMS/HA、备份恢复和生产验收 |
 | M5 安全运营 | 方案 | 无 | 告警、阻断、SIEM、值班闭环 |
 | M6 规模化 | 方案 | 无 | PostgreSQL/HA、KMS、mTLS、容量压测 |
 
@@ -2103,21 +2113,21 @@ sourceIp, userAgentHash, reason, approvalId
 
 | 切片 | 内容 | 当前状态 | 通过后才能进入 |
 | --- | --- | --- | --- |
-| M2-A 身份底座 | 管理 OIDC、会话、CSRF、服务间认证、`/admin/me`、组织/角色存储 | 已实现；当前管理回归 109/109、auth 26/26 | 角色撤销立即生效 |
+| M2-A 身份底座 | 管理 OIDC、会话、CSRF、服务间认证、`/admin/me`、组织/角色存储 | 已实现；当前管理回归 123/123、auth 26/26 | 角色撤销立即生效 |
 | M2-B 只读治理 | 用户、部门、设备、凭证、模型、用量只读接口和范围过滤 | 已实现，Mock 测试通过；生产环境待验收 | 部门管理员不能跨部门读取 |
 | M2-C1 Auth 内部写接口 | 停用/启用、设备吊销、当前凭证轮换；仅服务间令牌 | 已实现，Auth Mock 测试通过 | 目标校验、设备串行化和失败回滚通过；不暴露管理台 |
 | M2-C2 管理写 API 与权限映射 | 四个管理写 API、管理权限/范围/CSRF/理由、目标预检和响应脱敏 | 已实现，Mock 测试通过；管理页已接入额度/模型策略写表单和基础停用/吊销/轮换页面 | 跨部门写拒绝；依赖故障不伪造成功 |
 | M2-C3 幂等、操作状态与审计 | 持久化幂等键、同键重放/冲突、`operationId`、intent/result 审计和审计失败阻断 | 已实现，Mock 测试通过 | 每个敏感写操作可追溯；审计失败时依赖调用为 0 |
 | M2-C4-01 网关机器协议 | schema v1 的 `gateway-key describe <id> --json` 和原子 `policy apply <id> --json` | 已实现，Go 单测、CLI 回归和隔离真实二进制冒烟通过 | 后续适配器只能调用机器协议，不得解析人类文本或直接改 `caller-keys.json` |
 | M2-C4-02 受控网关适配器 | `enterprise/gateway-control/` 的 describe/apply/健康检查、固定 argv、独立 Bearer 令牌、超时、输出上限、独立回读和 `pending` | 已实现；Node Mock/故障测试 `15 passed, 0 failed`；C4-04 真实管理链路已验证 | Docker/Compose、真实共享卷和 mTLS 待验收 |
-| M2-C4-03a 正式模型目录 | 只读模型目录、稳定模型 ID、显式 Provider 通配符、group 展开、目录摘要和失败关闭 | 已实现；82 项管理服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项和 6 项 SIEM 专项测试通过，合计 109/109 | admin-service 展开稳定模型 ID；部署后坏目录必须启动失败，日志不泄漏路径 |
+| M2-C4-03a 正式模型目录 | 只读模型目录、稳定模型 ID、显式 Provider 通配符、group 展开、目录摘要和失败关闭 | 已实现；86 项管理服务集成、5 项内容治理客户端专项、5 项内容治理存储专项、7 项目录专项、7 项通知渠道专项、7 项通知规则专项和 6 项 SIEM 专项测试通过，合计 123/123 | admin-service 展开稳定模型 ID；部署后坏目录必须启动失败，日志不泄漏路径 |
 | M2-C4-03b 用户级策略核心 | 旧 M1 `unknown` 迁移、版本化用户级 `gatewayPolicy`、quota/models 分步首次设置、缺项失败关闭、版本冲突和凭证回读确认 | 已实现 auth-service 核心和内部接口；26 项 auth 测试通过；C4-04 验证管理端到真实网关的完整编排 | 真实部署验收 |
-| M2-C4-03c 管理 API、签发同步与交付 | 管理端额度/模型 API、issuance journal、自动 apply/readback、同步后交付、失败补偿和启动恢复 | 核心已实现；管理 109/109、auth 26/26、gateway-control 15/15 Mock/故障测试通过；真实环境待验收 | 调额/模型授权在真实网关生效；失败可补偿且不交付未同步 Key |
+| M2-C4-03c 管理 API、签发同步与交付 | 管理端额度/模型 API、issuance journal、自动 apply/readback、同步后交付、失败补偿和启动恢复 | 核心已实现；管理 123/123、auth 26/26、gateway-control 15/15 Mock/故障测试通过；真实环境待验收 | 调额/模型授权在真实网关生效；失败可补偿且不交付未同步 Key |
 | M2-C4-04 完整管理到真实 Magpie 策略流 E2E | 首次 join、管理 OIDC/CSRF、分步策略、双设备 Key、真实限额/模型拒绝、部分失败、refresh/rotate 继承、故障恢复、usage 归属和秘密扫描 | 18 阶段 E2E 全部通过 | Docker/共享卷、真实企业 IdP、反向代理和浏览器自动化验收 |
 | M2-C4-03d 页面与运营 | 页面状态、失败恢复入口和查询/对账入口 | C4-03d 部分实现：管理页写表单/证据链和员工只读状态门户已通过页面/API 静态路径测试；M2-D 已接入基础 operation/audit 查询、人工对账和导出页面 | 浏览器 E2E、失败恢复入口和完整运营体验 |
 | M2-C5 操作、审计查询与对账 | operation 详情、脱敏审计分页、过滤/游标和四种人工对账动作 | 后端已实现；权限、组织范围、脱敏、分页、幂等/冲突、旧快照、依赖/审计失败、父子 operation 和原审计不可改写均通过 Mock/故障测试；M2-D 已接入基础操作/审计查询页面 | 真实审计存储、完整运营查询/对账体验和失败对账补偿演练 |
-| APR-01a/01b/01c/01d 审批、外部回调与 step-up | 风险分级、规范化 payload 与绑定摘要、审批状态机、职责分离、组织范围、一次性消费、并发拒绝、启动恢复、系统审计、HMAC 外部回调适配器、独立 OIDC step-up，以及审批箱/串并行/quorum/转交/撤回 | APR-01a/01b/01c/01d 均已实现并通过当前管理 `109/109` 回归；APR-01d 覆盖审批箱状态过滤、活动步骤、并行 quorum、转交/撤回和外部回调 `stepId` | 真实 OA/IdP/MFA/反向代理/浏览器流程和生产回调演练未验收；基础审批页面已由 M2-D 接入 |
-| APR-01e break-glass | 15 分钟单次紧急授权、24 小时事后复核、申请/复核 RBAC、critical step-up、环境/策略/申请人/动作/目标/组织/风险/理由/payload/binding 绑定、原子消费、复核提醒、通知、审计、API 和管理页 | Mock/集成核心已实现并通过 admin `109/109` 回归；`super_admin` 可申请/复核，`security_admin` 仅复核；审批和 break-glass 不能同时使用 | 真实 IdP/MFA、SIEM/告警、OA/工单、外部工单 ID 回读、浏览器 E2E、5 分钟告警/工单 SLA 和 24 小时生产事后复核演练未验收 |
+| APR-01a/01b/01c/01d 审批、外部回调与 step-up | 风险分级、规范化 payload 与绑定摘要、审批状态机、职责分离、组织范围、一次性消费、并发拒绝、启动恢复、系统审计、HMAC 外部回调适配器、独立 OIDC step-up，以及审批箱/串并行/quorum/转交/撤回 | APR-01a/01b/01c/01d 均已实现并通过当前管理 `123/123` 回归；APR-01d 覆盖审批箱状态过滤、活动步骤、并行 quorum、转交/撤回和外部回调 `stepId` | 真实 OA/IdP/MFA/反向代理/浏览器流程和生产回调演练未验收；基础审批页面已由 M2-D 接入 |
+| APR-01e break-glass | 15 分钟单次紧急授权、24 小时事后复核、申请/复核 RBAC、critical step-up、环境/策略/申请人/动作/目标/组织/风险/理由/payload/binding 绑定、原子消费、复核提醒、通知、审计、API 和管理页 | Mock/集成核心已实现并通过 admin `123/123` 回归；`super_admin` 可申请/复核，`security_admin` 仅复核；审批和 break-glass 不能同时使用 | 真实 IdP/MFA、SIEM/告警、OA/工单、外部工单 ID 回读、浏览器 E2E、5 分钟告警/工单 SLA 和 24 小时生产事后复核演练未验收 |
 | NOTIFY-01a transactional outbox | 8 种 L0 事件、稳定 `eventId`/`deliveryId`、原子提交、租约、退避、死信、重启恢复、deliveries 查询和人工重放 | 已实现并通过 Mock/故障测试 | 真实生产存储、通知运营 UI 和完整通知闭环未验收 |
 | NOTIFY-01b 渠道管理 | `email`/`im`/`webhook`/`ticketing` 渠道 API、RBAC/CSRF/step-up/理由/幂等/审计、按 `eventId + channelId` fanout、渠道测试、HMAC Webhook 和统一 HTTPS 网关适配器 | 已实现并通过 7 项专项及管理回归；仅允许 HTTPS:443、host allowlist、DNS 固定解析、拒绝私网/回环/链路本地/云元数据、仅 307/308 最多 3 跳、超时和响应大小限制；Secret 只保存 `secretRef` | 不是原生 SMTP/Graph/飞书/Teams/ServiceNow/Jira SDK；真实厂商连接、证书/租户配置、真实 SIEM 接入和生产投递未验收 |
 | NOTIFY-01c SIEM transport | `http-collector`/`otlp-http`/`syslog-tls`、固定 L0 schema、dead-letters API、HTTPS:443/TLS:6514、allowlist、固定 DNS、SSRF 防护、Bearer `secretRef`（Syslog 禁止）、32 KiB 默认上限、critical 优先和 5 分钟轮询上限 | 已实现并通过 6 项专项及管理回归 | 真实 SIEM/Collector/Syslog/生产证书未验收；真实值班接入和 5 分钟可见性 SLA 未验收 |
@@ -2760,7 +2770,7 @@ gateway-control 当前尚未接入该目录，但同样不得新增目录写入�
 
 当前完成边界：
 
-- 92 项管理服务集成、7 项目录专项、7 项通知渠道专项、7 项通知规则专项和 6 项 SIEM 专项测试通过，管理服务合计 119 项通过。
+- 86 项管理服务集成、5 项内容治理客户端专项、5 项内容治理存储专项、7 项目录专项、7 项通知渠道专项、7 项通知规则专项和 6 项 SIEM 专项测试通过，管理服务合计 123 项通过。
 - admin-service 加载目录并把 group/provider 选择器展开为稳定模型 ID；auth-service 把
   稳定模型 ID 写入用户级 `gatewayPolicy`，gateway-control 不接收 group 表达式。
 - C4-03a 的本地测试证明目录加载、校验和安全投影；C4-03c 的 Mock/故障测试证明管理 API
@@ -2978,7 +2988,7 @@ C4/C5/D 退出条件：
 的管理会话/CSRF/RBAC、组织子树、必填理由、持久化幂等、`operationId`、intent/result
 审计、审计失败阻断和响应/存储脱敏。C4-01 覆盖底层机器协议；C4-02 覆盖受控适配器并通过
 Mock/故障测试，但尚未完成 Docker/真实共享卷验收。C4-03a 已实现正式只读目录并通过
-119 项管理服务测试，真实部署未验收；C4-03b/C4-03c 已在 auth-service 和管理服务接通
+123 项管理服务测试，真实部署未验收；C4-03b/C4-03c 已在 auth-service 和管理服务接通
 策略核心、自动 apply/readback、同步后交付、失败补偿和启动恢复，并通过 Mock/故障测试。
 C4-03d 已实现管理页额度/模型写表单、完整证据链状态和员工只读状态门户；C4-04 完整管理到
 真实 Magpie 策略流 E2E 已通过。M2-C5 的查询/审计/对账后端已通过 Mock/故障测试，
@@ -3091,16 +3101,26 @@ feat/m2-e-notification-outbox
 
 交付：
 
-- 敏感数据、异常用量、异地、越权、直连检测。
-- 告警、限流、阻断和吊销联动。
-- SIEM/OTel 接入。
-- 运维看板、健康检查和值班手册。
+- M5-A 检测规则引擎（核心已实现）：独立 `security-service`、严格检测事件 allowlist、
+  IP 哈希、敏感数据/异常用量/预算/直连/越权/设备合规/来源 IP/区域规则、确定性 finding、
+  原始事件保留、抑制标记、聚合、原子 JSON 存储和 ingest/read token 分离 HTTP API。
+- M5-B 响应动作（状态机与受控模拟执行核心已实现）：限流、阻断、吊销 Key、锁定设备和开票；支持创建、审批、激活、撤销、过期、列表、详情和逐动作 hash-chain 审计，审批/理由/组织/幂等/source-target 绑定均失败关闭。当前执行器是 `simulation`，返回 `gatewayApplied: false`，真实网关阻断/吊销、真实厂商工单、管理 UI 和生产验收未完成。
+- M5-C 可观测性（未实现）：OTel/Prometheus/Grafana、生产 SIEM、值班手册和故障演练。
 
 验收：
 
 - 典型违规场景 5 分钟内可见。
 - 严重风险可一键吊销和阻断。
 - 告警有明确责任人和处置记录。
+- 真实网关事件投递、管理 UI、生产 SIEM、响应动作和正式验收均有证据。
+
+当前状态：security-service 的 30 项隔离服务测试通过。其中 M5-A 的 17 项证明规则计算、
+严格字段边界、秘密拒绝、幂等/冲突、持久化恢复和 HTTP 令牌隔离；网关侧元数据投递核心
+另有 12 项 Go 测试通过，证明真实 `usage.Observer` 的身份/来源地址映射、默认关闭、哈希、
+重试和插件故障隔离。M5-B 的 13 项测试覆盖五类响应动作、审批/职责分离、组织隔离、幂等、
+source/target 绑定、撤销、失败状态和逐动作 hash-chain 审计。但 Docker/Compose、真实
+反向代理来源地址、运行中网关到 security-service 的端到端投递、管理 UI 和生产验收仍未完成；
+M5-B 的真实网关执行仍为 `simulation`，因此也不等于完整 M5。
 
 ### M6：规模化与高可用（按需）
 
@@ -3124,15 +3144,16 @@ feat/m2-e-notification-outbox
 | --- | --- | --- | --- |
 | M3 | M3-A 目录与签名（核心已实现） | `resource-service`、manifest schema、内容寻址对象存储、签名校验 | 资源可创建不可变版本并校验哈希/签名；11 项测试已覆盖，真实审批、管理台、员工端同步接入和生产验收未完成 |
 | M3 | M3-B 远程 MCP（核心已实现） | MCP 注册、企业统一端点、工具级权限、健康检查 | 14 项测试已覆盖未授权 MCP/工具不可见/不可调用、scope、审批门禁、SSRF、凭据隔离、健康/熔断和审计边界；管理台、admin-service 真实审批联动、OIDC 组织分配、员工端同步接入、共享事务存储、多副本和生产验收未完成 |
-| M3 | M3-C-1/M3-C-2 同步控制面与只读管理可见性（已实现） | 短期同步凭证、desired-state、设备上报、管理员 JSON 查询、`readActiveResource()`、签名同步、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、秘密隔离，以及按组织范围过滤的只读资源/同步报告 API 和管理页面板 | client-sync 26 项测试覆盖 18 项同步引擎核心和 8 项 HTTP 传输；resource 15 项测试覆盖 11 项核心和 4 项控制面；admin-service 新增 5 项 M3-C-2 测试并通过，企业当前全量 339 项（含 audit-service 34 项、magpie-plugin 30 项）；资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 Codex 客户端、浏览器 E2E、Docker/Compose 实机、5 分钟端到端可见和生产验收未完成 |
+| M3 | M3-C-1/M3-C-2 同步控制面与只读管理可见性（已实现） | 短期同步凭证、desired-state、设备上报、管理员 JSON 查询、`readActiveResource()`、签名同步、原子安装、失败保留旧版本、离线缓存、强制/推荐、漂移、秘密隔离，以及按组织范围过滤的只读资源/同步报告 API 和管理页面板 | client-sync 26 项测试覆盖 18 项同步引擎核心和 8 项 HTTP 传输；resource 15 项测试覆盖 11 项核心和 4 项控制面；admin-service 新增 5 项 M3-C-2 测试并通过，企业当前九套全量 376 项（含 admin-service 123 项、audit-service 67 项和 security-service 30 项）；资源发布/回滚 UI、审批联动、helper 安装器/产品流、Windows ACL、MDM、真实 Codex 客户端、浏览器 E2E、Docker/Compose 实机、5 分钟端到端可见和生产验收未完成 |
 | M3 | M3-D-3 本地 MCP helper/server/bridge、Codex 配置映射与一键配置编排（核心已实现） | 签名包、运行权限、Secret Reference、Secret Broker、JSON-RPC、健康检查、client-sync active 资源桥接、回环 HTTP helper API、stdio bridge、Codex `config.toml` 受管块、`setupLocalMcpClient()` 同步/选包/启动/写入/回读/受控环境注入 | 60 项测试：21 项覆盖签名/篡改/路径/安装/策略/审批/Secret Broker/JSON-RPC/审计/健康边界，7 项覆盖 ClientSyncEngine/helper 契约，9 项覆盖回环绑定/Bearer/路由/body/错误码/锁/脱敏边界，5 项覆盖 bridge，7 项覆盖 Codex 配置映射，10 项覆盖一键配置编排的成功、失败关闭、多资源选择、端口冲突、冲突配置、注入和回读失败，1 项经过编排入口的真实子进程 E2E 覆盖 `ClientSyncEngine + LocalMcpHost + helper HTTP server + stdio bridge`；真实 Codex 客户端、helper 安装器/Windows 服务/管理台、生产 launcher/Windows ACL/DPAPI/token 轮换、外部 OS 沙箱和生产验收未完成 |
 | M4 | M4-A 事件管道（核心已实现） | 请求/回复/tool_call/policy_decision schema、请求 ID、幂等、异步投递 | 20 项测试覆盖 allowlist L0/L1 元数据、会话/请求串联、持久队列、重放/冲突、重启恢复、查询统计和秘密扫描；真实网关/UI、管理员 OIDC/RBAC、组织范围、积压告警和生产验收未完成 |
-| M4 | M4-B 内容审计（核心已实现） | 流式拼接、脱敏、分片、AES-256-GCM 加密对象存储、索引、独立读取令牌和访问审计 | 14 项专项测试覆盖 L2 `text/plain` 限制、分片顺序/偏移/幂等/冲突/乱序/TTL/容量、重启中断恢复、完整脱敏、加密对象存储、服务令牌 + 独立读取令牌 + 理由 + 授权 ID，以及成功/失败读取审计；默认关闭；真实网关采集、管理员 OIDC/RBAC/组织范围、管理台检索/查看、留存删除、删除证明、法律保留、WORM、加密导出、Docker/Compose 实机和生产验收未完成 |
-| M4 | M4-C 检索与权限 | 员工/部门/时间/模型/工具筛选、正文二次授权 | 审计员只看到授权范围，查看正文有记录 |
-| M4 | M4-D 留存与导出 | 留存策略、删除证明、加密导出、过期链 | 删除和法定保留均有可验证证据 |
-| M5 | M5-A 规则引擎 | 敏感数据、异常用量、越权、直连检测规则 | 规则命中可在测试环境稳定复现 |
-| M5 | M5-B 响应动作 | 告警、限流、阻断、吊销、设备锁定、工单 | 严重事件处置可追踪到人和时间 |
-| M5 | M5-C 可观测性 | OTel/Prometheus/Grafana、SIEM、值班手册 | 典型故障和违规 5 分钟内可见 |
+| M4 | M4-B 内容审计（核心已实现） | 流式拼接、脱敏、分片、AES-256-GCM 加密对象存储、索引和访问审计 | 14 项专项测试覆盖 L2 `text/plain` 限制、分片顺序/偏移/幂等/冲突/乱序/TTL/容量、重启中断恢复、完整脱敏、加密对象存储和成功/失败访问审计；默认关闭；当时的静态读取令牌已由 M4-C 一次性 grant 取代；真实网关采集、管理员 OIDC/RBAC/组织范围、管理台检索/查看、留存删除、删除证明、法律保留、WORM、加密导出、Docker/Compose 实机和生产验收未完成 |
+| M4 | M4-C 检索与一次性正文授权（核心已实现） | 员工/部门/设备/Agent/模型/MCP/工具/内容类型/状态/时间筛选、签名 cursor、正文一次性 grant 和访问审计 | 13 项专项测试覆盖筛选、固定排序、cursor 篡改/筛选绑定、管理员/组织/会话/目标不匹配、grant 过期/重放/重启、列表不含正文、访问审计失败关闭和令牌隔离；默认关闭；管理员 OIDC/RBAC/step-up 编排、管理台检索/查看、浏览器 E2E、真实网关采集、PostgreSQL/HA 和生产验收未完成 |
+| M4 | M4-D 留存、法律保留、删除证明与加密导出（后端核心已实现） | 正文/元数据留存、后台与显式清扫、法律保留、幂等删除/脱敏、HMAC 删除证明、AES-256-GCM `.mge` 导出、一次性下载、过期/孤儿清理和治理审计 | 20 项专项测试覆盖留存边界、dry-run、活动/过期保留、幂等删除、staging 恢复、证明校验、v1→v2 迁移、加密导出、一次性 token、持久化失败关闭和清理；默认关闭；当时管理 UI 与 admin-service 编排未接入，后续由 M4-E 补齐管理侧核心 |
+| M4 | M4-E 管理员内容治理（核心已实现） | 管理台检索、受控正文读取、留存、删除/脱敏、删除证明、法律保留和双层加密导出；接入管理 OIDC、RBAC、审批、fresh step-up、CSRF、幂等和 operation/审计 | 10 项管理专项测试覆盖客户端、全局组织范围、break-glass 拒绝、审批与 step-up、一次性读取、双层 AES-256-GCM 下载和失败关闭；默认关闭；真实网关正文采集、浏览器 E2E、WORM/KMS、HA、备份恢复和生产验收未完成 |
+| M5 | M5-A 规则引擎与网关元数据投递（核心已实现） | 敏感数据、异常用量、预算阈值、直连、授权范围越权、设备不合规、来源 IP/区域检测规则；严格事件 allowlist、IP 哈希、确定性 finding/聚合、原始事件保留、抑制标记、原子 JSON 存储和 HTTP API；网关按路由尝试投递元数据并有界异步重试 | 17 项规则引擎测试覆盖八条规则、合规流量不误报、确定性 ID、抑制只标记 finding、幂等重放/冲突、重启恢复、损坏存储失败关闭、令牌隔离、严格 HTTP 校验、秘密/超限拒绝和配置失败关闭；另有 12 项 Go 测试覆盖网关导出器、插件生命周期、身份/真实 peer 地址和不信任转发头；管理 UI、生产 SIEM、Docker/Compose、反向代理来源地址、运行中端到端和生产验收未完成；响应动作见 M5-B |
+| M5 | M5-B 响应动作（核心已实现） | 告警、限流、阻断、吊销、设备锁定、工单和可撤销处置 | 30 项 security-service 测试中的 13 项覆盖五类动作、状态机、审批/职责分离、有效期、source/target 绑定、幂等/冲突、组织隔离、hash-chain 审计、重启恢复、失败状态和 v1→v2 迁移；当前只做受控模拟执行，`gatewayApplied: false`，`gateway_key` fail closed；真实网关阻断/吊销、真实工单、管理 UI 和生产验收未完成 |
+| M5 | M5-C 可观测性 | OTel/Prometheus/Grafana、SIEM、值班手册 | 未实现；典型故障和违规 5 分钟内可见尚无可验收证据 |
 | M6 | M6-A 数据层 | PostgreSQL/ClickHouse、迁移、备份、恢复演练 | 迁移可回滚，RPO/RTO 达标 |
 | M6 | M6-B 数据面 | 多副本、负载均衡、Redis 限流、灰度 | 单节点故障不影响请求 |
 | M6 | M6-C 密钥与供应链 | Vault/KMS、mTLS、SBOM、签名发布、扫描 | 密钥不落明文，构建产物可验证 |
@@ -3583,7 +3604,7 @@ API、同步后交付和失败补偿已有 Mock/故障证据；C4-04 完整管�
 7. M2-C3 已完成并通过 Mock：四个管理写 API 已具备 `Idempotency-Key` 持久化/重放/冲突、
    `operationId` 和 intent/result 审计；intent 失败不调用依赖，result 失败不返回成功。
    C4-02 已完成代码和 Mock/故障测试，下一步在 Docker 可用环境验证镜像、Compose、健康检查、
-真实共享卷和故障恢复。C4-03a 已完成正式只读目录、坏目录失败关闭和 119 项管理服务测试，
+真实共享卷和故障恢复。C4-03a 已完成正式只读目录、坏目录失败关闭和 123 项管理服务测试，
    但还要在真实 Compose 中验证只读挂载和 digest 重启。C4-03b 和 C4-03c 核心已完成，
    下一步验证真实共享卷和部署环境中的 apply/readback、同步后交付和失败补偿。C4-03d 的
    管理页额度/模型写表单和员工只读状态门户已实现，M2-D 已接入基础 operation/audit 查询、
@@ -3731,21 +3752,21 @@ M2-A/M2-B/M2-C1/M2-C2/M2-C3 已经完成独立管理 OIDC、会话、CSRF、RBAC
 | --- | --- | --- | --- | --- | --- |
 | E10.1 | P0 | L0 请求元数据 | M0/M4 | 人/部门/设备/Agent/模型/状态/Token/费用/延迟/IP 可检索 | M4-A 管道核心可接收 L0 元数据；真实网关/UI 未接入，生产检索未验收 |
 | E10.2 | P1 | L1 摘要和工具调用 | M4 | 工具名、参数类别、结果状态和策略命中可检索，不含正文 | M4-A 管道核心已实现 `tool_call`/`policy_decision`；真实网关/UI 未接入 |
-| E10.3 | P2 | L2 脱敏正文 | M4 | 显式授权、二次确认、目的、水印、访问审计和留存全部生效 | M4-B 后端核心部分实现：默认关闭，只接受 `text/plain` 脱敏正文，流式分片完成后统一脱敏并 AES-256-GCM 加密落盘，读取要求独立令牌、理由、授权 ID 并记录成功/失败访问审计；管理员 OIDC/RBAC/组织范围、管理台检索/查看、二次确认、水印、留存和生产验收未完成 |
+| E10.3 | P2 | L2 脱敏正文 | M4 | 显式授权、二次确认、目的、水印、访问审计和留存全部生效 | M4-B 后端核心、M4-C 一次性授权、M4-D 留存/删除/保留/导出和 M4-E 管理侧编排已实现；管理台可检索、经审批和 fresh step-up 一次性读取、执行治理并生成双层加密导出，默认关闭且只允许全局范围 `*`；真实网关采集、水印、生产浏览器 E2E 和正式验收未完成 |
 | E10.4 | P2 | L3 原始正文 | M4 | 默认关闭；双人审批、短保留、法定调查和不可删除访问审计 | 未开始 |
 | E10.5 | P1 | 流式拼接、幂等和异步投递 | M4 | 断流/重试可恢复；重复事件不重复计费；积压可告警 | M4-A 事件幂等队列已实现；M4-B 内容分片顺序/偏移、幂等重放、冲突/乱序/TTL/容量和重启中断恢复核心已实现；真实网关断流/重试联调、积压告警和生产验收未完成 |
-| E10.6 | P1 | 检索、导出、留存和删除证明 | M4 | 按范围检索；加密导出；删除后可验证；法律保留优先 | 未开始 |
-| E10.7 | P1 | 审计访问与正文分离 | M4 | 元数据、摘要、正文、附件分权；管理员访问不能被普通管理员删除 | M4-B 后端核心已要求服务令牌 + 独立读取令牌 + 理由 + 授权 ID，并记录成功/失败读取审计；管理员 OIDC/RBAC/组织范围、审批/二次授权、元数据/正文/附件分权、管理台不可删除访问审计和生产验收未完成 |
+| E10.6 | P1 | 检索、导出、留存和删除证明 | M4 | 按范围检索；加密导出；删除后可验证；法律保留优先 | M4-C 内容检索、M4-D 留存/法律保留/删除证明/加密导出和 M4-E 管理台编排已实现；admin-service 在 audit-service `.mge` 外包一层独立 AES-256-GCM 密钥形成 `.mge.enc`；真实网关采集、WORM/KMS、备份恢复和生产验收未完成 |
+| E10.7 | P1 | 审计访问与正文分离 | M4 | 元数据、摘要、正文、附件分权；管理员访问不能被普通管理员删除 | M4-C 已隔离 ingest/内容管理令牌并以一次性 grant 读取正文；M4-E 已接入管理员 OIDC/RBAC/step-up、审批、CSRF、幂等、operation/审计、全局范围和 break-glass 禁止；附件分权、不可篡改审计、真实网关采集和生产验收未完成 |
 | E10.8 | P0 | 通知 outbox 与多渠道投递 | M2-E/M5 | 业务提交不等待渠道；outbox 可恢复，邮件/IM/Webhook/SIEM/工单可重试、死信、人工重放且不含秘密 | NOTIFY-01a 的 outbox、租约、重试、死信、deliveries 查询和人工重放已实现；NOTIFY-01b 的 email/im/webhook/ticketing 渠道管理、渠道测试和统一 HTTPS 网关适配器已实现并通过 Mock/故障测试；NOTIFY-01c 的 SIEM transport、固定 L0 schema 和 dead-letters API 已实现并通过 6 项专项测试；NOTIFY-01d 的规则、抑制、聚合、升级、受审计重放和运营页已实现并通过 7 项专项测试；真实 SIEM、真实厂商连接、生产值班和生产验收未完成（见 N1-N8） |
 
 #### 25.2.8 安全运营与合规（E11）
 
 | ID | 优先级 | 能力 | 阶段 | 完成标准 | 当前状态 |
 | --- | --- | --- | --- | --- | --- |
-| E11.1 | P1 | 异常用量、异地、越权、直连检测 | M5 | 典型规则可稳定复现，误报可抑制/聚合 | 已设计 |
-| E11.2 | P1 | 限流、阻断、吊销和设备锁定 | M5 | 一键响应有审批/理由/审计；响应动作可撤销 | 已设计 |
-| E11.3 | P1 | 敏感数据检测和落盘前脱敏 | M4/M5 | Key、密码、身份证、银行卡、私钥等不进入日志/正文存储 | 部分设计 |
-| E11.4 | P1 | 安全事件证据链 | M5 | 事件、请求、管理员访问和响应动作可串联，不可静默删除 | 已设计 |
+| E11.1 | P1 | 异常用量、异地、越权、直连检测 | M5 | 典型规则可稳定复现，误报可抑制/聚合 | M5-A 规则引擎核心已实现并通过 17 项测试，网关元数据投递核心另有 12 项 Go 测试通过，覆盖八条规则、确定性 finding/聚合、抑制标记和真实调用元数据映射；管理 UI、M5-B 真实执行、Docker/Compose、反向代理来源地址、运行中端到端和生产规则验收未完成 |
+| E11.2 | P1 | 限流、阻断、吊销和设备锁定 | M5 | 一键响应有审批/理由/审计；响应动作可撤销 | M5-B 状态机与受控模拟执行核心已实现，13 项专项测试覆盖审批/职责分离、组织隔离、幂等、有效期、source/target 绑定、撤销和 hash-chain 审计；当前 `gatewayApplied: false`，真实网关执行、真实工单、管理 UI 和生产验收未完成 |
+| E11.3 | P1 | 敏感数据检测和落盘前脱敏 | M4/M5 | Key、密码、身份证、银行卡、私钥等不进入日志/正文存储 | M5-A 可检测敏感类别并拒绝含秘密的检测事件；M4-B 已有正文落盘前脱敏核心；真实网关/日志全链路和生产验收未完成 |
+| E11.4 | P1 | 安全事件证据链 | M5 | 事件、请求、管理员访问和响应动作可串联，不可静默删除 | M5-A 保留原始检测事件并生成确定性 finding/聚合；M5-B 已为每个响应动作提供独立 hash-chain 审计并在重启时校验完整性；跨服务统一证据链、不可篡改存储、管理 UI 和生产验收未完成 |
 | E11.5 | P2 | 法规/行业合规评审 | 上线前 | 员工告知、数据保护影响评估、留存和跨境策略有签字 | 未开始 |
 
 #### 25.2.9 交付、部署、规模化与上游治理（E12）
@@ -3774,11 +3795,11 @@ M2-A/M2-B/M2-C1/M2-C2/M2-C3 已经完成独立管理 OIDC、会话、CSRF、RBAC
 | ID | 优先级 | 能力 | 阶段 | 完成标准 | 当前状态 |
 | --- | --- | --- | --- | --- | --- |
 | C4.1 | P0 | 用户级 `gatewayPolicy` | M2-C4 | 模型、0-5 个额度窗口、版本和 `known/unknown/pending` 状态持久化；新签发、refresh、rotate 继承 | auth-service 核心已实现，26/26 测试通过；管理端自动编排已接通 |
-| C4.2 | P0 | 额度修改 API | M2-C4 | `PUT /users/{id}/quota` 具备会话、CSRF、RBAC、范围、理由、版本、幂等和 intent/result 审计 | 已实现，管理 109/109 覆盖；管理页写表单已接入，真实环境待验收 |
-| C4.3 | P0 | 模型授权 API | M2-C4 | `PATCH /users/{id}/models` 只接受稳定模型 ID；未知、空数组和隐式扩大范围被拒绝 | 已实现，管理 109/109 覆盖；管理页写表单已接入，真实环境待验收 |
+| C4.2 | P0 | 额度修改 API | M2-C4 | `PUT /users/{id}/quota` 具备会话、CSRF、RBAC、范围、理由、版本、幂等和 intent/result 审计 | 已实现，管理 123/123 覆盖；管理页写表单已接入，真实环境待验收 |
+| C4.3 | P0 | 模型授权 API | M2-C4 | `PATCH /users/{id}/models` 只接受稳定模型 ID；未知、空数组和隐式扩大范围被拒绝 | 已实现，管理 123/123 覆盖；管理页写表单已接入，真实环境待验收 |
 | C4-01 | P0 | 网关机器协议 | M2-C4-01 | schema v1 的 `describe --json` 和原子 `policy apply --json`；64 KiB、稳定错误、无秘密、冲突不写、独立回读 | 已实现；Go 单测、CLI 回归和隔离真实二进制冒烟通过 |
 | C4-02 | P0 | 受控网关适配器 | M2-C4-02 | 管理服务不读写 `caller-keys.json`；专用 `gateway-control` 只执行白名单命令、10 秒超时、回读确认并映射稳定错误 | 已实现；15 项 Mock/故障测试通过；Docker/真实共享卷、admin-service 接入和 mTLS 待验收 |
-| C4-03a | P0 | 正式模型目录 | M2-C4-03a | 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、目录版本/摘要；坏目录失败关闭 | 已实现；92 项管理服务集成和 7 项目录专项等合计 119 项管理测试通过；真实 Compose/digest 验收待完成 |
+| C4-03a | P0 | 正式模型目录 | M2-C4-03a | 只读 `ADMIN_MODEL_CATALOG_PATH`、稳定模型 ID、显式 Provider 通配符、group 展开、目录版本/摘要；坏目录失败关闭 | 已实现；86 项管理服务集成、10 项内容治理专项和 7 项目录专项等合计 123 项管理测试通过；真实 Compose/digest 验收待完成 |
 | C4-03b | P0 | 首次策略初始化与 `unknown` 迁移 | M2-C4-03b | 旧 M1 显式 `unknown`；`quota`/`models` 可分别先提交但不得伪造另一项；两项完整并逐凭证回读后才 `known` | auth-service 核心已实现，26/26 测试通过；管理端编排已接通，真实部署待验收 |
 | C4-03c | P0 | 管理 API、新 Key 同步后交付 | M2-C4-03c | 管理 API 门禁、签发 journal/幂等关联、apply、独立回读、原子持久化、成功后交付；任一步失败撤销，崩溃恢复不留下孤儿 Key | 核心已实现，Mock/故障测试通过；真实环境待验收 |
 | C4-03d | P0 | 页面与运营状态语义 | M2-C4-03d | `unknown/pending/partial_success/dependency_invoked` 显示可解释；只有完整证据链才可显示“已生效” | 部分实现；管理页写表单/证据链和员工只读状态门户已有，基础查询/对账和停用/吊销/轮换页面已接入；浏览器 E2E、失败恢复入口、完整运营体验和生产验收未完成 |
@@ -3819,7 +3840,7 @@ Mock/集成核心；
 | ID | 优先级 | 能力 | 工作包 | 完成标准 | 当前状态 |
 | --- | --- | --- | --- | --- | --- |
 | A1 | P0 | 风险分级与审批绑定 | APR-01a | 服务端按动作、目标、批量大小、数据分级和组织范围计算 L/M/H/C；审批绑定组织、动作、目标、资源范围、风险、规范化 payload SHA-256、策略版本和有效期 | APR-01a 已实现并通过 Mock/故障测试；真实 OA 未接入 |
-| A2 | P0 | 审批状态机 | APR-01a | 覆盖 requested、pending_approval、approved、rejected、expired、revoked、reserved、consumed 和执行结果；非法迁移与跨状态重放稳定拒绝 | APR-01a 已实现并通过 Mock/故障测试；审批管理 UI 未实现 |
+| A2 | P0 | 审批状态机 | APR-01a | 覆盖 requested、pending_approval、approved、rejected、expired、revoked、reserved、consumed 和执行结果；非法迁移与跨状态重放稳定拒绝 | APR-01a 已实现并通过 Mock/故障测试；基础审批管理 UI 已接入，真实 OA/IdP/MFA、浏览器流程和生产验收未完成 |
 | A3 | P0 | 外部审批适配器 | APR-01b | 飞书/OA/ServiceNow/Jira 等回调必须验签、校验 issuer/audience/时间窗/nonce 和重放缓存；外部批准不能直接执行业务动作 | HMAC-SHA256/Mock 适配器已实现并通过测试：原始 body 验签、300 秒时间窗、nonce 防重放、issuer/audience、eventId 幂等、职责分离和系统审计；真实飞书/OA/ServiceNow/Jira 连接器与生产回调演练未实现/未验收 |
 | A4 | P0 | step-up 重新认证 | APR-01c | 独立管理 OIDC Client、PKCE、MFA/ACR、`max_age`；绑定会话、用户、浏览器/IP 策略和角色范围；默认 10 分钟、关键操作 5 分钟有效 | 已实现并通过 Mock IdP 集成测试：独立 Client/secret/redirect/scopes、`prompt=login`、`max_age`、essential `auth_time`、ACR/MFA、IdP `sub`/email、会话/IP/UA/角色范围摘要绑定、H/C 门禁、logout/过期清理和未配置失败关闭；真实 IdP/MFA/反向代理/浏览器流程未验收 |
 | A5 | P0 | 职责分离与自审批拒绝 | APR-01a/APR-01d | 申请人不能审批自己的请求；审批人状态、权限、组织范围和自身 step-up 均有效；需要的串行/并行步骤全部满足 | APR-01a 已实现自审批拒绝、审批权限和组织范围校验；APR-01c 已强制审批决策使用审批人的新鲜独立 step-up；APR-01d 已实现串行/并行步骤、活动步骤权限和 quorum，并通过 Mock/故障测试 |
@@ -3866,17 +3887,17 @@ M2-C 是当前从“可看”进入“可管”的关键阶段。为避免一次
 | 顺序 | 工作包 | 范围 | 当前状态 | 退出条件 |
 | --- | --- | --- | --- | --- |
 | C1 | auth-service 内部写接口 | 停用/启用、设备吊销、凭证轮换 | 已完成并通过 Mock 测试；管理页面未接入 | 独立服务令牌、目标校验、撤销队列和失败回滚测试通过；管理入口由 C2 提供 |
-| C2 | admin-service 写接口与权限映射 | 四个对外写 API、组织范围、角色权限、理由和响应脱敏 | 已完成并通过 Mock 测试；管理页未接入 | 跨部门写拒绝；审计员/安全管理员职责边界正确；真实环境待验收 |
+| C2 | admin-service 写接口与权限映射 | 四个对外写 API、组织范围、角色权限、理由和响应脱敏 | 已完成并通过 Mock 测试；管理页已接入额度/模型、基础停用/吊销/轮换和审批/operation 页面 | 跨部门写拒绝；审计员/安全管理员职责边界正确；真实环境待验收 |
 | C3 | 幂等、操作状态和审计状态机 | `Idempotency-Key` 持久化/重放/冲突、intent/result、operationId | 已完成并通过 Mock 测试 | 审计失败时依赖调用为 0；重复请求只产生一个业务结果 |
 | C4-01 | 网关机器协议 | schema v1 的 `describe --json` 和原子 `policy apply --json` | 已实现并通过本地测试 | 64 KiB、稳定错误、冲突不写、无秘密和独立回读通过 |
 | C4-02 | `gateway-control` 适配器 | 固定路由、白名单 argv、服务令牌、超时、输出限制和回读 | 已实现并通过 15 项 Mock/故障测试；Docker/真实共享卷待验收 | 真实共享卷、文件锁、健康检查和故障恢复通过 |
-| C4-03a | 正式模型目录与策略校验 | 只读模型目录、稳定 ID、Provider 通配符、group 展开、目录摘要和失败关闭 | 已实现；管理服务 109/109 通过；真实部署待完成 | 坏目录、未知字段、重复 ID/group 和未知引用全部失败关闭；日志不泄漏路径；真实只读挂载、digest 和重启生效通过 |
+| C4-03a | 正式模型目录与策略校验 | 只读模型目录、稳定 ID、Provider 通配符、group 展开、目录摘要和失败关闭 | 已实现；管理服务 123/123 通过；真实部署待完成 | 坏目录、未知字段、重复 ID/group 和未知引用全部失败关闭；日志不泄漏路径；真实只读挂载、digest 和重启生效通过 |
 | C4-03b | 策略模型、首次初始化与迁移 | `gatewayPolicy`、旧 M1 `unknown`、quota/models 分步提交和缺项错误 | auth-service 核心已实现，26/26 测试通过 | 不伪造另一部分；`policy_setup_required` 正确；两项完整并回读后才 `known`；管理端编排已接通，真实部署待验收 |
 | C4-03c | 管理 API、签发同步与交付 | `PUT quota`、`PATCH models`、版本/幂等/审计、签发 journal、apply、回读、持久化、交付和无孤儿补偿 | 核心已实现，Mock/故障测试通过 | 管理 API 门禁、同步完成前不交付、失败补偿和启动恢复已有测试；真实环境待验收 |
 | C4-03d | 页面与运营状态 | 管理页和员工页消费 C4-03b/c 的真实状态，展示失败设备和恢复入口 | 部分实现 | 管理页额度/模型写表单、完整证据链和员工只读状态门户已有；只有完整证据链显示“已生效”，`dependency_invoked` 不自动重试 |
 | C4-04 | 真实网关行为 E2E | 真实 Magpie 限额、模型拒绝、策略继承、多凭证、部分失败和故障注入 | 完整管理链路 18 阶段 E2E 已通过；Docker/共享卷、真实 IdP、反向代理和浏览器 E2E 待验收 | 隔离真实 Magpie 的请求行为与回读一致，不接触真实目录或 `127.0.0.1:3425` |
 | C5 | 操作与审计查询 | `audit-logs`、`operations/{id}`、人工对账 | 后端和 M2-D 基础页面已实现并通过 Mock/故障测试；浏览器 E2E 和生产验收待完成 | 可按操作者、目标、动作、结果和时间过滤；响应脱敏；对账生成子 operation |
-| D | 管理写操作、看板与授权导出 | 管理 UI、报表、导出和操作历史 | 核心已实现，Mock/集成测试通过；生产验收尚未完成 | 额度/模型、审批、operation、对账、查询和 CSV 导出已有；停用/吊销/轮换、异步大导出、浏览器 E2E 和真实环境待完成；只展示 C2-C5 的真实状态 |
+| D | 管理写操作、看板与授权导出 | 管理 UI、报表、导出、内容治理和操作历史 | 核心已实现，Mock/集成测试通过；生产验收尚未完成 | 额度/模型、审批、operation、对账、查询、CSV 导出和 M4-E 受控内容治理已有；停用/吊销/轮换、异步大导出、浏览器 E2E 和真实环境待完成；只展示 C2-C5 与 M4-E 的真实状态 |
 
 C1/C2/C3 的完成边界：
 
@@ -3986,7 +4007,7 @@ M2-C4/C5/D 的证据包必须包含：
 | ENV-01 真实环境基线 | P0 | M1/M2 现有代码 | IdP、TLS 代理、Docker、Windows 计划任务、真实用量卷 | 逐步 E2E、日志脱敏、重启恢复和公司 CA 记录 |
 | C4-01 网关机器协议 | P0 | C3 | schema v1 `describe --json`、原子 `policy apply --json`、64 KiB、冲突和独立回读 | 已实现；Go 单测、CLI 回归、隔离真实二进制冒烟和秘密扫描通过 |
 | C4-02 `gateway-control` 适配器 | P0 | C4-01、C3 | 最小权限服务、白名单 argv、10 秒超时、输出上限、故障映射和回读确认 | 已实现并通过 15 项 Node Mock/故障测试；Docker/真实共享卷验收待完成；不直接解析 `caller-keys.json`，不接受任意命令 |
-| C4-03a 正式模型目录 | P0 | C4-02、C3 | 只读目录 schema、稳定模型 ID、显式 Provider 通配符、group 展开、2 MiB 限制、目录摘要 | 已实现并通过管理服务 109/109；坏文件/未知字段/重复项/未知引用失败关闭；真实 Compose/digest 验收待完成 |
+| C4-03a 正式模型目录 | P0 | C4-02、C3 | 只读目录 schema、稳定模型 ID、显式 Provider 通配符、group 展开、2 MiB 限制、目录摘要 | 已实现并通过管理服务 123/123；坏文件/未知字段/重复项/未知引用失败关闭；真实 Compose/digest 验收待完成 |
 | C4-03b 策略模型与首次初始化 | P0 | C4-03a、C3 | `gatewayPolicy`、旧 M1 `unknown` 迁移、quota/models 分步提交、缺项错误和版本规则 | auth-service 核心已实现，26/26 测试通过；不伪造另一部分，两项完整并逐凭证回读后才 `known`，迁移幂等；管理端编排已接通，真实部署待验收 |
 | C4-03c 管理 API、签发同步与交付 | P0 | C4-03a/b、C4-02、C3 | `PUT quota`、`PATCH models`、payload 指纹、签发 journal/幂等关联、apply、独立回读、持久化和补偿 | 同步前不交付；任一步失败撤销；崩溃恢复不产生孤儿 Key；管理 API 全门禁通过 |
 | C4-03d 页面与运营状态 | P0 | C4-03b/c | 管理页/员工页状态、失败凭证和设备、首次设置、对账入口 | 只有 `succeeded + known + synced + 回读一致` 显示“已生效”；`dependency_invoked` 禁止自动重试 |
@@ -4010,7 +4031,7 @@ M2-C4/C5/D 的证据包必须包含：
 | M3-02 MCP 目录与远程代理 | P1 | M3-01 | MCP 注册、工具 allow/deny、企业地址、健康检查、限流 | 未授权工具不可调用；上游凭据只在网关 |
 | M3-03 客户端同步与策略 | P1 | M3-01/02 | 短期同步凭证、desired-state、设备上报、强制/推荐资源、离线缓存、漂移上报、Provider 锁定和回滚 | 凭证来源固定且按设备/组织授权；5 分钟内同步；坏版本回退；员工不能关闭强制项；管理 UI、本地 helper 和目标 Agent 文件映射完成 |
 | M4-01 审计事件管道 | P1 | M3、网关插件 | L0/L1 事件、请求 ID、异步重试、会话索引 | 管道核心已实现：20 项测试覆盖 allowlist、幂等、恢复、索引和查询；真实网关接入、管理员授权/UI、积压告警和生产验收未完成 |
-| M4-02 L2/L3 内容审计 | P2 | M4-01、合规批准 | 流式拼接、脱敏、分片、检索、留存、删除证明和访问审计 | M4-B 的 L2 后端核心已实现并通过 14 项专项测试，覆盖默认关闭、`text/plain` 限制、流式分片/幂等/恢复、落盘前脱敏、AES-256-GCM 对象存储、独立读取令牌和访问审计；L3 默认关闭且未实现，检索授权、留存、删除证明、法律保留、WORM、加密导出、真实网关、管理 UI、管理员 OIDC/RBAC/组织范围和生产验收未完成 |
+| M4-02 L2/L3 内容审计 | P2 | M4-01、合规批准 | 流式拼接、脱敏、分片、检索、留存、删除证明和访问审计 | M4-B 的 L2 后端核心已实现并通过 14 项专项测试，覆盖默认关闭、`text/plain` 限制、流式分片/幂等/恢复、落盘前脱敏、AES-256-GCM 对象存储和访问审计；M4-C 已实现内容流检索、签名 cursor 和一次性正文 grant，并通过 13 项专项测试；M4-D 已实现留存、删除证明、法律保留和加密导出；M4-E 已接入管理台、OIDC/RBAC/step-up、审批、幂等、operation/审计和双层加密导出，并通过 10 项管理专项测试。L3 默认关闭且未实现；真实网关采集、WORM/KMS、HA、备份恢复、浏览器 E2E 和生产验收未完成 |
 | M5-01 检测与响应 | P1 | M4、OTel | 异常用量/异地/越权/直连/敏感规则、告警、阻断和工单 | 典型事件 5 分钟可见；响应动作可追踪、可撤销 |
 | M6-01 数据层与 HA | P2 | 容量目标 | PostgreSQL/ClickHouse、迁移、备份、多副本、Redis 限流 | 迁移可回滚；故障切换、RPO/RTO 演练通过 |
 | M6-02 供应链与密钥 | P2 | 安全评审 | Vault/KMS、mTLS、SBOM、镜像/产物签名、依赖扫描 | 密钥不落明文；制品可验签；渗透测试通过 |

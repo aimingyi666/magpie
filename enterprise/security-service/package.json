@@ -1,0 +1,14 @@
+{
+  "name": "@magpie-enterprise/security-service",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Magpie Enterprise M5-A detection and M5-B response-action core",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=22"
+  }
+}
