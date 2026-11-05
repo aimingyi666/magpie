@@ -95,13 +95,14 @@ const maxActions = 8
 
 // PageReads are the reads a plugin's page can be granted, each in
 // magpie.permissions. None of them carries a secret.
-var PageReads = []string{"usage:summary", "providers:list"}
+var PageReads = []string{"usage:summary", "providers:list", "enterprise:providers"}
 
 // PanelSlots are the places in magpie's own pages a plugin's panel can
 // go: under the Agents page's list, at the end of the Usage page, on
-// Settings' Plugins tab, and in a provider's editor (which tells the
-// panel the provider's id and name).
-var PanelSlots = []string{"agents", "usage", "settings", "provider"}
+// Settings' Plugins tab, in a provider's editor (which tells the
+// panel the provider's id and name), and on the Providers page under
+// the personal list (the Providers slot tells the panel nothing).
+var PanelSlots = []string{"agents", "usage", "settings", "provider", "providers"}
 
 // Replaceable are the built-in pages a plugin's page can take the place
 // of: the pages that are built-in plugins of their own.

@@ -12,7 +12,9 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
@@ -513,6 +515,8 @@ func pageSetAllowed(spec string, now time.Time) bool {
 // pageRead is one of plugin.PageReads.
 func pageRead(read string, params map[string]any) (any, error) {
 	switch read {
+	case "enterprise:providers":
+		return enterpriseProvidersFromLocalService()
 	case "providers:list":
 		// a name and an id each: no key, no account, no address
 		type prov struct {
@@ -566,4 +570,64 @@ func pageRead(read string, params map[string]any) (any, error) {
 		return out, nil
 	}
 	return nil, fmt.Errorf("no read %q", read)
+}
+
+// enterpriseProvidersFromLocalService reads the enterprise plugin's
+// local service the same way a page would through servePageService,
+// but server-side: panels have no service address, so Magpie calls
+// 127.0.0.1 directly and the plugin service authorizes with the
+// device credential, never with a page token.
+func enterpriseProvidersFromLocalService() (any, error) {
+	const spec = "@magpie-enterprise/magpie-plugin"
+	pages, _ := windowParts()
+	var port int
+	for i := range pages {
+		if pages[i].Spec == spec {
+			port = pages[i].servicePort()
+			break
+		}
+	}
+	if port == 0 {
+		return nil, errors.New("the enterprise plugin is not on")
+	}
+	endpoint := (&url.URL{Scheme: "http", Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(port)), Path: "/v1/enterprise/providers"}).String()
+	client := &http.Client{Timeout: 10 * time.Second, Transport: &http.Transport{Proxy: nil}}
+	response, err := client.Get(endpoint)
+	if err != nil {
+		return nil, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("the enterprise service answered %d", response.StatusCode)
+	}
+	var body struct {
+		Providers []enterpriseProvider `json:"providers"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+		return nil, err
+	}
+	if body.Providers == nil {
+		body.Providers = []enterpriseProvider{}
+	}
+	for i := range body.Providers {
+		if body.Providers[i].Models == nil {
+			body.Providers[i].Models = []string{}
+		}
+	}
+	return body, nil
+}
+
+// enterpriseProvider is what the panel is allowed to see of an
+// enterprise provider: a public projection, never a key's value.
+type enterpriseProvider struct {
+	ID         string   `json:"id"`
+	Name       string   `json:"name"`
+	Host       string   `json:"host"`
+	Models     []string `json:"models"`
+	ModelCount int      `json:"modelCount"`
+	KeyState   string   `json:"keyState"`
+	KeyMasked  string   `json:"keyMasked"`
+	Ready      bool     `json:"ready"`
+	Off        bool     `json:"off"`
+	Revision   string   `json:"revision"`
 }
