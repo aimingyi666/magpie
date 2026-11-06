@@ -22,8 +22,10 @@ security-service 44、magpie-plugin 37）；真实 IdP、Compose/反向代理、
 
 正文采集仍未闭环：网关侧没有生产者。`enterprise/audit-service` 的流创建要求
 `userId`/`departmentId`/`deviceId`，而网关只知道 `callerKeyId`；直接采集会把 Key 当成人。
-需要先定身份映射（网关回调控制面，或 schema 接受 `callerKeyId` 由 admin-service 关联），
-再实现生产者。
+身份映射核心已实现（`admin-service/src/content-identity.js`：按凭证把 `callerKeyId` 解析为
+用户/设备/部门，未知或已停用的 Key 失败关闭，不返回邮箱、Key 或哈希），但尚未暴露 HTTP
+端点；采集还需要一组“常驻授权”配置（purpose、authorizationId、retentionDays），
+以及把内容转发到 audit-service 的 ingest 客户端。生产者接通前，审计页只会有空列表。
 
 2026-11-03 方案基线更新到 v3.36。当前 `codex/m5-b-response-actions` 分支新增
 **M5-B 响应动作状态机与受控模拟执行核心**：新增限流、阻断、吊销 Key、锁定设备和开票五类动作，`requested/approved/active/reverted/expired/failed` 状态机，创建、审批、激活、撤销、过期、列表、详情和逐动作审计 API；强制独立 `SECURITY_CONTROL_TOKEN`、`Idempotency-Key`、组织头、职责分离、授权/动作有效期、source/target 绑定和 fail-closed 校验；每动作使用独立 hash-chain 审计，支持幂等重放、冲突拒绝、组织隔离和重启恢复。执行器明确为 `simulation`，返回 `policyApplied: true`、`gatewayApplied: false` 和 `policy_applied_without_gateway_enforcement`，不声称真实网关阻断；`gateway_key` 因无法验证而 fail closed。security-service 30 项测试通过，九套企业 Node/Mock 回归合计 376 项通过。真实网关阻断/吊销、真实厂商工单、安全运营管理 UI、OTel/Prometheus/Grafana、生产 SIEM、完整 OIDC 角色授权和生产验收仍未完成。此前 `codex/m5-a-gateway-detection-ingest` 分支在
