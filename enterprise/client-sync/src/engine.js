@@ -8,6 +8,7 @@ import {
   validateManifestShape,
   verifySignedManifest,
 } from "../../resource-service/src/manifest.js";
+import { applyInstruction, INSTRUCTION_FILES } from "./agent-apply.js";
 import { ClientSyncError, asClientSyncError, publicError } from "./errors.js";
 import {
   assertSafeSegment,
@@ -518,6 +519,7 @@ export class ClientSyncEngine {
     syncIntervalMs = DEFAULT_SYNC_INTERVAL_MS,
     maxResourceBytes = DEFAULT_MAX_RESOURCE_BYTES,
     lockStaleMs = DEFAULT_LOCK_STALE_MS,
+    agents = null,
   }) {
     if (typeof rootDir !== "string" || !path.isAbsolute(rootDir)) {
       throw new ClientSyncError("invalid_config", "rootDir must be an absolute path");
@@ -552,6 +554,24 @@ export class ClientSyncEngine {
     this.syncIntervalMs = syncIntervalMs;
     this.maxResourceBytes = maxResourceBytes;
     this.lockStaleMs = lockStaleMs;
+    // Where each agent's own files are, for the instructions a sync brings.
+    // Unset: the sync cache is all there is, as before.
+    this.agents = null;
+    if (agents !== null && agents !== undefined) {
+      if (!agents || typeof agents !== "object" || Array.isArray(agents)
+          || Object.getPrototypeOf(agents) !== Object.prototype) {
+        throw new ClientSyncError("invalid_config", "agents must be an object of agent to root");
+      }
+      for (const [agent, root] of Object.entries(agents)) {
+        if (!Object.hasOwn(INSTRUCTION_FILES, agent)) {
+          throw new ClientSyncError("invalid_config", `agents.${agent} is not an agent magpie writes`);
+        }
+        if (typeof root !== "string" || !path.isAbsolute(root)) {
+          throw new ClientSyncError("invalid_config", `agents.${agent} must be an absolute path`);
+        }
+      }
+      this.agents = { ...agents };
+    }
   }
 
   nowIso() {
@@ -754,6 +774,32 @@ export class ClientSyncEngine {
           disabledRecommended,
         });
         await writeClientSyncState(this.rootDir, next);
+        // The activation is done; an agent file that cannot be written is
+        // reported beside it, not turned into a failed sync.
+        const applied = [];
+        const applyErrors = [];
+        if (this.agents) {
+          for (const record of nextResources) {
+            if (record.kind !== "instructions") continue;
+            try {
+              const active = await this.readActiveResource(record.resourceId);
+              const text = Buffer.isBuffer(active.content)
+                ? active.content.toString("utf8")
+                : String(active.content ?? "");
+              for (const [agent, root] of Object.entries(this.agents)) {
+                const result = await applyInstruction({
+                  agent, root, resourceId: record.resourceId, text,
+                });
+                applied.push({ resourceId: record.resourceId, agent, file: result.file });
+              }
+            } catch (error) {
+              applyErrors.push({
+                resourceId: record.resourceId,
+                code: typeof error?.code === "string" ? error.code : "agent_apply_failed",
+              });
+            }
+          }
+        }
         return {
           status,
           revision: desired.revision,
@@ -761,6 +807,8 @@ export class ClientSyncEngine {
           unchanged,
           skipped,
           drift: [],
+          applied,
+          applyErrors,
           state: stateForReport(next),
         };
       } catch (error) {

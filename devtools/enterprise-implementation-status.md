@@ -15,8 +15,8 @@ admin-service 增加网关管理代理、桌面 PKCE 登录（一次性 ticket �
 窗口主题实时切换。用量页新增企业范围汇总、按用户明细和按天请求柱状图；资源目录新增
 `hook` 类型（只登记元数据，不执行）；管理员标签补充 `aria-selected`；新增**审计页**，
 按用户/Agent/模型/状态查询已采集内容流并查看流详情，**只显示元数据、不读取正文**。合并后
-十套企业 Node 回归 `482 passed, 0 failed`（auth 26、admin 140、gateway-control 38、
-resource 16、mcp-gateway 17、client-sync 37、local-mcp 60、audit-service 67、
+十套企业 Node 回归 `484 passed, 0 failed`（auth 26、admin 140、gateway-control 38、
+resource 16、mcp-gateway 17、client-sync 39、local-mcp 60、audit-service 67、
 security-service 44、magpie-plugin 37）；真实 IdP、Compose/反向代理、浏览器 E2E 与
 生产验收仍未完成。
 
@@ -45,8 +45,9 @@ active 资源写进 Claude Code 的 `CLAUDE.md` 或 Codex 的 `AGENTS.md`，每�
 按 `resourceId` 替换或删除，块外的员工文本不动；写入是临时文件 + fsync + rename 的原子
 操作，保留 BOM 和 CRLF；半截标记、重复块、符号链接、非法 id、未知 Agent 一律拒绝。
 `applyInstructionResource` 从 `readActiveResource()` 取内容，只接受 `instructions` 类型。
-**尚未**接入 CLI 或后台同步循环；skills / subagents / hooks 的目录级落地、漂移检测、
-回滚、Windows ACL 和生产验收未做。
+已接入 `ClientSyncEngine`：构造时传 `agents`（Agent → 绝对根目录），每次成功同步后写入；
+Agent 文件写不进去只记 `applyErrors`，同步本身仍算成功。**尚未**提供 CLI 或后台服务入口；
+skills / subagents / hooks 的目录级落地、漂移检测、回滚、Windows ACL 和生产验收未做。
 
 2026-11-03 方案基线更新到 v3.36。当前 `codex/m5-b-response-actions` 分支新增
 **M5-B 响应动作状态机与受控模拟执行核心**：新增限流、阻断、吊销 Key、锁定设备和开票五类动作，`requested/approved/active/reverted/expired/failed` 状态机，创建、审批、激活、撤销、过期、列表、详情和逐动作审计 API；强制独立 `SECURITY_CONTROL_TOKEN`、`Idempotency-Key`、组织头、职责分离、授权/动作有效期、source/target 绑定和 fail-closed 校验；每动作使用独立 hash-chain 审计，支持幂等重放、冲突拒绝、组织隔离和重启恢复。执行器明确为 `simulation`，返回 `policyApplied: true`、`gatewayApplied: false` 和 `policy_applied_without_gateway_enforcement`，不声称真实网关阻断；`gateway_key` 因无法验证而 fail closed。security-service 30 项测试通过，九套企业 Node/Mock 回归合计 376 项通过。真实网关阻断/吊销、真实厂商工单、安全运营管理 UI、OTel/Prometheus/Grafana、生产 SIEM、完整 OIDC 角色授权和生产验收仍未完成。此前 `codex/m5-a-gateway-detection-ingest` 分支在

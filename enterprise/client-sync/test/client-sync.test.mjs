@@ -571,3 +571,57 @@ test("readActiveResource fails closed after content or path tampering", async (t
     (error) => error instanceof ClientSyncError && error.code === "content_invalid",
   );
 });
+
+test("a synced instructions resource is written into each agent's file", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const resource = signedResource(identity, {
+    content: "# Baseline\n\nUse approved tools.\n",
+  });
+  const claudeRoot = path.join(root, "home-claude");
+  const codexRoot = path.join(root, "home-codex");
+  const engine = engineFor(root, identity, async () => desired([resource]), {
+    agents: { claude: claudeRoot, codex: codexRoot },
+  });
+
+  const result = await engine.syncOnce();
+  assert.equal(result.status, "synced", JSON.stringify(result));
+  assert.equal(result.applied.length, 2);
+  assert.deepEqual(result.applyErrors, []);
+  for (const [dir, file] of [[claudeRoot, "CLAUDE.md"], [codexRoot, "AGENTS.md"]]) {
+    const text = fs.readFileSync(path.join(dir, file), "utf8");
+    assert.match(text, /Use approved tools\./);
+    assert.match(text, /magpie:managed:begin res_engineering_instructions/);
+  }
+
+  // An up-to-date sync writes the block again, so an employee edit is
+  // followed by the enterprise's block rather than left alone for good.
+  fs.writeFileSync(path.join(claudeRoot, "CLAUDE.md"), "employee edit\n", "utf8");
+  const second = await engine.syncOnce();
+  assert.equal(second.status, "up_to_date", JSON.stringify(second));
+  const rewritten = fs.readFileSync(path.join(claudeRoot, "CLAUDE.md"), "utf8");
+  assert.match(rewritten, /employee edit/);
+  assert.match(rewritten, /Use approved tools\./);
+});
+
+test("an agent file that cannot be written is reported, not a failed sync", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const resource = signedResource(identity);
+  const claudeRoot = path.join(root, "home-claude");
+  fs.mkdirSync(claudeRoot, { recursive: true });
+  fs.writeFileSync(
+    path.join(claudeRoot, "CLAUDE.md"),
+    "mine\n<!-- magpie:managed:begin res_engineering_instructions -->\nno end\n",
+    "utf8",
+  );
+  const engine = engineFor(root, identity, async () => desired([resource]), {
+    agents: { claude: claudeRoot },
+  });
+
+  const result = await engine.syncOnce();
+  assert.equal(result.status, "synced", JSON.stringify(result));
+  assert.deepEqual(result.applied, []);
+  assert.equal(result.applyErrors.length, 1);
+  assert.equal(result.applyErrors[0].code, "agent_config_malformed");
+});
