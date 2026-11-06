@@ -121,6 +121,31 @@ test("readSyncConfig validates the endpoint and pinned signing keys", (t) => {
   assert.deepEqual(config.displayNames, { "res-1": "研发知识库 MCP" });
 });
 
+test("readSyncConfig reads where each agent's own files are", (t) => {
+  const dir = tempDir(t);
+  const file = path.join(dir, "enterprise-sync.json");
+  writeJson(file, {
+    resourceBaseUrl: "https://resource.example.com",
+    signingKeys: {
+      "resource-2026-11": {
+        publicKeyPem: "-----BEGIN PUBLIC KEY-----\nkey\n-----END PUBLIC KEY-----\n",
+      },
+    },
+    agents: {
+      claude: "home-claude",
+      codex: "/opt/codex",
+      other: "not an agent",
+      bad: 7,
+    },
+  });
+  const config = readSyncConfig(dir);
+  assert.equal(config.state, "ok");
+  assert.deepEqual(config.agents, {
+    claude: path.join(dir, "home-claude"),
+    codex: path.resolve("/opt/codex"),
+  });
+});
+
 test("readSyncState treats a missing file as never and a bad file as unknown", (t) => {
   const dir = tempDir(t);
   assert.deepEqual(readSyncState(dir), { state: "never" });

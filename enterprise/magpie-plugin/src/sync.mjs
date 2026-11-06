@@ -33,6 +33,9 @@ async function runSync({ config, credential }) {
     clientVersion,
     maxResourceBytes: config.maxResourceBytes,
     fetchDesiredState: transport.fetchDesiredState,
+    ...(config.agents && Object.keys(config.agents).length
+      ? { agents: config.agents }
+      : {}),
   });
 
   const result = await engine.syncOnce();
@@ -52,6 +55,8 @@ async function runSync({ config, credential }) {
     unchanged: result.unchanged || [],
     skipped: result.skipped || [],
     drift: result.drift || [],
+    applied: result.applied || [],
+    applyErrors: result.applyErrors || [],
     report,
     at: new Date().toISOString(),
   };

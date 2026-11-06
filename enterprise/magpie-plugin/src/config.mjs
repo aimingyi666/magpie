@@ -7,6 +7,9 @@ export const DEFAULT_MAX_RESOURCE_BYTES = 4 * 1024 * 1024;
 
 const SYNC_CONFIG_FILE = "enterprise-sync.json";
 const RESOURCE_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
+// The agents whose own instruction files a sync may write. Kept in step
+// with client-sync's agent-apply (INSTRUCTION_FILES).
+const AGENT_ROOTS = new Set(["claude", "codex"]);
 
 // adminBaseUrlValue is the one shape an administrator's console address
 // may take: https, or plain http on this machine. Anything else is refused
@@ -182,11 +185,23 @@ export function readSyncConfig(dir = stateDirectory()) {
     }
   }
 
+  // agents says where each agent's own files are, relative to this config's
+  // folder or absolute. Unknown names are ignored: a sync must not write
+  // into a file magpie does not know.
+  const agents = {};
+  if (data.agents && typeof data.agents === "object" && !Array.isArray(data.agents)) {
+    for (const [agent, value] of Object.entries(data.agents)) {
+      if (!AGENT_ROOTS.has(agent) || typeof value !== "string" || !value.trim()) continue;
+      agents[agent] = path.resolve(dir, value.trim());
+    }
+  }
+
   return {
     state: "ok",
     dir,
     file,
     resourceBaseUrl,
+    agents,
     adminBaseUrl: typeof data.adminBaseUrl === "string" && data.adminBaseUrl.trim()
       ? data.adminBaseUrl.trim()
       : "",

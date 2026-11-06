@@ -50,14 +50,14 @@ local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server
 法律保留、删除证明和加密导出核心）；security-service 已通过 44 项隔离测试（固定事件
 allowlist、秘密扫描、八条稳定检测规则、确定性 finding/聚合、抑制标记、幂等重放和
 原子持久化，M5-B 覆盖响应动作状态机、审批、幂等、撤销和 hash-chain 审计）；
-magpie-plugin 已通过 37 项隔离测试（员工页、管理员页、资源页、用量汇总、审计元数据页、
-主题跟随、PKCE 与页面检查）；网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、插件生命周期 3、身份/来源地址映射 1）；
+magpie-plugin 已通过 40 项隔离测试（员工页、管理员页、资源页、用量汇总、审计元数据页、
+主题跟随、PKCE 与页面检查；同步把 `agents` 交给引擎，返回 applied/applyErrors）；网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、插件生命周期 3、身份/来源地址映射 1）；
 内容采集与文本提取另有 39 项 Go 测试通过（配置失败关闭、无 Key 跳过、模型无效跳过、
 超长截断、队列满丢弃，四种 API 的请求与响应、四种 SSE 流、系统提示与 harness 注入块不采集、
 工具块不采集、未知格式不发送；
 其中 8 项直接解析 `internal/gateway/testdata` 里真实录制的 Claude Code、Codex 与
 OpenCode 请求和三家流式响应；另有 2 项来自本机真实网关的一次真实订阅调用）；采集链路另有 1 项端到端测试（真实 audit-service，
-流最终为 finalized，明文不落在索引里）；当前十套合计 484 项通过、0 失败。
+流最终为 finalized，明文不落在索引里）；当前十套合计 487 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
