@@ -15,17 +15,20 @@ admin-service 增加网关管理代理、桌面 PKCE 登录（一次性 ticket �
 窗口主题实时切换。用量页新增企业范围汇总、按用户明细和按天请求柱状图；资源目录新增
 `hook` 类型（只登记元数据，不执行）；管理员标签补充 `aria-selected`；新增**审计页**，
 按用户/Agent/模型/状态查询已采集内容流并查看流详情，**只显示元数据、不读取正文**。合并后
-十套企业 Node 回归 `464 passed, 0 failed`（auth 26、admin 133、gateway-control 38、
+十套企业 Node 回归 `470 passed, 0 failed`（auth 26、admin 139、gateway-control 38、
 resource 16、mcp-gateway 17、client-sync 26、local-mcp 60、audit-service 67、
 security-service 44、magpie-plugin 37）；真实 IdP、Compose/反向代理、浏览器 E2E 与
 生产验收仍未完成。
 
-正文采集仍未闭环：网关侧没有生产者。`enterprise/audit-service` 的流创建要求
-`userId`/`departmentId`/`deviceId`，而网关只知道 `callerKeyId`；直接采集会把 Key 当成人。
-身份映射核心已实现（`admin-service/src/content-identity.js`：按凭证把 `callerKeyId` 解析为
-用户/设备/部门，未知或已停用的 Key 失败关闭，不返回邮箱、Key 或哈希），但尚未暴露 HTTP
-端点；采集还需要一组“常驻授权”配置（purpose、authorizationId、retentionDays），
-以及把内容转发到 audit-service 的 ingest 客户端。生产者接通前，审计页只会有空列表。
+正文采集链已接通：网关侧新增 `internal/auditcontent` 观察器（`usage.Observer`，默认关闭，
+有界队列满即丢弃，不阻塞模型请求；请求带 Key 才采集，模型无 provider 前缀则跳过，超长按
+UTF-8 边界截断），经 `MAGPIE_AUDIT_CONTENT_URL` 发到 admin-service；admin-service 新增
+`POST /api/v1/internal/content/capture`（独立令牌，常量时间比较），用
+`content-identity.js` 把 `callerKeyId` 解析为用户/设备/部门（未知或已停用失败关闭），
+再以 `content-ingest-client.js` 按常驻授权（purpose、authorizationId、retentionDays）
+写入 audit-service 的 streams/chunks。测试：admin 新增 6 项（含错误令牌 401、未知 Key 404、
+已吊销 409 且不写入），Go 新增 7 项。**尚未**用真实 audit-service 做端到端验证，也未在
+Compose 实机运行；生产启用前需提供真实的常驻授权 ID 与审计服务令牌。
 
 2026-11-03 方案基线更新到 v3.36。当前 `codex/m5-b-response-actions` 分支新增
 **M5-B 响应动作状态机与受控模拟执行核心**：新增限流、阻断、吊销 Key、锁定设备和开票五类动作，`requested/approved/active/reverted/expired/failed` 状态机，创建、审批、激活、撤销、过期、列表、详情和逐动作审计 API；强制独立 `SECURITY_CONTROL_TOKEN`、`Idempotency-Key`、组织头、职责分离、授权/动作有效期、source/target 绑定和 fail-closed 校验；每动作使用独立 hash-chain 审计，支持幂等重放、冲突拒绝、组织隔离和重启恢复。执行器明确为 `simulation`，返回 `policyApplied: true`、`gatewayApplied: false` 和 `policy_applied_without_gateway_enforcement`，不声称真实网关阻断；`gateway_key` 因无法验证而 fail closed。security-service 30 项测试通过，九套企业 Node/Mock 回归合计 376 项通过。真实网关阻断/吊销、真实厂商工单、安全运营管理 UI、OTel/Prometheus/Grafana、生产 SIEM、完整 OIDC 角色授权和生产验收仍未完成。此前 `codex/m5-a-gateway-detection-ingest` 分支在

@@ -18,6 +18,8 @@ import {
   AuditContentServiceClient,
   AuditContentServiceError,
 } from "./audit-content-client.js";
+import { ContentIngestClient } from "./content-ingest-client.js";
+import { resolveContentIdentity } from "./content-identity.js";
 import {
   AUDIT_CONTENT_ACTIONS,
   AuditContentValidationError,
@@ -2379,6 +2381,15 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     || new AuditContentServiceClient(
       config.auditContentService || { enabled: false },
     );
+  // Automatic content capture: the gateway posts a caller key and a text,
+  // and this service resolves the person and writes audit-service. Off
+  // unless configured, and the ingest client is optional so a test can
+  // replace it.
+  const contentCapture = config.contentCapture || { enabled: false };
+  const contentIngest = options.contentIngest
+    || (contentCapture.enabled
+      ? new ContentIngestClient(contentCapture, options.contentIngestFetch || fetch)
+      : null);
   const securityService = options.securityService
     || new SecurityServiceClient(config.securityService || { enabled: false });
   const notificationChannelSettings = config.notifications?.channels || {};
@@ -5854,6 +5865,104 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       throw new HttpError(403, "forbidden_scope", "This device is outside your organization scope");
     }
     return { ...result, report: projected };
+  }
+
+  // The gateway's content capture. It knows a caller key and a text; this
+  // service resolves the person from the credential, applies the standing
+  // collection policy and hands the text to audit-service, which redacts
+  // and encrypts it. A key that resolves to nobody, or to a credential or
+  // user that is no longer active, writes nothing.
+  function captureTokenMatches(req) {
+    const offered = String(req.headers["x-content-capture-token"] || "");
+    const expected = String(contentCapture.token || "");
+    if (!offered || !expected) return false;
+    const left = Buffer.from(offered, "utf8");
+    const right = Buffer.from(expected, "utf8");
+    return left.length === right.length && crypto.timingSafeEqual(left, right);
+  }
+
+  async function captureGatewayContent(req, res) {
+    if (!contentCapture.enabled || !contentIngest) {
+      throw new HttpError(503, "content_capture_disabled", "Content capture is not enabled");
+    }
+    if (!captureTokenMatches(req)) {
+      throw new HttpError(401, "invalid_capture_token", "The capture token is not valid");
+    }
+    const body = await readJsonBody(req);
+    if (!body || typeof body !== "object" || Array.isArray(body) || body.schemaVersion !== 1) {
+      throw new HttpError(400, "invalid_content_capture", "The capture body is not schema v1");
+    }
+    const field = (name, pattern, maximum = 135) => {
+      const value = typeof body[name] === "string" ? body[name].trim() : "";
+      if (!value || value.length > maximum || (pattern && !pattern.test(value))) {
+        throw new HttpError(400, "invalid_content_capture", `The capture field ${name} is invalid`);
+      }
+      return value;
+    };
+    const callerKeyId = field("callerKeyId", /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/);
+    const requestId = field("requestId", /^req_[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/);
+    const sessionId = field("sessionId", /^ses_[A-Za-z0-9][A-Za-z0-9._:-]{7,127}$/);
+    const agentId = field("agentId", /^[A-Za-z0-9][A-Za-z0-9._:@-]{0,127}$/);
+    const modelId = field(
+      "modelId",
+      /^[A-Za-z0-9][A-Za-z0-9._-]*\/[A-Za-z0-9][A-Za-z0-9._:@+-]{0,159}$/,
+      192,
+    );
+    const contentKind = field("contentKind", /^(?:prompt|response|tool_arguments|tool_result)$/, 32);
+    const content = typeof body.text === "string" ? body.text : "";
+    const bytes = Buffer.byteLength(content, "utf8");
+    if (bytes === 0 || bytes > contentCapture.maxTextBytes) {
+      throw new HttpError(400, "invalid_content_capture", "The capture text is empty or too large");
+    }
+    const [{ users }, { credentials }] = await Promise.all([
+      authService.users(),
+      authService.credentials(),
+    ]);
+    const mapping = await store.read((data) => ({
+      userOrgUnits: data.userOrgUnits || {},
+      orgUnits: data.orgUnits || {},
+    }));
+    const identity = resolveContentIdentity({
+      callerKeyId,
+      credentials,
+      users,
+      ...mapping,
+    });
+    if (!identity) {
+      throw new HttpError(404, "content_identity_unknown", "No credential was issued as that key");
+    }
+    if (identity.state !== "active") {
+      throw new HttpError(409, "content_identity_inactive", "The credential or its user is not active");
+    }
+    let result;
+    try {
+      result = await contentIngest.capture({
+        requestId,
+        sessionId,
+        userId: identity.userId,
+        departmentId: identity.departmentId,
+        deviceId: identity.deviceId,
+        agentId,
+        modelId,
+        contentKind,
+        purpose: contentCapture.purpose,
+        authorizationId: contentCapture.authorizationId,
+        retentionDays: contentCapture.retentionDays,
+        text: content,
+      });
+    } catch (error) {
+      throw new HttpError(
+        502,
+        typeof error?.code === "string" ? error.code : "content_capture_failed",
+        "The content could not be captured",
+      );
+    }
+    json(res, 201, {
+      ok: true,
+      streamId: String(result.streamId || ""),
+      contentRef: String(result.contentRef || ""),
+      bytes: Number(result.bytes) || bytes,
+    });
   }
 
   async function scopedResources(session) {
@@ -11055,6 +11164,11 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         payload.value.stepUp,
         config.auditContentService.enabled,
       ));
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/internal/content/capture") {
+      await captureGatewayContent(req, res);
       return;
     }
 

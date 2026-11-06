@@ -37,7 +37,7 @@ MCP 端点、工具级 allow/deny、健康检查、上游凭据隔离和元数�
 强制/推荐策略和漂移检测核心；M3-C-2 已把资源目录和设备同步报告以只读、按组织范围过滤的
 方式接入管理页，并把依赖失败稳定映射为 `503 resource_service_unavailable`。`gateway-control`
 已通过 38 项 Mock/故障测试；
-auth-service 已通过 26 项测试；admin-service 已通过 133 项测试（96 项管理服务集成测试 +
+auth-service 已通过 26 项测试；admin-service 已通过 139 项测试（102 项管理服务集成测试 +
 5 项内容治理客户端专项 + 5 项内容治理存储专项 + 7 项目录专项 + 7 项通知渠道专项 +
 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
 已通过 16 项单元/Mock 集成测试（12 核心 + 4 控制面，含 `hook` 资源类型）；mcp-gateway 已通过 17 项
@@ -49,8 +49,9 @@ local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server
 allowlist、秘密扫描、八条稳定检测规则、确定性 finding/聚合、抑制标记、幂等重放和
 原子持久化，M5-B 覆盖响应动作状态机、审批、幂等、撤销和 hash-chain 审计）；
 magpie-plugin 已通过 37 项隔离测试（员工页、管理员页、资源页、用量汇总、审计元数据页、
-主题跟随、PKCE 与页面检查）；网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、
-插件生命周期 3、身份/来源地址映射 1）；当前十套合计 464 项通过、0 失败。
+主题跟随、PKCE 与页面检查）；网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、插件生命周期 3、身份/来源地址映射 1）；
+内容采集 observer 另有 7 项 Go 测试通过（配置失败关闭、提示/回复两种采集、无 Key 跳过、
+模型无效跳过、超长截断、队列满丢弃）；当前十套合计 470 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及

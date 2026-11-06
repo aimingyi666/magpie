@@ -1305,6 +1305,18 @@ async function fixture(options = {}) {
           ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS: "1000",
         }
         : {}),
+      ...(options.contentCapture
+        ? {
+          ADMIN_CONTENT_CAPTURE_ENABLED: "true",
+          ADMIN_CONTENT_CAPTURE_TOKEN: options.contentCapture.captureToken,
+          ADMIN_CONTENT_CAPTURE_PURPOSE:
+            options.contentCapture.purpose || "security_investigation",
+          ADMIN_CONTENT_CAPTURE_AUTHORIZATION_ID: options.contentCapture.authorizationId,
+          ADMIN_CONTENT_CAPTURE_RETENTION_DAYS:
+            String(options.contentCapture.retentionDays || 30),
+          ADMIN_AUDIT_CONTENT_INGEST_TOKEN: options.contentCapture.ingestToken,
+        }
+        : {}),
       ADMIN_APPROVAL_CALLBACK_SECRET: callbackSecret,
       ADMIN_APPROVAL_CALLBACK_ISSUER: callbackIssuer,
       ADMIN_APPROVAL_CALLBACK_AUDIENCE: callbackAudience,
@@ -10466,4 +10478,105 @@ test("M4-C a desktop sign-in without a fresh step-up keeps the token but not a s
   });
   assert.equal(refused.status, 403);
   assert.equal((await refused.json()).error.code, "step_up_required");
+});
+
+test("content capture resolves the key to a person and writes one stream", async (t) => {
+  // The gateway knows only a caller key; the control plane is what turns it
+  // into the user, device and department an audit stream names.
+  const captureToken = "capture-token-for-test-only-not-real";
+  const ingestToken = "ingest-token-for-test-only-not-real";
+  const calls = [];
+  const f = await fixture({
+    auditContentEnabled: true,
+    contentCapture: {
+      captureToken,
+      ingestToken,
+      authorizationId: "apr_capture_policy_01",
+      retentionDays: 7,
+    },
+    adminServerOptions: {
+      contentIngest: {
+        async capture(input) {
+          calls.push(input);
+          return {
+            streamId: "str_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            contentRef: "ct_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            bytes: 11,
+          };
+        },
+      },
+    },
+  });
+  t.after(() => f.close());
+  const response = await fetch(`${f.base}/api/v1/internal/content/capture`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-content-capture-token": captureToken },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      callerKeyId: "key-alice-new",
+      requestId: "req_capture0001",
+      sessionId: "ses_capture0001",
+      agentId: "codex",
+      modelId: "deepseek/deepseek-chat",
+      contentKind: "prompt",
+      text: "hello world",
+    }),
+  });
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.equal(payload.streamId, "str_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].userId, "usr_alice");
+  assert.equal(calls[0].deviceId, "dev_alice");
+  assert.equal(calls[0].contentKind, "prompt");
+  assert.equal(calls[0].authorizationId, "apr_capture_policy_01");
+  assert.equal(calls[0].retentionDays, 7);
+  assert.equal(calls[0].purpose, "security_investigation");
+});
+
+test("content capture refuses a wrong token, an unknown key and a revoked one", async (t) => {
+  const captureToken = "capture-token-for-test-only-not-real";
+  const ingestToken = "ingest-token-for-test-only-not-real";
+  const calls = [];
+  const f = await fixture({
+    auditContentEnabled: true,
+    contentCapture: {
+      captureToken,
+      ingestToken,
+      authorizationId: "apr_capture_policy_01",
+    },
+    adminServerOptions: {
+      contentIngest: {
+        async capture(input) {
+          calls.push(input);
+          return { streamId: "str_x", contentRef: "ct_x", bytes: 1 };
+        },
+      },
+    },
+  });
+  t.after(() => f.close());
+  const send = (headers, callerKeyId = "key-alice-new") => fetch(
+    `${f.base}/api/v1/internal/content/capture`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        callerKeyId,
+        requestId: "req_capture0002",
+        sessionId: "ses_capture0002",
+        agentId: "codex",
+        modelId: "deepseek/deepseek-chat",
+        contentKind: "prompt",
+        text: "hello world",
+      }),
+    },
+  );
+  assert.equal((await send({ "x-content-capture-token": "wrong-token-for-test-only-not-real" })).status,
+    401);
+  assert.equal((await send({ "x-content-capture-token": captureToken }, "key-missing")).status,
+    404);
+  assert.equal((await send({ "x-content-capture-token": captureToken }, "key-alice-old")).status,
+    409);
+  assert.equal(calls.length, 0);
 });

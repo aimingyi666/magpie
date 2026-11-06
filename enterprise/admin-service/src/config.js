@@ -218,6 +218,58 @@ export function loadConfig(env = process.env) {
       throw new Error("ADMIN_AUDIT_CONTENT_EXPORT_KEY must be 32-byte base64 or hex");
     }
   }
+  // Automatic content capture: the gateway hands over a caller key and a
+  // text, and this service resolves the person, applies the standing
+  // collection policy and writes audit-service. Off unless every part is
+  // configured: a half-configured capture would either drop every stream or
+  // write one under the wrong authorization.
+  const contentCaptureEnabled = bool(env, "ADMIN_CONTENT_CAPTURE_ENABLED", false);
+  const contentCaptureToken = String(env.ADMIN_CONTENT_CAPTURE_TOKEN || "").trim();
+  const contentCapturePurpose = String(
+    env.ADMIN_CONTENT_CAPTURE_PURPOSE || "security_investigation",
+  ).trim();
+  const contentCaptureAuthorizationId = String(
+    env.ADMIN_CONTENT_CAPTURE_AUTHORIZATION_ID || "",
+  ).trim();
+  const contentCaptureRetentionDays = integer(
+    env,
+    "ADMIN_CONTENT_CAPTURE_RETENTION_DAYS",
+    30,
+    1,
+    3650,
+  );
+  const auditContentIngestToken = String(
+    env.ADMIN_AUDIT_CONTENT_INGEST_TOKEN || "",
+  ).trim();
+  if (contentCaptureEnabled) {
+    if (contentCaptureToken.length < MIN_SECRET_LENGTH) {
+      throw new Error(
+        `ADMIN_CONTENT_CAPTURE_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+      );
+    }
+    if (auditContentIngestToken.length < MIN_SECRET_LENGTH) {
+      throw new Error(
+        `ADMIN_AUDIT_CONTENT_INGEST_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+      );
+    }
+    if (contentCaptureToken === auditContentIngestToken) {
+      throw new Error(
+        "ADMIN_CONTENT_CAPTURE_TOKEN and ADMIN_AUDIT_CONTENT_INGEST_TOKEN must differ",
+      );
+    }
+    if (!auditContentServiceUrl) {
+      throw new Error(
+        "ADMIN_AUDIT_CONTENT_SERVICE_URL is required when content capture is on",
+      );
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{7,127}$/.test(contentCaptureAuthorizationId)) {
+      throw new Error("ADMIN_CONTENT_CAPTURE_AUTHORIZATION_ID is invalid");
+    }
+    if (!["security_investigation", "incident_response", "compliance_review",
+      "legal_investigation"].includes(contentCapturePurpose)) {
+      throw new Error("ADMIN_CONTENT_CAPTURE_PURPOSE is unsupported");
+    }
+  }
   const stepUpClientId = String(env.ADMIN_STEP_UP_OIDC_CLIENT_ID || "").trim();
   const stepUpClientSecret = String(env.ADMIN_STEP_UP_OIDC_CLIENT_SECRET || "").trim();
   const stepUpRedirectUri = String(env.ADMIN_STEP_UP_REDIRECT_URI || "").trim();
@@ -398,6 +450,23 @@ export function loadConfig(env = process.env) {
         4 * 1024 * 1024,
         16 * 1024,
         32 * 1024 * 1024,
+      ),
+    },
+    contentCapture: {
+      enabled: contentCaptureEnabled,
+      token: contentCaptureToken,
+      purpose: contentCapturePurpose,
+      authorizationId: contentCaptureAuthorizationId,
+      retentionDays: contentCaptureRetentionDays,
+      ingestToken: auditContentIngestToken,
+      url: auditContentServiceUrl,
+      timeoutMs: integer(env, "ADMIN_CONTENT_CAPTURE_TIMEOUT_MS", 5000, 500, 30000),
+      maxTextBytes: integer(
+        env,
+        "ADMIN_CONTENT_CAPTURE_MAX_TEXT_BYTES",
+        256 * 1024,
+        1024,
+        4 * 1024 * 1024,
       ),
     },
     auditContentService: {

@@ -3,6 +3,7 @@
 package all
 
 import (
+	_ "github.com/yetone/magpie/plugins/auditcontent"
 	_ "github.com/yetone/magpie/plugins/budget"
 	_ "github.com/yetone/magpie/plugins/gateway"
 	_ "github.com/yetone/magpie/plugins/groups"
