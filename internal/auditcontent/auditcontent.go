@@ -251,8 +251,8 @@ func (w *watch) End(record usage.Record) {
 		agentID = "magpie"
 	}
 	for _, pair := range []struct{ kind, text string }{
-		{"prompt", record.BodyIn},
-		{"response", record.BodyOut},
+		{"prompt", ExtractRequest(record.BodyIn)},
+		{"response", ExtractResponse(record.BodyOut)},
 	} {
 		text := w.exporter.cut(pair.text)
 		if text == "" {

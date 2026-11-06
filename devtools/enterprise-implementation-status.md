@@ -22,14 +22,18 @@ security-service 44、magpie-plugin 37）；真实 IdP、Compose/反向代理、
 
 正文采集链已接通：网关侧新增 `internal/auditcontent` 观察器（`usage.Observer`，默认关闭，
 有界队列满即丢弃，不阻塞模型请求；请求带 Key 才采集，模型无 provider 前缀则跳过，超长按
-UTF-8 边界截断），经 `MAGPIE_AUDIT_CONTENT_URL` 发到 admin-service；admin-service 新增
+UTF-8 边界截断）。发送前按 API 格式提取对话文本：Anthropic Messages、OpenAI Responses、
+Chat Completions、Gemini 的 system/instructions/messages/contents，以及四种 SSE 流的
+文本增量；工具定义、工具参数、图片、思考块和其他字段不采，无法识别的格式不发送。
+经 `MAGPIE_AUDIT_CONTENT_URL` 发到 admin-service；admin-service 新增
 `POST /api/v1/internal/content/capture`（独立令牌，常量时间比较），用
 `content-identity.js` 把 `callerKeyId` 解析为用户/设备/部门（未知或已停用失败关闭），
 再以 `content-ingest-client.js` 按常驻授权（purpose、authorizationId、retentionDays）
 写入 audit-service 的 streams/chunks。测试：admin 新增 7 项（含错误令牌 401、未知 Key 404、
 已吊销 409 且不写入；另有 1 项对真实 audit-service 的端到端测试，断言流最终为
-`finalized`、`request.userId` 已解析、明文不出现在索引中），Go 新增 7 项。**尚未**在
-Compose 实机运行；生产启用前需提供真实的常驻授权 ID 与审计服务令牌。
+`finalized`、`request.userId` 已解析、明文不出现在索引中），Go 共 24 项（观察器 7 +
+文本提取 17）。**尚未**在 Compose 实机运行；生产启用前需提供真实的常驻授权 ID 与审计
+服务令牌。
 
 2026-11-03 方案基线更新到 v3.36。当前 `codex/m5-b-response-actions` 分支新增
 **M5-B 响应动作状态机与受控模拟执行核心**：新增限流、阻断、吊销 Key、锁定设备和开票五类动作，`requested/approved/active/reverted/expired/failed` 状态机，创建、审批、激活、撤销、过期、列表、详情和逐动作审计 API；强制独立 `SECURITY_CONTROL_TOKEN`、`Idempotency-Key`、组织头、职责分离、授权/动作有效期、source/target 绑定和 fail-closed 校验；每动作使用独立 hash-chain 审计，支持幂等重放、冲突拒绝、组织隔离和重启恢复。执行器明确为 `simulation`，返回 `policyApplied: true`、`gatewayApplied: false` 和 `policy_applied_without_gateway_enforcement`，不声称真实网关阻断；`gateway_key` 因无法验证而 fail closed。security-service 30 项测试通过，九套企业 Node/Mock 回归合计 376 项通过。真实网关阻断/吊销、真实厂商工单、安全运营管理 UI、OTel/Prometheus/Grafana、生产 SIEM、完整 OIDC 角色授权和生产验收仍未完成。此前 `codex/m5-a-gateway-detection-ingest` 分支在

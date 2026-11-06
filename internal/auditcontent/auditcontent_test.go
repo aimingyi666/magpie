@@ -80,7 +80,8 @@ func TestCapturesPromptAndResponse(t *testing.T) {
 	}
 	watch.End(usage.Record{
 		RouteID: 7, CallerKeyID: "key-1", Requested: "openai/gpt-test",
-		BodyIn: `{"prompt":"hello"}`, BodyOut: `{"answer":"hi"}`,
+		BodyIn:  `{"messages":[{"role":"user","content":"hello"}]}`,
+		BodyOut: `{"choices":[{"message":{"content":"hi"}}]}`,
 	})
 
 	deadline := time.Now().Add(2 * time.Second)
@@ -112,7 +113,7 @@ func TestCapturesPromptAndResponse(t *testing.T) {
 			t.Fatalf("%s = %v, want %v", key, prompt[key], want)
 		}
 	}
-	if prompt["text"] != `{"prompt":"hello"}` || response["text"] != `{"answer":"hi"}` {
+	if prompt["text"] != "hello" || response["text"] != "hi" {
 		t.Fatalf("texts = %v / %v", prompt["text"], response["text"])
 	}
 }
@@ -147,7 +148,7 @@ func TestALongBodyIsCut(t *testing.T) {
 	watch := exporter.Begin(usage.Request{CallerKeyID: "key-1", Agent: "codex", Session: "ses_abcdefgh"})
 	watch.End(usage.Record{
 		RouteID: 3, CallerKeyID: "key-1", Requested: "openai/gpt-test",
-		BodyIn: strings.Repeat("a", 200),
+		BodyIn: `{"messages":[{"role":"user","content":"` + strings.Repeat("a", 200) + `"}]}`,
 	})
 	deadline := time.Now().Add(2 * time.Second)
 	for len(seen()) < 1 {
@@ -172,7 +173,8 @@ func TestAFullQueueDropsInsteadOfBlocking(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		watch.End(usage.Record{RouteID: 3, CallerKeyID: "key-1", Requested: "openai/gpt-test",
-			BodyIn: "a", BodyOut: "b"})
+			BodyIn:  `{"messages":[{"role":"user","content":"a"}]}`,
+			BodyOut: `{"choices":[{"message":{"content":"b"}}]}`})
 		close(done)
 	}()
 	select {
