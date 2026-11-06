@@ -41,7 +41,8 @@ auth-service 已通过 26 项测试；admin-service 已通过 140 项测试（10
 5 项内容治理客户端专项 + 5 项内容治理存储专项 + 7 项目录专项 + 7 项通知渠道专项 +
 7 项通知规则专项 + 6 项 SIEM 专项）；resource-service
 已通过 16 项单元/Mock 集成测试（12 核心 + 4 控制面，含 `hook` 资源类型）；mcp-gateway 已通过 17 项
-单元/Mock 集成测试；client-sync 已通过 26 项单元/Mock 集成测试（18 核心 + 8 传输）；
+单元/Mock 集成测试；client-sync 已通过 37 项单元/Mock 集成测试（18 核心 + 8 传输 +
+11 项 Agent 指令落地：受管块、原子写入、BOM/CRLF 保留、损坏标记与符号链接拒绝）；
 local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server + 5 stdio bridge
 + 7 Codex 配置映射 + 10 一键配置编排 + 1 真实子进程 E2E）；audit-service 已通过 67 项
 隔离测试（20 项 L0/L1 事件管道 + 27 项内容审计、检索与一次性授权核心 + 20 项留存、
@@ -55,7 +56,7 @@ magpie-plugin 已通过 37 项隔离测试（员工页、管理员页、资源�
 工具块不采集、未知格式不发送；
 其中 8 项直接解析 `internal/gateway/testdata` 里真实录制的 Claude Code、Codex 与
 OpenCode 请求和三家流式响应；另有 2 项来自本机真实网关的一次真实订阅调用）；采集链路另有 1 项端到端测试（真实 audit-service，
-流最终为 finalized，明文不落在索引里）；当前十套合计 471 项通过、0 失败。
+流最终为 finalized，明文不落在索引里）；当前十套合计 482 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
