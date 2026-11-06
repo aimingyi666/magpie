@@ -415,6 +415,17 @@ const ADMIN_MESSAGES = {
     tabGateway: "Gateway",
     tabResources: "Resources",
     tabUsage: "Usage",
+    tabAudit: "Audit",
+    auditTitle: "Collected content",
+    auditCount: "{count} streams",
+    auditEmpty: "No content was collected in this window.",
+    auditUnavailable: "Your role cannot search collected content.",
+    auditNote: "Reading a body needs an approval and a fresh sign-in, so it happens in the web console. This page shows what was collected, never the text.",
+    auditUser: "user {user}",
+    auditAgent: "agent {agent}",
+    auditModel: "model {model}",
+    auditBytes: "{bytes} bytes",
+    auditClose: "Close",
     resTitle: "Resources",
     resEmpty: "The enterprise has not published any resources.",
     resCount: "{count} resources",
@@ -580,6 +591,17 @@ const ADMIN_MESSAGES = {
     tabGateway: "网关",
     tabResources: "资源",
     tabUsage: "用量",
+    tabAudit: "审计",
+    auditTitle: "已采集内容",
+    auditCount: "{count} 条流",
+    auditEmpty: "这个时间窗没有采集到内容。",
+    auditUnavailable: "你的角色不能检索已采集内容。",
+    auditNote: "读取正文需要审批和重新认证，所以只能在网页管理台进行。这里只展示采集元数据，从不显示正文。",
+    auditUser: "用户 {user}",
+    auditAgent: "Agent {agent}",
+    auditModel: "模型 {model}",
+    auditBytes: "{bytes} 字节",
+    auditClose: "关闭",
     resTitle: "企业资源",
     resEmpty: "企业还没有发布任何资源。",
     resCount: "{count} 个资源",
@@ -745,6 +767,17 @@ const ADMIN_MESSAGES = {
     tabGateway: "閘道",
     tabResources: "資源",
     tabUsage: "用量",
+    tabAudit: "稽核",
+    auditTitle: "已採集內容",
+    auditCount: "{count} 條流",
+    auditEmpty: "這個時間窗沒有採集到內容。",
+    auditUnavailable: "你的角色不能檢索已採集內容。",
+    auditNote: "讀取正文需要審核和重新認證，所以只能在網頁管理台進行。這裡只顯示採集中介資料，從不顯示正文。",
+    auditUser: "使用者 {user}",
+    auditAgent: "Agent {agent}",
+    auditModel: "模型 {model}",
+    auditBytes: "{bytes} 位元組",
+    auditClose: "關閉",
     resTitle: "企業資源",
     resEmpty: "企業還沒有發布任何資源。",
     resCount: "{count} 個資源",
@@ -910,6 +943,17 @@ const ADMIN_MESSAGES = {
     tabGateway: "ゲートウェイ",
     tabResources: "リソース",
     tabUsage: "使用量",
+    tabAudit: "監査",
+    auditTitle: "収集された内容",
+    auditCount: "{count} ストリーム",
+    auditEmpty: "この期間に収集された内容はありません。",
+    auditUnavailable: "このロールでは収集内容を検索できません。",
+    auditNote: "本文の閲覧には承認と再認証が必要なため、Web コンソールで行います。このページは収集メタデータのみを表示し、本文は表示しません。",
+    auditUser: "ユーザー {user}",
+    auditAgent: "エージェント {agent}",
+    auditModel: "モデル {model}",
+    auditBytes: "{bytes} バイト",
+    auditClose: "閉じる",
     resTitle: "エンタープライズリソース",
     resEmpty: "まだリソースが配布されていません。",
     resCount: "{count} 件のリソース",
@@ -1075,6 +1119,17 @@ const ADMIN_MESSAGES = {
     tabGateway: "Gateway",
     tabResources: "Ressourcen",
     tabUsage: "Nutzung",
+    tabAudit: "Audit",
+    auditTitle: "Erfasste Inhalte",
+    auditCount: "{count} Streams",
+    auditEmpty: "In diesem Zeitraum wurde kein Inhalt erfasst.",
+    auditUnavailable: "Ihre Rolle darf erfasste Inhalte nicht durchsuchen.",
+    auditNote: "Das Lesen eines Textes braucht eine Freigabe und eine frische Anmeldung und geschieht daher in der Webkonsole. Diese Seite zeigt nur Metadaten, nie den Text.",
+    auditUser: "Benutzer {user}",
+    auditAgent: "Agent {agent}",
+    auditModel: "Modell {model}",
+    auditBytes: "{bytes} Bytes",
+    auditClose: "Schließen",
     resTitle: "Unternehmensressourcen",
     resEmpty: "Das Unternehmen hat noch keine Ressourcen veröffentlicht.",
     resCount: "{count} Ressourcen",
@@ -1952,6 +2007,8 @@ async function loadAdminTab() {
         return loadResources();
       case "usage":
         return loadUsage();
+      case "audit":
+        return loadAudit();
       default:
         return undefined;
     }
@@ -2487,6 +2544,86 @@ function deviceRow(device) {
   return item;
 }
 
+// Collected content, metadata only. Reading a body needs an approval, CSRF
+// and a fresh step-up, which the web console drives; this page must never
+// offer a read it cannot authorize.
+async function loadAudit() {
+  const form = $("auditFilter");
+  const params = new URLSearchParams();
+  for (const name of ["userId", "agentId", "modelId", "status"]) {
+    const value = String(form.elements[name]?.value || "").trim();
+    if (value) params.set(name, value);
+  }
+  params.set("limit", "50");
+  $("auditDetail").hidden = true;
+  try {
+    const payload = await adminApi(`/audit/streams?${params}`);
+    renderAudit(Array.isArray(payload.streams) ? payload.streams : []);
+  } catch (error) {
+    if (error instanceof AdminApiError && error.status === 403) {
+      renderAudit([]);
+      $("auditEmpty").hidden = false;
+      $("auditEmpty").textContent = ta("auditUnavailable");
+      return;
+    }
+    throw error;
+  }
+}
+
+function renderAudit(streams) {
+  $("auditCount").textContent = ta("auditCount", { count: streams.length });
+  $("auditList").replaceChildren(...streams.map(auditRow));
+  $("auditEmpty").hidden = streams.length > 0;
+  $("auditEmpty").textContent = ta("auditEmpty");
+}
+
+function auditRow(stream) {
+  const item = el("article", "resource resource-link");
+  const main = el("div", "resource-main");
+  main.append(el("span", "resource-title", stream.contentKind || stream.streamId || ""));
+  main.append(el("span", "resource-meta", [
+    stream.status,
+    stream.userId ? ta("auditUser", { user: stream.userId }) : "",
+    stream.agentId ? ta("auditAgent", { agent: stream.agentId }) : "",
+    stream.modelId ? ta("auditModel", { model: stream.modelId }) : "",
+    Number.isFinite(Number(stream.bytes))
+      ? ta("auditBytes", { bytes: Number(stream.bytes) })
+      : "",
+    stream.createdAt ? formatTime(stream.createdAt) : "",
+  ].filter(Boolean).join(" · ")));
+  const tone = stream.status === "finalized" ? "ok"
+    : stream.status === "failed" ? "danger" : "muted";
+  item.append(main, el("span", `status status-${tone}`, stream.status || ""));
+  item.addEventListener("click", () => openAuditStream(stream.streamId));
+  return item;
+}
+
+async function openAuditStream(streamId) {
+  const panel = $("auditDetail");
+  panel.hidden = false;
+  $("auditDetailTitle").textContent = streamId || "";
+  $("auditDetailClose").textContent = ta("auditClose");
+  const body = $("auditDetailBody");
+  body.replaceChildren(el("p", "detail-line", ta("auditNote")));
+  try {
+    const payload = await adminApi(`/audit/streams/${encodeURIComponent(streamId)}`);
+    const stream = payload.stream || {};
+    body.replaceChildren(
+      detailLine("request", stream.requestId || ""),
+      detailLine(ta("auditUser", { user: stream.userId || "" }), stream.departmentId || ""),
+      detailLine(ta("auditAgent", { agent: stream.agentId || "" }), stream.modelId || ""),
+      detailLine(stream.auditLevel || "", stream.contentKind || ""),
+      detailLine(stream.auditLevel === "L2" ? ta("auditBytes", { bytes: stream.bytes || 0 }) : "",
+        stream.finalizedAt ? formatTime(stream.finalizedAt) : ""),
+      detailLine(stream.contentRetentionExpiresAt
+        ? `retention ${formatTime(stream.contentRetentionExpiresAt)}` : "",
+      stream.contentRef || ""),
+    );
+  } catch (error) {
+    body.replaceChildren(el("p", "detail-line", error.message || ta("adminUnreachable")));
+  }
+}
+
 // Org-wide usage: the totals, one row per user and a bar per bucket, above
 // the request list. The summary is scoped by the management service to the
 // administrator's organization; a role without usage.read still sees the
@@ -2862,9 +2999,12 @@ function translateAdmin() {
     gateway: "tabGateway",
     resources: "tabResources",
     usage: "tabUsage",
+    audit: "tabAudit",
   };
   $("resTitle").textContent = ta("resTitle");
   $("syncTitle").textContent = ta("syncTitle");
+  $("auditTitle").textContent = ta("auditTitle");
+  $("auditReadNote").textContent = ta("auditNote");
   for (const button of document.querySelectorAll("#adminTabs .tab")) {
     button.textContent = ta(tabNames[button.dataset.tab] || button.dataset.tab);
   }
@@ -2942,6 +3082,11 @@ $("adminSignIn").addEventListener("click", startAdminLogin);
 $("adminSignOut").addEventListener("click", signOutAdmin);
 $("adminRefresh").addEventListener("click", () => loadAdmin());
 $("resDetailClose").addEventListener("click", () => { $("resDetail").hidden = true; });
+$("auditFilter").addEventListener("submit", (event) => {
+  event.preventDefault();
+  loadAudit().catch((error) => adminNotice(error.message || ta("adminUnreachable"), "error"));
+});
+$("auditDetailClose").addEventListener("click", () => { $("auditDetail").hidden = true; });
 $("consoleForm").addEventListener("submit", saveConsole);
 $("providerAdd").addEventListener("click", () => openProviderForm(null));
 $("providerForm").addEventListener("submit", saveProvider);

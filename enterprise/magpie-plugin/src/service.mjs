@@ -411,6 +411,13 @@ async function handleAdmin(req, res, url, { admin, host, port }) {
       admin.request("GET", `/api/v1/admin/usage/summary?${url.searchParams}`)],
     ["GET", /^\/usage\/timeseries$/, () =>
       admin.request("GET", `/api/v1/admin/usage/timeseries?${url.searchParams}`)],
+    // Audit content metadata: the streams and one stream. Reading a body
+    // needs an approval, CSRF and a fresh step-up, so it stays in the web
+    // console; this page shows what was collected, never the text.
+    ["GET", /^\/audit\/streams$/, () =>
+      admin.request("GET", `/api/v1/admin/audit/content/streams?${url.searchParams}`)],
+    ["GET", /^\/audit\/streams\/(str_[A-Za-z0-9_-]{43})$/, (_body, m) =>
+      admin.request("GET", `/api/v1/admin/audit/content/streams/${m[1]}`)],
     ["GET", /^\/resource-sync\/reports$/, () =>
       admin.request("GET", "/api/v1/admin/resource-sync/reports")],
     ["GET", /^\/requests$/, () => {

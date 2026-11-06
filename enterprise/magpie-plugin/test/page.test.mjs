@@ -140,6 +140,20 @@ test("the page takes the window's look, not a palette of its own", () => {
   assert.doesNotMatch(CSS, /#f6f5f1|#171816/, "the old cream palette should be gone");
 });
 
+test("the audit tab lists collected metadata and never reads a body", () => {
+  // Reading a body needs an approval, CSRF and a fresh step-up, which the
+  // web console drives. The client page may list and detail streams; it must
+  // not offer a read it cannot authorize.
+  for (const id of ["auditTitle", "auditCount", "auditList", "auditEmpty",
+    "auditDetail", "auditDetailBody", "auditReadNote"]) {
+    assert.match(HTML, new RegExp(`id="${id}"`), `ui.html should contain #${id}`);
+  }
+  assert.match(HTML, /data-tab="audit"/);
+  assert.match(JS, /adminApi\(`\/audit\/streams\?\$\{params\}`\)/);
+  assert.match(JS, /function auditRow\(/);
+  assert.doesNotMatch(JS, /audit\/content\/[^`"]*\/read/);
+});
+
 test("the usage tab shows totals, a per-user breakdown and a bar per bucket", () => {
   // The organization's usage is three answers from the management service:
   // totals, one row per user, and a time series. Each is read on its own,

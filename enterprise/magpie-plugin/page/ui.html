@@ -95,6 +95,7 @@
         <button class="tab" type="button" role="tab" aria-selected="false" data-tab="gateway">Gateway</button>
         <button class="tab" type="button" role="tab" aria-selected="false" data-tab="resources">Resources</button>
         <button class="tab" type="button" role="tab" aria-selected="false" data-tab="usage">Usage</button>
+        <button class="tab" type="button" role="tab" aria-selected="false" data-tab="audit">Audit</button>
       </nav>
 
       <section class="tab-panel" data-panel="overview">
@@ -284,6 +285,32 @@
         <div id="usageList" class="list"></div>
         <p id="usageEmpty" class="empty" hidden></p>
         <div id="usageDetail" class="detail" hidden></div>
+      </section>
+
+      <section class="tab-panel" data-panel="audit" hidden>
+        <form id="auditFilter" class="form">
+          <p class="note" id="auditReadNote"></p>
+          <label class="field"><span>User</span><input name="userId" autocomplete="off" placeholder="usr_..."></label>
+          <label class="field"><span>Agent</span><input name="agentId" autocomplete="off"></label>
+          <label class="field"><span>Model</span><input name="modelId" autocomplete="off"></label>
+          <label class="field"><span>Status</span><input name="status" autocomplete="off" placeholder="finalized"></label>
+          <div class="form-actions">
+            <button class="primary" type="submit">Refresh</button>
+          </div>
+        </form>
+        <div class="resources-head">
+          <h3 id="auditTitle">Collected content</h3>
+          <span id="auditCount" class="count"></span>
+        </div>
+        <div id="auditList" class="list"></div>
+        <p id="auditEmpty" class="empty" hidden></p>
+        <section id="auditDetail" class="detail" hidden>
+          <div class="resources-head">
+            <h3 id="auditDetailTitle">Stream</h3>
+            <button id="auditDetailClose" class="linkish" type="button">Close</button>
+          </div>
+          <div id="auditDetailBody"></div>
+        </section>
       </section>
     </div>
   </section>

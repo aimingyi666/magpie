@@ -48,9 +48,9 @@ local-mcp 已通过 60 项隔离测试（21 运行时 + 7 helper + 9 HTTP server
 法律保留、删除证明和加密导出核心）；security-service 已通过 44 项隔离测试（固定事件
 allowlist、秘密扫描、八条稳定检测规则、确定性 finding/聚合、抑制标记、幂等重放和
 原子持久化，M5-B 覆盖响应动作状态机、审批、幂等、撤销和 hash-chain 审计）；
-magpie-plugin 已通过 36 项隔离测试（员工页、管理员页、资源页、用量汇总、主题跟随、PKCE 与页面检查）；
-网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、插件生命周期 3、
-身份/来源地址映射 1）；当前十套合计 463 项通过、0 失败。
+magpie-plugin 已通过 37 项隔离测试（员工页、管理员页、资源页、用量汇总、审计元数据页、
+主题跟随、PKCE 与页面检查）；网关元数据投递核心另有 12 项 Go 测试通过（导出器 8、
+插件生命周期 3、身份/来源地址映射 1）；当前十套合计 464 项通过、0 失败。
 NOTIFY-01a 的 transactional outbox、NOTIFY-01b 的渠道管理 API/统一 HTTPS 渠道适配器和
 NOTIFY-01c 的 SIEM transport 已实现并通过 Mock/故障测试；支持 `email`/`im`/`webhook`/
 `ticketing`/`siem`、HMAC Webhook、host allowlist、DNS 固定解析、私网/重定向防护，以及
