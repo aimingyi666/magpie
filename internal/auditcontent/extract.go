@@ -2,28 +2,35 @@ package auditcontent
 
 import (
 	"encoding/json"
+	"regexp"
 	"strings"
 )
 
-// ExtractRequest is the conversation text an agent asked with: the system
-// prompt and each message's text, across the four APIs the gateway speaks
-// (Anthropic Messages, OpenAI Responses, Chat Completions, Gemini). Tool
-// definitions, tool arguments, images and every other field stay out: the
-// audit stream records what was said, not the machinery around it.
+// harnessBlock is text an agent's harness puts in a user turn for the model:
+// Claude Code's injected instructions and environment arrive as
+// <system-reminder> blocks inside the user message, and in a real turn they
+// were most of what looked like the employee's words.
+var harnessBlock = regexp.MustCompile(`(?s)<system-reminder>.*?</system-reminder>`)
+
+func stripHarnessBlocks(text string) string {
+	return harnessBlock.ReplaceAllString(text, "")
+}
+
+// ExtractRequest is the conversation text an agent asked with: the user and
+// assistant turns, across the four APIs the gateway speaks (Anthropic
+// Messages, OpenAI Responses, Chat Completions, Gemini).
 //
-// A body it does not recognize answers "" so the caller sends nothing,
-// rather than sending raw JSON that happens to be text.
+// The system prompt, instructions and Gemini's systemInstruction are left
+// out: they are the harness's own text, not what the employee said, and in
+// a real Claude Code turn they are most of the body (75 KB of a 138 KB
+// request). Tool definitions, tool arguments, images and thinking blocks
+// stay out too, and a body it does not recognize answers "".
 func ExtractRequest(body string) string {
 	object := parseObject(body)
 	if object == nil {
 		return ""
 	}
 	var parts []string
-	parts = addText(parts, object["system"])
-	parts = addText(parts, object["instructions"])
-	if system, ok := object["systemInstruction"].(map[string]any); ok {
-		parts = addGeminiParts(parts, system["parts"])
-	}
 	if contents, ok := object["contents"].([]any); ok {
 		for _, item := range contents {
 			entry, ok := item.(map[string]any)
@@ -167,8 +174,9 @@ func extractStream(body string) string {
 		}
 	}
 	// A stream's deltas are the pieces of one answer: they join with
-	// nothing between them, unlike separate blocks.
-	return strings.TrimSpace(strings.Join(parts, ""))
+	// nothing between them, unlike separate blocks. The harness blocks are
+	// filtered after joining, since a tag can be split across two deltas.
+	return strings.TrimSpace(stripHarnessBlocks(strings.Join(parts, "")))
 }
 
 // addText keeps a string, an array of content blocks, or a single block.
@@ -203,17 +211,25 @@ func addContentBlock(parts []string, block map[string]any) []string {
 	return addText(parts, block["text"])
 }
 
-// addMessages keeps each message's text in order, across Anthropic's and
-// Chat's message lists (their content blocks are the same shape).
+// addMessages keeps each user and assistant message's text in order, across
+// Anthropic's and Chat's message lists (their content blocks are the same
+// shape). A system or developer message is the harness speaking, not the
+// employee, so it is skipped.
 func addMessages(parts []string, messages []any) []string {
 	for _, item := range messages {
 		message, ok := item.(map[string]any)
-		if !ok {
+		if !ok || isSystemRole(message["role"]) {
 			continue
 		}
 		parts = addText(parts, message["content"])
 	}
 	return parts
+}
+
+func isSystemRole(value any) bool {
+	role, _ := value.(string)
+	role = strings.ToLower(strings.TrimSpace(role))
+	return role == "system" || role == "developer"
 }
 
 // addResponsesInput covers the Responses API's input: a string, or items
@@ -225,13 +241,15 @@ func addResponsesInput(parts []string, input any) []string {
 	case []any:
 		for _, item := range typed {
 			entry, ok := item.(map[string]any)
-			if !ok {
+			if !ok || isSystemRole(entry["role"]) {
 				continue
 			}
 			parts = addText(parts, entry["content"])
 		}
 	case map[string]any:
-		parts = addText(parts, typed["content"])
+		if !isSystemRole(typed["role"]) {
+			parts = addText(parts, typed["content"])
+		}
 	}
 	return parts
 }
@@ -253,7 +271,13 @@ func addGeminiParts(parts []string, value any) []string {
 
 func appendNonEmpty(parts []string, value any) []string {
 	text, ok := value.(string)
-	if !ok || strings.TrimSpace(text) == "" {
+	if !ok {
+		return parts
+	}
+	// For a streamed delta the tags are split across events, so only whole
+	// JSON text is filtered here; extractStream joins first and filters after.
+	text = stripHarnessBlocks(text)
+	if strings.TrimSpace(text) == "" {
 		return parts
 	}
 	return append(parts, text)

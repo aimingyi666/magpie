@@ -9,28 +9,28 @@ func TestExtractRequestAcrossAPIs(t *testing.T) {
 		want string
 	}{
 		{
-			name: "Anthropic Messages keeps system and text blocks",
+			name: "Anthropic Messages keeps the turns and drops the system prompt",
 			body: `{"system":"be brief","messages":[{"role":"user","content":"hello"},` +
 				`{"role":"assistant","content":[{"type":"text","text":"hi there"}]}]}`,
-			want: "be brief\nhello\nhi there",
+			want: "hello\nhi there",
 		},
 		{
-			name: "Chat Completions keeps each message",
+			name: "Chat Completions drops a system message",
 			body: `{"messages":[{"role":"system","content":"rules"},` +
 				`{"role":"user","content":"question"}]}`,
-			want: "rules\nquestion",
+			want: "question",
 		},
 		{
-			name: "Responses keeps instructions and input_text",
+			name: "Responses drops instructions",
 			body: `{"instructions":"be terse","input":[{"role":"user",` +
 				`"content":[{"type":"input_text","text":"hi"}]}]}`,
-			want: "be terse\nhi",
+			want: "hi",
 		},
 		{
-			name: "Gemini keeps systemInstruction and contents",
+			name: "Gemini drops systemInstruction",
 			body: `{"systemInstruction":{"parts":[{"text":"be nice"}]},` +
 				`"contents":[{"role":"user","parts":[{"text":"hello"}]}]}`,
-			want: "be nice\nhello",
+			want: "hello",
 		},
 		{
 			name: "tool calls and results are left out",
@@ -38,6 +38,12 @@ func TestExtractRequestAcrossAPIs(t *testing.T) {
 				`{"type":"tool_use","input":{"key":"secret"}},` +
 				`{"type":"tool_result","content":"tool output"}]}]}`,
 			want: "run it",
+		},
+		{
+			name: "Claude Code's system-reminder is dropped from a user turn",
+			body: `{"messages":[{"role":"user","content":[{"type":"text",` +
+				`"text":"<system-reminder>env and instructions</system-reminder>say hi"}]}]}`,
+			want: "say hi",
 		},
 		{
 			name: "an unknown body is not sent",
@@ -108,6 +114,12 @@ func TestExtractResponseAcrossAPIs(t *testing.T) {
 			body: "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"G\"}]}}]}\n\n" +
 				"data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"em\"}]}}]}\n\n",
 			want: "Gem",
+		},
+		{
+			name: "a split system-reminder in a stream is dropped after joining",
+			body: "data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"<system-remind\"}}\n\n" +
+				"data: {\"type\":\"content_block_delta\",\"delta\":{\"text\":\"er>x</system-reminder>Hi\"}}\n\n",
+			want: "Hi",
 		},
 		{
 			name: "an unknown body is not sent",

@@ -27,11 +27,11 @@ func TestExtractFromRecordedRequests(t *testing.T) {
 		drop []string
 	}{
 		{
-			// Claude Code, Anthropic Messages: a user turn and a system
-			// turn whose blocks include a tool_addition that must stay out.
+			// Claude Code, Anthropic Messages: the user turn is kept; the
+			// system turn is the harness's own text and stays out.
 			file: "claude-code-advisor-turn.json",
-			want: []string{"hi", "# Environment"},
-			drop: []string{"tool_addition"},
+			want: []string{"hi"},
+			drop: []string{"tool_addition", "# Environment", "You have been invoked"},
 		},
 		{
 			// Codex compaction, Responses input: a user turn and the
@@ -40,14 +40,16 @@ func TestExtractFromRecordedRequests(t *testing.T) {
 			want: []string{"对当前的接口做一次全测试", "我会先梳理项目里的接口"},
 		},
 		{
-			// OpenCode, Chat Completions: a system prompt and the user turn.
+			// OpenCode, Chat Completions: the user turn only.
 			file: "opencode2_chat_tools.json",
-			want: []string{"You are an AI agent running in OpenCode", "say hi"},
+			want: []string{"say hi"},
+			drop: []string{"You are an AI agent running in OpenCode"},
 		},
 		{
-			// OpenCode, Responses: top-level instructions and the input.
+			// OpenCode, Responses: the input, not the instructions.
 			file: "opencode2_responses_tools.json",
-			want: []string{"You are an AI agent running in OpenCode", "say hi"},
+			want: []string{"say hi"},
+			drop: []string{"You are an AI agent running in OpenCode"},
 		},
 	}
 	for _, test := range cases {
