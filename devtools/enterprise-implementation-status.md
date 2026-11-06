@@ -31,8 +31,8 @@ Chat Completions、Gemini 的 system/instructions/messages/contents，以及四�
 再以 `content-ingest-client.js` 按常驻授权（purpose、authorizationId、retentionDays）
 写入 audit-service 的 streams/chunks。测试：admin 新增 7 项（含错误令牌 401、未知 Key 404、
 已吊销 409 且不写入；另有 1 项对真实 audit-service 的端到端测试，断言流最终为
-`finalized`、`request.userId` 已解析、明文不出现在索引中），Go 共 34 项（观察器 7 +
-文本提取 17 + 真实录制报文 10）。真实报文来自仓库已有的 `internal/gateway/testdata`：
+`finalized`、`request.userId` 已解析、明文不出现在索引中），Go 共 37 项（观察器 7 +
+文本提取 17 + 仓库录制报文 10 + 本机真实网关调用 2，另有父测试）。真实报文来自仓库已有的 `internal/gateway/testdata`：
 Claude Code 的 Anthropic 请求、Codex 的 Responses 请求、OpenCode 的 Chat 与 Responses
 请求，以及 Anthropic/Chat/Responses 三家流式响应；Gemini 仍只有构造报文，没有真实录制。
 **尚未**在 Compose 实机运行（本机没有 Docker）；生产启用前需提供真实的常驻授权 ID 与

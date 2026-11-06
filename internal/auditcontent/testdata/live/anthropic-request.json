@@ -1,0 +1,1 @@
+{"model":"auto/deepseek-v4.1-flash","max_tokens":40,"stream":true,"messages":[{"role":"user","content":"say hi in one word"}]}

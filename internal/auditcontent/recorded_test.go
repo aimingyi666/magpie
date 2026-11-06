@@ -107,3 +107,33 @@ func TestAStreamWithNoTextSendsNothing(t *testing.T) {
 		t.Fatalf("extracted %q from a stream with no text", got)
 	}
 }
+
+// TestExtractFromLiveTraffic parses what one real call through a running
+// magpie gateway recorded: a subscription answered "Hi" to "say hi in one
+// word", once in Anthropic Messages and once in Responses (the gateway
+// converted a Chat call upstream). The bytes are the gateway's own, not a
+// hand-written sample.
+func TestExtractFromLiveTraffic(t *testing.T) {
+	cases := []struct{ request, response string }{
+		{"anthropic-request.json", "anthropic-response.sse"},
+		{"responses-request.json", "responses-response.sse"},
+	}
+	for _, test := range cases {
+		t.Run(test.request, func(t *testing.T) {
+			request, err := os.ReadFile(filepath.Join("testdata", "live", test.request))
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := os.ReadFile(filepath.Join("testdata", "live", test.response))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := ExtractRequest(string(request)); got != "say hi in one word" {
+				t.Fatalf("prompt = %q", got)
+			}
+			if got := ExtractResponse(string(response)); got != "Hi" {
+				t.Fatalf("reply = %q", got)
+			}
+		})
+	}
+}
