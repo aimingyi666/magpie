@@ -124,24 +124,29 @@ export class ContentIngestClient {
       },
       `${keyBase}:stream`,
     );
-    const streamId = text(stream.streamId);
+    // audit-service answers {stream: {...}}, not the stream at the root.
+    const created = stream.stream && typeof stream.stream === "object" ? stream.stream : stream;
+    const streamId = text(created.streamId);
     if (!streamId) {
       throw new ContentIngestError("audit-service did not name the stream", {
         status: 502,
         code: "content_ingest_invalid_response",
       });
     }
-    const sequence = Number.isInteger(stream.nextSequence) ? stream.nextSequence : 0;
+    const sequence = Number.isInteger(created.nextSequence) ? created.nextSequence : 0;
     const chunk = await this.post(
       `/api/v1/internal/audit/content/streams/${encodeURIComponent(streamId)}/chunks`,
       { schemaVersion: SCHEMA_VERSION, sequence, text: content, final: true },
       `${keyBase}:chunk:${sequence}`,
     );
+    const finalized = chunk.stream && typeof chunk.stream === "object" ? chunk.stream : chunk;
     return {
       streamId,
-      contentRef: text(chunk.contentRef),
-      bytes: Number(chunk.bytes) || 0,
-      redaction: chunk.redaction && typeof chunk.redaction === "object" ? chunk.redaction : null,
+      contentRef: text(finalized.contentRef),
+      bytes: Number(finalized.bytes) || 0,
+      redaction: finalized.redaction && typeof finalized.redaction === "object"
+        ? finalized.redaction
+        : null,
     };
   }
 }

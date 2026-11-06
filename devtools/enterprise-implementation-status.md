@@ -15,7 +15,7 @@ admin-service 增加网关管理代理、桌面 PKCE 登录（一次性 ticket �
 窗口主题实时切换。用量页新增企业范围汇总、按用户明细和按天请求柱状图；资源目录新增
 `hook` 类型（只登记元数据，不执行）；管理员标签补充 `aria-selected`；新增**审计页**，
 按用户/Agent/模型/状态查询已采集内容流并查看流详情，**只显示元数据、不读取正文**。合并后
-十套企业 Node 回归 `470 passed, 0 failed`（auth 26、admin 139、gateway-control 38、
+十套企业 Node 回归 `471 passed, 0 failed`（auth 26、admin 140、gateway-control 38、
 resource 16、mcp-gateway 17、client-sync 26、local-mcp 60、audit-service 67、
 security-service 44、magpie-plugin 37）；真实 IdP、Compose/反向代理、浏览器 E2E 与
 生产验收仍未完成。
@@ -26,8 +26,9 @@ UTF-8 边界截断），经 `MAGPIE_AUDIT_CONTENT_URL` 发到 admin-service；ad
 `POST /api/v1/internal/content/capture`（独立令牌，常量时间比较），用
 `content-identity.js` 把 `callerKeyId` 解析为用户/设备/部门（未知或已停用失败关闭），
 再以 `content-ingest-client.js` 按常驻授权（purpose、authorizationId、retentionDays）
-写入 audit-service 的 streams/chunks。测试：admin 新增 6 项（含错误令牌 401、未知 Key 404、
-已吊销 409 且不写入），Go 新增 7 项。**尚未**用真实 audit-service 做端到端验证，也未在
+写入 audit-service 的 streams/chunks。测试：admin 新增 7 项（含错误令牌 401、未知 Key 404、
+已吊销 409 且不写入；另有 1 项对真实 audit-service 的端到端测试，断言流最终为
+`finalized`、`request.userId` 已解析、明文不出现在索引中），Go 新增 7 项。**尚未**在
 Compose 实机运行；生产启用前需提供真实的常驻授权 ID 与审计服务令牌。
 
 2026-11-03 方案基线更新到 v3.36。当前 `codex/m5-b-response-actions` 分支新增

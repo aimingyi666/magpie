@@ -6,6 +6,9 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { loadConfig } from "../src/config.js";
+import { loadConfig as loadAuditConfig } from "../../audit-service/src/config.js";
+import { createAuditServer } from "../../audit-service/src/service.js";
+import { ContentStore } from "../../audit-service/src/content-store.js";
 import { loadModelCatalog } from "../src/model-catalog.js";
 import { JsonStore } from "../src/store.js";
 import { createEnterpriseAdminServer } from "../src/service.js";
@@ -1297,7 +1300,8 @@ async function fixture(options = {}) {
         : {}),
       ...(auditContentEnabled
         ? {
-          ADMIN_AUDIT_CONTENT_SERVICE_URL: "https://audit-content.corp.example",
+          ADMIN_AUDIT_CONTENT_SERVICE_URL:
+            options.auditContentServiceUrl || "https://audit-content.corp.example",
           ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN: TEST_CONTENT_ADMIN_TOKEN,
           ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: TEST_CONTENT_GOVERNANCE_TOKEN,
           ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID: "org-enterprise",
@@ -10579,4 +10583,91 @@ test("content capture refuses a wrong token, an unknown key and a revoked one", 
   assert.equal((await send({ "x-content-capture-token": captureToken }, "key-alice-old")).status,
     409);
   assert.equal(calls.length, 0);
+});
+
+test("content capture reaches a real audit-service and finalizes one stream", async (t) => {
+  // The broker and the ingest client against a real audit-service, not a
+  // fake: the caller key is resolved here, the stream is created there, and
+  // the text ends up encrypted in that service's own store.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-capture-e2e-"));
+  const ingestToken = "audit-ingest-token-for-test-only-not-real";
+  const captureToken = "capture-token-for-test-only-not-real";
+  const auditConfig = loadAuditConfig({
+    AUDIT_SERVICE_TOKEN: ingestToken,
+    AUDIT_CONTENT_ENABLED: "true",
+    AUDIT_CONTENT_ENCRYPTION_KEY: Buffer.alloc(32, 0x2a).toString("base64"),
+    AUDIT_CONTENT_STORE_DIR: path.join(root, "content"),
+    AUDIT_STORE_PATH: path.join(root, "audit-store.json"),
+    AUDIT_MAX_BODY_BYTES: "65536",
+    AUDIT_RATE_LIMIT_PER_MINUTE: "1000",
+  });
+  const contentStore = new ContentStore({
+    directory: path.join(root, "content"),
+    key: Buffer.alloc(32, 0x2a),
+    proofSecret: "proof-secret-for-test-only-not-real-0123456789",
+    maxStreamBytes: 4096,
+  });
+  await contentStore.load();
+  const auditService = await createAuditServer(auditConfig, {
+    startPipeline: false,
+    logger: () => {},
+    contentStore,
+  });
+  const auditBase = await listen(auditService.server);
+  t.after(async () => {
+    await close(auditService.server);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const f = await fixture({
+    auditContentEnabled: true,
+    auditContentServiceUrl: auditBase,
+    contentCapture: {
+      captureToken,
+      ingestToken,
+      authorizationId: "apr_capture_policy_01",
+      retentionDays: 7,
+    },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const response = await fetch(`${f.base}/api/v1/internal/content/capture`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-content-capture-token": captureToken },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      callerKeyId: "key-alice-new",
+      requestId: "req_capture0003",
+      sessionId: "ses_capture0003",
+      agentId: "codex",
+      modelId: "deepseek/deepseek-chat",
+      contentKind: "prompt",
+      text: "hello world",
+    }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(payload));
+  assert.match(payload.streamId, /^str_/);
+
+  const indexPath = path.join(root, "content", "index.json");
+  let index = null;
+  let indexText = "";
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    try {
+      indexText = await fs.readFile(indexPath, "utf8");
+      index = JSON.parse(indexText);
+      if (Object.keys(index.streams || {}).length === 1) break;
+    } catch {
+      index = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const streams = Object.values(index?.streams || {});
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0].status, "finalized");
+  assert.equal(streams[0].request.userId, "usr_alice");
+  assert.equal(streams[0].request.deviceId, "dev_alice");
+  assert.equal(streams[0].request.contentKind, "prompt");
+  assert.ok(streams[0].contentRef);
+  // The text is in the encrypted object, never in the index.
+  assert.doesNotMatch(indexText, /hello world/);
 });
