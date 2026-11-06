@@ -15,7 +15,7 @@ admin-service 增加网关管理代理、桌面 PKCE 登录（一次性 ticket �
 窗口主题实时切换。用量页新增企业范围汇总、按用户明细和按天请求柱状图；资源目录新增
 `hook` 类型（只登记元数据，不执行）；管理员标签补充 `aria-selected`；新增**审计页**，
 按用户/Agent/模型/状态查询已采集内容流并查看流详情，**只显示元数据、不读取正文**。合并后
-十套企业 Node 回归 `487 passed, 0 failed`（auth 26、admin 140、gateway-control 38、
+十套企业 Node 回归 `488 passed, 0 failed`（auth 26、admin 141、gateway-control 38、
 resource 16、mcp-gateway 17、client-sync 39、local-mcp 60、audit-service 67、
 security-service 44、magpie-plugin 40）；真实 IdP、Compose/反向代理、浏览器 E2E 与
 生产验收仍未完成。

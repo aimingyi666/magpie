@@ -10671,3 +10671,25 @@ test("content capture reaches a real audit-service and finalizes one stream", as
   // The text is in the encrypted object, never in the index.
   assert.doesNotMatch(indexText, /hello world/);
 });
+
+test("a half-finished web sign-in does not stand in for a desktop one", {
+  timeout: 30000,
+}, async (t) => {
+  // Both flows share the host, so a shared login cookie once let a web
+  // transaction answer the desktop callback ("this callback is not a
+  // desktop sign-in"). The desktop flow now keeps a cookie of its own.
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const web = await fetch(`${f.base}/admin/login`, { redirect: "manual" });
+  assert.equal(web.status, 302);
+  const webCookie = web.headers.getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+  const state = new URL(web.headers.get("location")).searchParams.get("state");
+  const desktop = await fetch(
+    `${f.base}/admin/desktop/oauth/callback?code=x&state=${state}`,
+    { redirect: "manual", headers: { cookie: webCookie } },
+  );
+  assert.equal(desktop.status, 400);
+  assert.equal((await desktop.json()).error.code, "login_expired");
+});

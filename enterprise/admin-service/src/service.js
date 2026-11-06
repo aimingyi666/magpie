@@ -8736,7 +8736,15 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     return projectContentFields(value, CONTENT_SCOPE_FIELDS);
   }
 
-  function publicContentStream(value) {
+  // The desktop flow keeps its transaction in a cookie of its own. A web
+// sign-in left half-finished in another tab shares the host, so a shared
+// cookie could be read here instead of the desktop one and answer "this
+// callback is not a desktop sign-in" (reported from a real browser).
+function desktopLoginCookieName(config) {
+  return `${config.loginCookieName}_desktop`;
+}
+
+function publicContentStream(value) {
     return projectContentFields(value, CONTENT_STREAM_FIELDS, {
       collection: projectContentCollection,
       redaction: projectContentRedaction,
@@ -10793,7 +10801,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         "set-cookie": [
           cookieHeader(
             config,
-            config.loginCookieName,
+            desktopLoginCookieName(config),
             signCookie(JSON.stringify(transaction), config.sessionSecret),
             600,
           ),
@@ -10804,7 +10812,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
 
     if (req.method === "GET" && url.pathname === "/admin/desktop/oauth/callback") {
       const cookies = parseCookies(req.headers.cookie);
-      const raw = verifyCookie(cookies[config.loginCookieName], config.sessionSecret);
+      const raw = verifyCookie(cookies[desktopLoginCookieName(config)], config.sessionSecret);
       if (!raw) throw new HttpError(400, "login_expired", "Login transaction is missing or expired");
       let transaction;
       try {
@@ -10864,7 +10872,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       const target = new URL(transaction.callbackUrl);
       target.searchParams.set("ticket", ticket.ticket);
       redirect(res, target.toString(), {
-        "set-cookie": [cookieHeader(config, config.loginCookieName, "", 0)],
+        "set-cookie": [cookieHeader(config, desktopLoginCookieName(config), "", 0)],
       });
       return;
     }
