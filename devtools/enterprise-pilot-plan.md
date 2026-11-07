@@ -114,6 +114,11 @@
 2. **查看（W3–W4）**：管理台按人/时间/会话检索，点开需提交 `authorizationId` 与理由；服务端向审批系统核验该授权真实存在、未过期、范围匹配，核验失败拒绝。
 3. **留存（W4）**：按组织配置保留天数；到期任务删除对象与索引，写删除记录（对象 ID、时间、原因、操作者）。删除证明第一期只做「可查的删除记录」，不做 WORM。
 4. **脱敏定制（W5–W6）**：基线规则版本锁定、不可禁用；企业规则只能**追加**替换或屏蔽模式，不能删除基线类别。规则改动需版本化、试跑、审计，并禁止把「邮箱/手机号」这类基线类别整体关掉。
+   - 已实现（2026-11-06）：新增 `redact` 资源类型，client-sync 把它合并写成
+     `<magpie 配置目录>/managed-redact.json`（原子写、移除即清空）；magpie 的
+     `internal/masking` 每个请求读取，策略带 `requireBaseline` 时强制打开 secrets
+     与个人数据、忽略用户的分类开关；网关的插件刷新也监听该文件，策略到达后无需重启。
+     未做：按规则命中统计、试跑/预览、规则版本历史。
    - 企业规则可**按组织/部门启用**，按优先级依次执行，冲突时更严格的规则先生效；
    - 每条规则记录命中次数，管理端能看到「哪条规则在真实流量里起作用」；
    - 规则只影响新写入的正文，不回溯改写已存对象（回溯属于二期）。
@@ -122,7 +127,13 @@
 
 ### B. 资源下发
 
-现状：资源服务能存 5 类（`mcp`/`skill`/`instructions`/`subagent`/`template`），能签名；`client-sync` 只装进自己的目录，**没有写进任何 Agent**；`hook` 类型不存在。
+现状（2026-11-06）：`instructions` 写进 `CLAUDE.md`/`AGENTS.md` 的受管块；`skill` 写
+`.claude/skills/<name>/SKILL.md`，`subagent` 写 `.claude/agents/<name>.md`，`mcp` 合并进
+`.mcp.json`，三者都带归属标记、同名冲突拒绝、资源移除时收回；`redact` 策略写入
+`<magpie 配置目录>/managed-redact.json`，由 magpie 每个请求读取（基线类别不可关）。
+Codex 接收 `instructions`/`skill`/`mcp`/`hook`；`hook` 写入 Claude 的 `settings.json` 和
+Codex 的 `hooks.json`，写过的条目记在同步目录里，员工改过的条目不会被删。Codex 没有已知的
+用户级子代理文件，`subagent` 对它报 `unsupported`。管理台已可在客户端插件里发布/回滚（发布要求一个绑定版本的一次性审批）。
 
 1. **建模（W1）**：新增 `hook`；明确每类资源的落盘位置与格式：
 
@@ -144,7 +155,7 @@
 ### C. 供应商、路由、用量
 
 1. **企业供应商（W1–W2）**
-   - 修 `enterprise/magpie-plugin` 调用的 `/api/v1/client/enterprise/providers`：admin-service 目前没有这个路由，面板会 404。
+   - ~~修 `enterprise/magpie-plugin` 调用的 `/api/v1/client/enterprise/providers`：admin-service 目前没有这个路由，面板会 404。~~ 已实现（2026-11-06）：`GET /api/v1/client/enterprise/providers` 用设备令牌向 auth-service 解析用户/设备/凭证，再取网关供应商的安全投影，并按凭证的模型白名单过滤模型；插件面板位置已提到供应商列表之前。auth-service 新增管理服务专用的 `POST /api/v1/internal/admin/devices/resolve`。
    - **界面复用客户端现有的供应商设置页**，不另造一套：同一个列表、同一套表单，只在企业项上加锁定标记。
    - 核心新增 `managedBy: "enterprise"`：置顶排序、GUI 禁止删除/改地址/改凭据、员工可看不可改。
    - **员工自建供应商保留**，但永远排在企业供应商之后，且不能被拖到企业项上面。
@@ -152,8 +163,12 @@
    - 供应商凭据只存在服务端，客户端只拿到可用模型与状态。
 2. **路由可见（W2）**：遥测已记录 `callerKeyId/Name`；页面按人聚合，展示走了哪个账号、哪个模型、是否失败。
    - **网关只认 Key，不认人。** 人/部门由 admin-service 用凭证表关联；页面上标明「归属来自凭证映射」，映射缺失时显示「未归属」，不按邮箱猜。
+   - 已实现（2026-11-06）：`/api/v1/admin/gateway/requests` 的每一行带 `user/userId`；
+     网关新增 `/v1/magpie/admin/telemetry/active`（在飞请求 + callerKey），admin-service
+     代理为 `/api/v1/admin/gateway/active` 并补人，会话字段不进入企业视图。
 3. **用量分析（W3）**：复用 `usage-reader`，补四类视图：
-   - 全成员：按人、部门、设备、Agent、模型、路由组聚合；
+   - 全成员：按人、部门、设备、Agent、模型、路由组聚合（设备/路由组维度已实现，
+     `groupBy=device|group`，过滤与 CSV 同步支持）；
    - 成本：按模型单价折算费用，按部门对比；
    - 异常：用量突增、失败率异常、深夜调用；
    - 导出：授权后的 CSV（沿用现有审批 + step-up 链路）。
@@ -246,3 +261,6 @@
 | 2026-11-06 | v1.1：补齐供应商自建与置顶、Agent 落盘位置、路由归属口径、用量四类视图、脱敏组织范围与优先级、企业资源冲突策略 |
 | 2026-11-06 | v1.2：前端形态定为客户端插件页面；admin-service 只出 JSON 和 OIDC 回调；网页管理台仅留作审批兜底；资源库页已作为第一个客户端页面落地 |
 | 2026-11-06 | v1.3：资源页支持查看发布记录；页面主题改为随窗口实时更新；补充分支冲突分析与合并顺序 |
+| 2026-11-06 | v1.4：P0 企业供应商链路落地：客户端供应商路由、设备令牌解析、按凭证模型过滤、面板置顶、`managedBy` 标记；请求行补 `user/userId` 归属。剩余缺口（核心侧企业锁定、员工自建策略开关、真实联调）未动 |
+| 2026-11-06 | v1.5：P1–P3 落地：skill/subagent/mcp 落盘与移除收回；在飞请求接口与按人归属；用量设备/路由组维度与 CSV；`redact` 资源下发 + 基线锁定。仍未做：hook 落盘、Codex 非指令类型、规则命中统计/试跑、异常检测、管理台发布回滚 UI、真实环境验收 |
+| 2026-11-07 | v1.6：补全资源下发与运营闭环：hook 写入 Claude `settings.json` / Codex `hooks.json`（条目日志、员工改动不覆盖）；Codex 也接收 skill/mcp；用量异常检测改为按主体历史自动算基线；管理台可在客户端插件内创建→加版本→发布/回滚（发布需一次性审批），插件每 5 分钟自动同步；已用真实 resource-service + admin-service 跑通发布到落盘。仍未做：Codex 子代理（无已知格式）、规则命中统计/试跑、真实设备验收 |
