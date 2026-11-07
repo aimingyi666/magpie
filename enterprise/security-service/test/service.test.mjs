@@ -593,3 +593,64 @@ test("duplicate idempotency does not create a second finding id", async () => {
     await app.close();
   }
 });
+
+test("a usage anomaly is measured against the subject's own history", async () => {
+  const root = tempDirectory();
+  const app = await start(root);
+  try {
+    for (let i = 0; i < 5; i += 1) {
+      const normal = detectionEvent({
+        eventId: `devt_baseline_event_${String(i).padStart(4, "0")}`,
+        requestId: `req_baseline_request_${i}`,
+        sessionId: `ses_baseline_session_${i}`,
+        usage: { totalTokens: 2_000 },
+      });
+      const response = await request(app.base, "/api/v1/detection-events", {
+        token: INGEST_TOKEN,
+        body: normal,
+      });
+      assert.equal(response.status, 202);
+    }
+
+    const spikeResponse = await request(app.base, "/api/v1/detection-events", {
+      token: INGEST_TOKEN,
+      body: detectionEvent({
+        eventId: "devt_baseline_event_spike",
+        requestId: "req_baseline_spike",
+        sessionId: "ses_baseline_spike",
+        usage: { totalTokens: 1_000_000 },
+      }),
+    });
+    assert.equal(spikeResponse.status, 202);
+
+    const findingsResponse = await request(app.base, "/api/v1/findings?limit=50");
+    const findingsBody = await responseJson(findingsResponse);
+    const anomalies = findingsBody.findings.filter(
+      (finding) => finding.ruleId === "sec.usage.anomaly",
+    );
+    assert.equal(anomalies.length, 1);
+    assert.equal(anomalies[0].evidence.baselineTokens, 2_000);
+    assert.equal(anomalies[0].evidence.totalTokens, 1_000_000);
+  } finally {
+    await app.close();
+  }
+});
+
+test("an event dated in the future is refused before it can wedge the store", async () => {
+  const root = tempDirectory();
+  const app = await start(root, {}, { now: () => FIXED_NOW });
+  try {
+    const response = await request(app.base, "/api/v1/detection-events", {
+      token: INGEST_TOKEN,
+      body: detectionEvent({
+        occurredAt: new Date(FIXED_NOW + 5 * 60 * 1000).toISOString(),
+        usage: { totalTokens: 10 },
+      }),
+    });
+    const body = await responseJson(response);
+    assert.equal(response.status, 400, JSON.stringify(body));
+    assert.equal(body.error.code, "event_in_future", JSON.stringify(body));
+  } finally {
+    await app.close();
+  }
+});
