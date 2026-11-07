@@ -1,7 +1,7 @@
 import http from "node:http";
 import crypto from "node:crypto";
 import fs from "node:fs/promises";
-import { AuthServiceClient } from "./auth-client.js";
+import { AuthServiceClient, DependencyError } from "./auth-client.js";
 import { ResourceServiceClient, ResourceServiceError } from "./resource-client.js";
 import { GatewayAdminClient, GatewayAdminError } from "./gateway-admin-client.js";
 import {
@@ -360,6 +360,8 @@ const APPROVAL_ACTION_TARGETS = Object.freeze({
   "gateway.key.policy": { targetType: "gateway", permission: "gateway.write" },
   "gateway.key.rotate": { targetType: "gateway", permission: "gateway.write" },
   "gateway.key.remove": { targetType: "gateway", permission: "gateway.write" },
+  "resource.publish": { targetType: "resource", permission: "resources.write" },
+  "resource.rollback": { targetType: "resource", permission: "resources.write" },
 });
 
 const POLICY_ACTIONS = new Set([
@@ -1190,6 +1192,14 @@ function usageDimension(entry, dimension, data) {
   if (dimension === "agent") {
     const agent = entry.record.agent || "(unknown)";
     return { key: agent, label: agent, agent };
+  }
+  if (dimension === "device") {
+    const device = entry.record.device || "(unknown)";
+    return { key: device, label: device, device };
+  }
+  if (dimension === "group") {
+    const group = entry.record.routeGroup || "(unknown)";
+    return { key: group, label: group, group };
   }
   return { key: "all", label: "All" };
 }
@@ -3251,6 +3261,17 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     if (action === "usage.export.create" || action === "audit.export.create") {
       return normalizedExportRequest(action, body);
     }
+    if (action === "resource.publish" || action === "resource.rollback") {
+      const releaseId = String(body.releaseId ?? "").trim();
+      const expectedUpdatedAt = String(body.expectedUpdatedAt ?? "").trim();
+      if (!releaseId || releaseId.length > 128) {
+        throw new HttpError(400, "release_required", "releaseId is required");
+      }
+      if (!expectedUpdatedAt || expectedUpdatedAt.length > 200) {
+        throw new HttpError(400, "revision_required", "expectedUpdatedAt is required");
+      }
+      return { releaseId, expectedUpdatedAt };
+    }
     if (action.startsWith("gateway.")) {
       // The revision names the configuration this approval was written
       // against: a later write must still be applied to that revision.
@@ -3373,6 +3394,25 @@ export async function createEnterpriseAdminServer(config, options = {}) {
           exportType: request.exportType,
           orgUnitId: request.orgUnitId,
         },
+      };
+    }
+    if (definition.targetType === "resource") {
+      const sessionAccess = await requirePermission(session, definition.permission, "*");
+      if (!hasGlobalScope(sessionAccess.access)) {
+        throw new HttpError(
+          403,
+          "forbidden_scope",
+          "Publishing a resource requires organization-wide access",
+        );
+      }
+      if (!/^res_[a-z0-9]{16,64}$/.test(targetId)) {
+        throw new HttpError(400, "invalid_request", "targetId is not a resource id");
+      }
+      return {
+        targetType: "resource",
+        targetId,
+        targetOrgUnitId: "*",
+        target: { id: targetId },
       };
     }
     if (definition.targetType === "gateway") {
@@ -5816,6 +5856,211 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     );
   }
 
+  // --- publishing a resource -------------------------------------------
+  //
+  // The management console creates a draft, adds a candidate release and
+  // publishes it. The resource service audits each step and the sync
+  // delivers the published release; this side only carries the
+  // administrator's session, permission, reason and idempotency key.
+
+  const RESOURCE_BODY_MAX = 4 * 1024 * 1024;
+  const RESOURCE_MEDIA_TYPES = new Map([
+    ["instructions", "text/markdown; charset=utf-8"],
+    ["skill", "text/markdown; charset=utf-8"],
+    ["subagent", "text/markdown; charset=utf-8"],
+    ["mcp", "application/json"],
+    ["redact", "application/json"],
+    ["hook", "application/json"],
+    ["template", "application/octet-stream"],
+  ]);
+
+  async function readResourceJson(req) {
+    if (!/^application\/json(?:\s*;|$)/i.test(String(req.headers["content-type"] || ""))) {
+      throw new HttpError(415, "unsupported_media_type", "Content-Type must be application/json");
+    }
+    const chunks = [];
+    let size = 0;
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > RESOURCE_BODY_MAX) {
+        throw new HttpError(413, "request_too_large", "Request body is too large");
+      }
+      chunks.push(chunk);
+    }
+    let value;
+    try {
+      value = JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
+    } catch {
+      throw new HttpError(400, "invalid_json", "Request body must be valid JSON");
+    }
+    if (!plainObjectValue(value)) {
+      throw new HttpError(400, "invalid_request", "Request body must be a JSON object");
+    }
+    return value;
+  }
+
+  function resourceIdempotencyKey(req) {
+    const value = String(req.headers["idempotency-key"] || "").trim();
+    if (!value) return `adm_${crypto.randomUUID()}`;
+    if (!/^[A-Za-z0-9._:-]{8,128}$/.test(value)) {
+      throw new HttpError(400, "invalid_idempotency_key", "Idempotency-Key is invalid");
+    }
+    return value;
+  }
+
+  function resourceActor(current) {
+    return String(current.session.email || current.session.subjectId || "administrator").slice(0, 128);
+  }
+
+  function resourceWriteError(error) {
+    if (error instanceof HttpError) throw error;
+    if (error instanceof ResourceServiceError) {
+      const status = Number.isInteger(error.statusCode) && error.statusCode < 500
+        ? error.statusCode
+        : 503;
+      const code = typeof error.code === "string" && error.code
+        ? error.code
+        : "resource_service_unavailable";
+      throw new HttpError(status, code, error.message);
+    }
+    throw new HttpError(
+      503,
+      "resource_service_unavailable",
+      "The resource catalog service is unavailable",
+    );
+  }
+
+  async function resourceCreate(req, res) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    await requirePermission(current.session, "resources.write");
+    const body = await readResourceJson(req);
+    const reason = cleanReason(body.reason);
+    requireResourceService();
+    const payload = await resourceService.createResource({
+      kind: String(body.kind || ""),
+      name: String(body.name || ""),
+      ...(body.description === undefined ? {} : { description: String(body.description) }),
+      publisher: String(body.publisher || "enterprise"),
+      deliveryMode: String(body.deliveryMode || "forced"),
+      assignments: Array.isArray(body.assignments) && body.assignments.length > 0
+        ? body.assignments.map(String)
+        : ["*"],
+      // The catalog requires exactly one compatibility field; a page that
+      // does not set a floor gets the oldest client.
+      compatibility: {
+        minClientVersion: String(
+          (plainObjectValue(body.compatibility) && body.compatibility.minClientVersion)
+          || body.minClientVersion
+          || "1.0.0",
+        ),
+      },
+      operationId: `op_${crypto.randomUUID()}`,
+      reason,
+    }, {
+      actor: resourceActor(current),
+      idempotencyKey: resourceIdempotencyKey(req),
+    }).catch(resourceWriteError);
+    json(res, 201, { resource: payload.resource });
+  }
+
+  async function resourceChange(req, res, resourceId, action) {
+    const current = await currentSession(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requireCsrfOrDesktop(req, current);
+    await requirePermission(current.session, "resources.write");
+    const body = await readResourceJson(req);
+    const reason = cleanReason(body.reason);
+    requireResourceService();
+    const options = {
+      actor: resourceActor(current),
+      idempotencyKey: resourceIdempotencyKey(req),
+    };
+    // The resource service compares the update's expected timestamp with
+    // what is there; one the page did not send is read here first.
+    const currentResource = await resourceService.getResource(resourceId).catch(resourceWriteError);
+    const expectedUpdatedAt = String(body.expectedUpdatedAt || currentResource.resource.updatedAt);
+    if (action === "releases") {
+      let contentBase64 = typeof body.contentBase64 === "string" ? body.contentBase64 : "";
+      if (!contentBase64) {
+        const text = typeof body.content === "string" ? body.content : "";
+        if (!text) throw new HttpError(400, "invalid_resource_content", "A release needs content");
+        contentBase64 = Buffer.from(text, "utf8").toString("base64");
+      }
+      const mediaType = String(body.mediaType || RESOURCE_MEDIA_TYPES.get(currentResource.resource.kind)
+        || "application/octet-stream");
+      const payload = await resourceService.createRelease(resourceId, {
+        resourceVersion: String(body.resourceVersion || ""),
+        mediaType,
+        contentBase64,
+        operationId: `op_${crypto.randomUUID()}`,
+        reason,
+        expectedUpdatedAt,
+      }, options).catch(resourceWriteError);
+      json(res, 201, { resource: payload.resource, release: payload.release });
+      return;
+    }
+    // Publishing reaches every assigned device, and a hook runs there:
+    // the resource service records an approval id, and this side only
+    // passes one that an approver really gave for this release.
+    const approvalId = cleanOptionalApprovalId(body.approvalId);
+    if (!approvalId) {
+      throw approvalHttpError(
+        "approval_required",
+        "approvalId is required to publish or roll back a resource",
+      );
+    }
+    const approvalAction = action === "publish" ? "resource.publish" : "resource.rollback";
+    const releaseId = String(body.releaseId || "").trim();
+    if (!releaseId) throw new HttpError(400, "release_required", "releaseId is required");
+    const expected = approvalExpectedBinding({
+      requesterSubjectId: current.session.subjectId,
+      action: approvalAction,
+      targetType: "resource",
+      targetId: resourceId,
+      targetOrgUnitId: "*",
+      riskLevel: riskForAction(approvalAction),
+      reason,
+      payload: { releaseId, expectedUpdatedAt },
+    });
+    const operation = {
+      id: `op_${crypto.randomUUID()}`,
+      actorSubjectId: current.session.subjectId,
+      actorEmail: current.session.email,
+    };
+    await store.mutate((data) => reserveApprovalForOperation(data, approvalId, expected, operation));
+    const change = {
+      releaseId,
+      approvalId,
+      operationId: operation.id,
+      reason,
+      expectedUpdatedAt,
+    };
+    let result;
+    let failure = null;
+    try {
+      result = action === "publish"
+        ? await resourceService.publishRelease(resourceId, change, options)
+        : await resourceService.rollbackRelease(resourceId, change, options);
+    } catch (error) {
+      failure = error;
+    }
+    await store.mutate((data) => {
+      const approval = data.approvalRequests[approvalId];
+      if (failure) {
+        // A failed publish spends its approval too: a retry must ask again.
+        if (approval?.status === "reserved") {
+          consumeApprovalForOperation(data, approvalId, operation, "failed");
+        }
+      } else {
+        consumeApprovalForOperation(data, approvalId, operation, "succeeded");
+      }
+    });
+    if (failure) resourceWriteError(failure);
+    json(res, 200, { resource: result.resource, release: result.release });
+  }
+
   async function scopedSyncReports(session, permission = "devices.read") {
     const result = await requirePermission(session, permission);
     requireResourceService();
@@ -7243,6 +7488,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
         record.costUsd == null ? "" : record.costUsd,
         record.rejected ? "true" : "false",
         record.handedOn ? "true" : "false",
+        record.device,
+        record.routeGroup,
       ];
     });
     const content = csvContent([
@@ -7258,6 +7505,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       "cost",
       "rejected",
       "handedOn",
+      "device",
+      "routeGroup",
     ], rows);
     assertExportSize(content, rows.length);
     return { content, rowCount: rows.length };
@@ -8406,6 +8655,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
       agent: value(["agent"], 160),
       model: value(["model"], 240),
       provider: value(["provider"], 160),
+      device: value(["device", "computer"], 160),
+      group: value(["group", "routeGroup"], 160),
       callerKeyId: value(["callerKeyId"], 240),
       status: statusValue ? Number(statusValue) : null,
     };
@@ -8420,6 +8671,8 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     if (filters.agent && entry.record.agent !== filters.agent) return false;
     if (filters.model && entry.record.model !== filters.model) return false;
     if (filters.provider && entry.record.provider !== filters.provider) return false;
+    if (filters.device && entry.record.device !== filters.device) return false;
+    if (filters.group && entry.record.routeGroup !== filters.group) return false;
     if (filters.callerKeyId && entry.record.callerKeyId !== filters.callerKeyId) return false;
     if (filters.status != null && entry.record.status !== filters.status) return false;
     return true;
@@ -8450,7 +8703,7 @@ export async function createEnterpriseAdminServer(config, options = {}) {
     const groupBy = grouped
       ? String(searchParams.get("groupBy") || "all").toLowerCase()
       : "all";
-    if (grouped && !["all", "user", "department", "model", "agent"].includes(groupBy)) {
+    if (grouped && !["all", "user", "department", "model", "agent", "device", "group"].includes(groupBy)) {
       throw new HttpError(400, "invalid_group_by", "groupBy is not supported");
     }
     const [{ users }, { credentials }] = await Promise.all([
@@ -9926,6 +10179,77 @@ function publicContentStream(value) {
     }
   }
 
+  // A desktop asks for the enterprise providers it may use. Its device
+  // token proves the employee; the gateway's own token stays in this
+  // process. The answer is the gateway's masked projection: enough for the
+  // Providers panel to show a vendor, its models and its readiness, never a
+  // key and never the key list.
+  const DEVICE_TOKEN_ERROR_CODES = new Set([
+    "invalid_device_token",
+    "device_token_expired",
+    "device_disabled",
+    "user_disabled",
+  ]);
+
+  async function clientEnterpriseProviders(req, res) {
+    const deviceToken = bearerToken(req);
+    if (!deviceToken) {
+      throw new HttpError(401, "missing_device_token", "Send Authorization: Bearer <device token>");
+    }
+    let resolved;
+    try {
+      resolved = await authService.resolveDevice(deviceToken);
+    } catch (error) {
+      if (error instanceof DependencyError && DEVICE_TOKEN_ERROR_CODES.has(error.code)) {
+        throw new HttpError(error.statusCode, error.code, error.message);
+      }
+      throw new HttpError(503, "auth_unavailable", "The authentication service is unavailable");
+    }
+    if (!resolved.credential || resolved.credential.status !== "active") {
+      throw new HttpError(403, "device_disabled", "This device has no active enterprise credential");
+    }
+    const allowed = allowedModelSet(resolved.credential);
+    const providers = await gatewayAdminCall(() => gatewayAdmin.listProviders());
+    const visible = providers.map((provider) => clientEnterpriseProvider(provider, allowed)).filter(Boolean);
+    json(res, 200, { providers: visible });
+  }
+
+  // The credential's model list is the catalog's stable id form
+  // ("provider/model"); a gateway provider lists bare model ids. A
+  // credential with no list at all is "unknown", not "none": the gateway
+  // still enforces the key's own limit, so the panel is not left empty.
+  function allowedModelSet(credential) {
+    const models = Array.isArray(credential?.models)
+      ? credential.models.map(String).filter(Boolean)
+      : [];
+    return models.length > 0 ? new Set(models) : null;
+  }
+
+  // Each provider the device may use, with only the models that device is
+  // allowed. A provider with none of them does not belong on the panel.
+  function clientEnterpriseProvider(provider, allowed) {
+    const publicProvider = gatewayPublicProvider(provider);
+    const models = allowed
+      ? publicProvider.models.filter(
+        (model) => allowed.has(model) || allowed.has(`${publicProvider.id}/${model}`),
+      )
+      : publicProvider.models;
+    if (allowed && models.length === 0) return null;
+    return {
+      id: publicProvider.id,
+      name: publicProvider.name,
+      host: publicProvider.host,
+      models,
+      modelCount: models.length,
+      keyState: publicProvider.keyState,
+      keyMasked: publicProvider.keyMasked,
+      ready: publicProvider.ready,
+      off: publicProvider.off,
+      revision: publicProvider.revision,
+      managedBy: "enterprise",
+    };
+  }
+
   function gatewayProviderId(value) {
     const id = String(value || "").trim();
     if (!/^[a-z0-9][a-z0-9-]{0,63}$/.test(id)) {
@@ -10113,14 +10437,16 @@ function publicContentStream(value) {
   // A page of the gateway's own usage ledger. Request rows are its, not
   // the management service's: whatever it does not project is dropped
   // rather than passed through.
-  function gatewayPublicLedger(page) {
+  function gatewayPublicLedger(page, ownerByKey) {
     if (!plainObjectValue(page)) return { rows: [], total: 0 };
     const totals = plainObjectValue(page.totals) ? page.totals : {};
     return {
       period: String(page.period || ""),
       offset: Number.isSafeInteger(page.offset) ? page.offset : 0,
       total: Number.isSafeInteger(page.total) ? page.total : 0,
-      rows: Array.isArray(page.rows) ? page.rows.map(gatewayPublicRequest) : [],
+      rows: Array.isArray(page.rows)
+        ? page.rows.map((row) => gatewayPublicRequest(row, ownerByKey))
+        : [],
       truncated: Boolean(page.truncated),
       totals: {
         calls: Number(totals.calls || 0),
@@ -10136,17 +10462,22 @@ function publicContentStream(value) {
   // route, its attempts counted, group named only for a real routing
   // group. Only what an administrator needs to see a request routed is
   // kept — never a session, prompt, mask, archive path or folder.
-  function gatewayPublicRequest(row) {
+  function gatewayPublicRequest(row, ownerByKey) {
     if (!plainObjectValue(row)) return {};
     const input = safeNumber(row.in);
     const output = safeNumber(row.out);
     const routeId = Number.isSafeInteger(row.routeId) && row.routeId > 0 ? row.routeId : null;
     const tries = safeNumber(row.tries);
     const attempts = safeNumber(row.attempts);
+    // The gateway knows the key, not the person. This join is the only
+    // place a row becomes a person, and an unknown key stays unattributed
+    // rather than guessed from its name.
+    const owner = ownerByKey?.get(String(row.callerKeyId || "")) || null;
     return {
       time: String(row.time || ""),
       routeId,
-      user: "",
+      user: owner ? String(owner.email || owner.name || "") : "",
+      userId: owner ? String(owner.id || "") : "",
       device: String(row.computerName || ""),
       callerKeyId: String(row.callerKeyId || ""),
       callerKeyName: String(row.callerKeyName || ""),
@@ -10563,7 +10894,67 @@ function publicContentStream(value) {
       allowed.set(name, value);
     }
     const page = await gatewayAdminCall(() => gatewayAdmin.requestPage(allowed));
-    json(res, 200, gatewayPublicLedger(page));
+    // A page of requests is more useful with the employee on it. A failed
+    // read here leaves the rows unattributed; it never fails the page.
+    let ownerByKey = new Map();
+    try {
+      const [{ users }, { credentials }] = await Promise.all([
+        authService.users(),
+        authService.credentials(),
+      ]);
+      const userById = new Map(users.map((user) => [user.id, user]));
+      for (const credential of credentials) {
+        const user = userById.get(credential.userId);
+        if (user) ownerByKey.set(credential.id, user);
+      }
+    } catch {
+      ownerByKey = new Map();
+    }
+    json(res, 200, gatewayPublicLedger(page, ownerByKey));
+  }
+
+  // What is running now. The gateway says the agent, model, provider and
+  // key; the credential table says whose key it is. The session the
+  // gateway also knows is not carried: an enterprise list does not show
+  // conversations, only calls.
+  async function gatewayReadActive(req, res) {
+    const current = await currentPrincipal(req);
+    if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
+    await requirePermission(current.session, "gateway.read");
+    const active = await gatewayAdminCall(() => gatewayAdmin.activeRequests());
+    let ownerByKey = new Map();
+    try {
+      const [{ users }, { credentials }] = await Promise.all([
+        authService.users(),
+        authService.credentials(),
+      ]);
+      const userById = new Map(users.map((user) => [user.id, user]));
+      for (const credential of credentials) {
+        const user = userById.get(credential.userId);
+        if (user) ownerByKey.set(credential.id, user);
+      }
+    } catch {
+      ownerByKey = new Map();
+    }
+    let unattributed = 0;
+    const rows = active.map((item) => {
+      const owner = ownerByKey.get(String(item?.callerKey || "")) || null;
+      if (!owner) unattributed += 1;
+      return {
+        id: Number.isSafeInteger(item?.id) ? item.id : 0,
+        routeId: Number.isSafeInteger(item?.route) ? item.route : 0,
+        agent: String(item?.agent || ""),
+        model: String(item?.model || ""),
+        provider: String(item?.provider || ""),
+        phase: String(item?.phase || ""),
+        started: String(item?.started || ""),
+        millis: Number.isSafeInteger(item?.ms) ? item.ms : 0,
+        key: String(item?.callerKey || ""),
+        user: owner ? String(owner.email || owner.name || "") : "",
+        userId: owner ? String(owner.id || "") : "",
+      };
+    });
+    json(res, 200, { active: rows, unattributed });
   }
 
   async function gatewayReadRoute(req, res, routeId) {
@@ -11180,6 +11571,13 @@ function publicContentStream(value) {
       return;
     }
 
+    // The employee's own desk, not an administrator's: a device token opens
+    // this and nothing under /api/v1/admin/.
+    if (req.method === "GET" && url.pathname === "/api/v1/client/enterprise/providers") {
+      await clientEnterpriseProviders(req, res);
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/v1/admin/me") {
       const current = await currentSession(req);
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
@@ -11715,6 +12113,10 @@ function publicContentStream(value) {
       await gatewayUpdateKey(req, res, requestId, gatewayKeyMatch[1]);
       return;
     }
+    if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway/active") {
+      await gatewayReadActive(req, res);
+      return;
+    }
     if (req.method === "GET" && url.pathname === "/api/v1/admin/gateway/requests") {
       await gatewayReadRequests(req, res, url);
       return;
@@ -11741,6 +12143,18 @@ function publicContentStream(value) {
       if (!current) throw new HttpError(401, "not_signed_in", "Sign in with your management account");
       const result = await scopedSyncReportDetail(current.session, syncReportMatch[1]);
       json(res, 200, { report: result.report });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/resources") {
+      await resourceCreate(req, res);
+      return;
+    }
+    const resourceChangeMatch = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})\/(releases|publish|rollback)$/.exec(
+      url.pathname,
+    );
+    if (req.method === "POST" && resourceChangeMatch) {
+      await resourceChange(req, res, resourceChangeMatch[1], resourceChangeMatch[2]);
       return;
     }
 

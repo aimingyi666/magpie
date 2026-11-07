@@ -132,6 +132,7 @@ curl http://127.0.0.1:${AUTH_HOST_PORT:-3444}/healthz
 | GET | `/api/v1/internal/admin/users` | 管理服务专用；用户元数据 |
 | GET | `/api/v1/internal/admin/devices` | 管理服务专用；设备元数据 |
 | GET | `/api/v1/internal/admin/credentials` | 管理服务专用；凭证元数据，不含 Key/hash |
+| POST | `/api/v1/internal/admin/devices/resolve` | 管理服务专用；用桌面设备令牌解析出用户、设备和当前凭证（含可用模型），供客户端读取企业供应商 |
 | POST | `/api/v1/internal/admin/users/{id}/disable` | 管理服务专用；停用用户并撤销设备、会话和凭证 |
 | POST | `/api/v1/internal/admin/users/{id}/enable` | 管理服务专用；恢复用户状态，不恢复旧设备或旧凭证 |
 | POST | `/api/v1/internal/admin/devices/{id}/revoke` | 管理服务专用；吊销指定设备和该设备当前凭证 |

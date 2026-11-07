@@ -272,7 +272,13 @@ func (s *Server) concurrency(w http.ResponseWriter, r *http.Request) {
 		waiting += ln.Waiting
 	}
 	b := s.Busy()
-	writeJSON(w, 200, map[string]any{"object": "concurrency", "data": lanes, "requests": b.Requests, "waiting": waiting, "tools": b.Tools, "active": s.Active()})
+	// Whose key a request came in on is the administration API's to tell,
+	// not another machine's status bar.
+	active := s.Active()
+	for i := range active {
+		active[i].CallerKeyID, active[i].CallerKeyName = "", ""
+	}
+	writeJSON(w, 200, map[string]any{"object": "concurrency", "data": lanes, "requests": b.Requests, "waiting": waiting, "tools": b.Tools, "active": active})
 }
 
 // Lanes is how each key or account with requests out or waiting stands,

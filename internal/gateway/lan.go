@@ -569,6 +569,7 @@ func identifyCaller(w http.ResponseWriter, r *http.Request) (*http.Request, bool
 	}
 	if ok {
 		r = r.WithContext(access.WithIdentity(r.Context(), who))
+		noteCaller(r, who)
 	}
 	r.Header = r.Header.Clone()
 	r.Header.Set("Authorization", "Bearer "+Token)

@@ -973,6 +973,50 @@ test("internal admin status requires its own service token", { timeout: 30000 },
   }
 });
 
+test("device resolve names the person and the credential, and refuses a stale token", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const joined = await joinDevice(f, "Resolve PC");
+
+  const resolved = await internalJson(
+    f,
+    "/api/v1/internal/admin/devices/resolve",
+    "POST",
+    { token: joined.deviceToken },
+  );
+  assert.equal(resolved.response.status, 200, JSON.stringify(resolved.body));
+  assert.equal(resolved.body.user.id, joined.user.id);
+  assert.equal(resolved.body.user.email, "alice@corp.example");
+  assert.equal(resolved.body.device.id, joined.device.id);
+  assert.equal(resolved.body.credential.id, joined.gateway.keyId);
+  assert.deepEqual(resolved.body.credential.models, ["deepseek/deepseek-chat"]);
+  // The answer is for the management service, not the desktop: it never
+  // carries the gateway key or the device token it was given.
+  assertNoPrivateValues(resolved.body, f, [joined.gateway.key, joined.deviceToken]);
+  assert.ok(!JSON.stringify(resolved.body).includes(joined.deviceToken));
+
+  const unknown = await internalJson(
+    f,
+    "/api/v1/internal/admin/devices/resolve",
+    "POST",
+    { token: "not-a-device-token-000000000000" },
+  );
+  assert.equal(unknown.response.status, 401);
+  assert.equal(unknown.body.error.code, "invalid_device_token");
+
+  await f.auth.store.mutate((data) => {
+    data.devices[joined.device.id].status = "disabled";
+  });
+  const disabled = await internalJson(
+    f,
+    "/api/v1/internal/admin/devices/resolve",
+    "POST",
+    { token: joined.deviceToken },
+  );
+  assert.equal(disabled.response.status, 403);
+  assert.equal(disabled.body.error.code, "device_disabled");
+});
+
 test("credential metadata follows refresh and revocation without exposing secrets", { timeout: 30000 }, async (t) => {
   const f = await fixture();
   t.after(() => f.close());

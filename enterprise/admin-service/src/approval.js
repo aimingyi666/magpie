@@ -55,6 +55,10 @@ const ACTION_RISK = Object.freeze({
   "gateway.key.policy": "H",
   "gateway.key.rotate": "H",
   "gateway.key.remove": "H",
+  // Publishing to every assigned device is an approval, not a fresh
+  // sign-in alone: a hook runs on the employee's machine.
+  "resource.publish": "M",
+  "resource.rollback": "M",
 });
 
 const LOW_RISK_ACTIONS = new Set(["user.enable"]);
@@ -120,6 +124,12 @@ export function normalizedApprovalPayload(action, value = {}) {
     return {
       expectedVersion: Number(value.expectedVersion),
       models: sortedStrings(value.models),
+    };
+  }
+  if (action === "resource.publish" || action === "resource.rollback") {
+    return {
+      releaseId: String(value.releaseId || ""),
+      expectedUpdatedAt: String(value.expectedUpdatedAt || ""),
     };
   }
   if (action === "operation.reconcile") {

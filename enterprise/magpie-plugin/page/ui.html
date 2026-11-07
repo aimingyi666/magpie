@@ -246,6 +246,41 @@
             <span id="resCount" class="count"></span>
           </div>
           <p id="resNote" class="note"></p>
+          <form id="releaseForm" class="form" hidden>
+            <h3 id="releaseTitle">1. Create a draft and its release</h3>
+            <label class="field"><span class="lbl" data-k="publishKind">Kind</span><select name="kind">
+              <option value="instructions">instructions</option>
+              <option value="skill">skill</option>
+              <option value="subagent">subagent</option>
+              <option value="mcp">mcp</option>
+              <option value="redact">redact</option>
+              <option value="hook">hook</option>
+            </select></label>
+            <label class="field"><span class="lbl" data-k="publishName">Name</span><input name="name" required maxlength="200"></label>
+            <label class="field"><span class="lbl" data-k="publishDelivery">Delivery</span><select name="deliveryMode">
+              <option value="forced">forced</option>
+              <option value="recommended">recommended</option>
+            </select></label>
+            <label class="field"><span class="lbl" data-k="publishScope">Scope</span><input name="assignments" placeholder="org-platform, org-sales"></label>
+            <label class="field"><span class="lbl" data-k="publishVersion">Version</span><input name="resourceVersion" value="2026.11.1" required maxlength="128"></label>
+            <label class="field"><span class="lbl" data-k="publishContent">Content</span><textarea name="content" rows="6" required></textarea></label>
+            <label class="field"><span class="lbl" data-k="publishReason">Reason</span><input name="reason" required maxlength="500"></label>
+            <div class="form-actions">
+              <button class="primary" type="submit" id="releaseSubmit">Create and add release</button>
+            </div>
+            <p id="releaseNote" class="note"></p>
+          </form>
+          <form id="publishForm" class="form" hidden>
+            <h3 id="publishTitle">2. Publish with an approval</h3>
+            <label class="field"><span class="lbl" data-k="publishResourceId">Resource id</span><input name="resourceId" required maxlength="64" placeholder="res_…"></label>
+            <label class="field"><span class="lbl" data-k="publishReleaseId">Release id</span><input name="releaseId" required maxlength="128" placeholder="rel_…"></label>
+            <label class="field"><span class="lbl" data-k="publishApproval">Approval id</span><input name="approvalId" required maxlength="128" placeholder="apr_…"></label>
+            <label class="field"><span class="lbl" data-k="publishReason">Reason</span><input name="reason" required maxlength="500"></label>
+            <div class="form-actions">
+              <button class="primary" type="submit" id="publishSubmit">Publish</button>
+            </div>
+            <p id="publishNote" class="note"></p>
+          </form>
           <div id="resList" class="list"></div>
           <p id="resEmpty" class="empty" hidden></p>
           <section id="resDetail" class="detail" hidden>

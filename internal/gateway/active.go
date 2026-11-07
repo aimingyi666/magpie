@@ -7,6 +7,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+
+	"github.com/yetone/magpie/internal/access"
 )
 
 // Active is one agent request in flight, as /v1/magpie/concurrency lists
@@ -30,6 +32,23 @@ type Active struct {
 	Millis   int64     `json:"ms"`
 	Phase    string    `json:"phase,omitempty"`
 	Route    int64     `json:"route,omitempty"` // its routing trace's id
+	// The gateway key it was let in with, once authentication has run:
+	// the administration view needs to know whose request this is. The
+	// key's secret is not here, and the public listing drops both.
+	CallerKeyID   string `json:"callerKey,omitempty"`
+	CallerKeyName string `json:"callerKeyName,omitempty"`
+}
+
+// noteCaller tells the request in flight which key let it in. It is set
+// once authentication has run, so a refused request never names one.
+func noteCaller(r *http.Request, who access.Identity) {
+	f := inflightOf(r.Context())
+	if f == nil || who.KeyID == "" {
+		return
+	}
+	f.mu.Lock()
+	f.callerKeyID, f.callerKeyName = who.KeyID, who.KeyName
+	f.mu.Unlock()
 }
 
 // inflight is a request counted for Busy, kept on its context so routing
@@ -44,6 +63,8 @@ type inflight struct {
 	// begun: every route begun for it, the first its own, for endBroken
 	mu    sync.Mutex
 	begun []*Route
+	// the key that let it in, set once authentication has run (mu)
+	callerKeyID, callerKeyName string
 	// unrouted: its watch while no route is begun for it (unrouted.go)
 	unrouted *unroutedHold
 	// tr: the trace its routes are in, for the phase they say (under mu)
@@ -172,6 +193,9 @@ func (s *Server) Active() []Active {
 	out := make([]Active, 0, len(fs))
 	for _, f := range fs {
 		a := Active{ID: f.id, Agent: f.agent, Session: f.session, Started: f.start, Millis: now.Sub(f.start).Milliseconds()}
+		f.mu.Lock()
+		a.CallerKeyID, a.CallerKeyName = f.callerKeyID, f.callerKeyName
+		f.mu.Unlock()
 		if p, _ := f.phase.Load().(string); p != "" {
 			a.Phase = p
 		}

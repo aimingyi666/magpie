@@ -23,6 +23,11 @@ import {
 
 const ENTERPRISE_PROVIDERS_PATH = "/v1/enterprise/providers";
 const ENTERPRISE_PROVIDERS_TIMEOUT_MS = 15000;
+// How often a joined device looks for published resources by itself, so a
+// newly published hook or skill arrives without the employee pressing
+// Sync now. The engine's own interval cap is five minutes.
+const AUTO_SYNC_MS = 5 * 60 * 1000;
+const AUTO_SYNC_FIRST_MS = 15 * 1000;
 
 const PLUGIN_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const PAGE_DIR = path.join(PLUGIN_ROOT, "page");
@@ -70,6 +75,26 @@ export function startService({
   server.headersTimeout = 15_000;
   server.keepAliveTimeout = 5_000;
 
+  // A joined device syncs on its own: a resource published after the
+  // employee last pressed Sync now still reaches the agents this session.
+  const autoSync = () => {
+    try {
+      const dir = stateDirectory();
+      const credential = readCredential(dir);
+      const config = readSyncConfig(dir);
+      if (credential.state !== "ok" || config.state !== "ok") return;
+      syncNow({ config, credential: credential.data }).catch((error) => {
+        log(`enterprise sync: ${error?.message || error}`);
+      });
+    } catch (error) {
+      log(`enterprise sync: ${error?.message || error}`);
+    }
+  };
+  const firstSync = setTimeout(autoSync, AUTO_SYNC_FIRST_MS);
+  const syncTimer = setInterval(autoSync, AUTO_SYNC_MS);
+  firstSync.unref?.();
+  syncTimer.unref?.();
+
   return new Promise((resolve, reject) => {
     const failed = (error) => {
       server.off("listening", listened);
@@ -84,7 +109,11 @@ export function startService({
         server,
         port: actualPort,
         admin,
-        close: () => new Promise((done) => server.close(() => done())),
+        close: () => new Promise((done) => {
+          clearTimeout(firstSync);
+          clearInterval(syncTimer);
+          server.close(() => done());
+        }),
       });
     };
     server.once("error", failed);
@@ -398,12 +427,19 @@ async function handleAdmin(req, res, url, { admin, host, port }) {
     // The employees' devices, as the gateway page lists them: the
     // management service scopes them to the administrator's organization.
     ["GET", /^\/devices$/, () => admin.request("GET", "/api/v1/admin/devices")],
-    // The resource catalog and each device's last sync report. Both are
-    // read-only here: publishing and rollback stay in the management
-    // service until they have an approval path this page can drive.
+    // The resource catalog, its publishing steps, and each device's last
+    // sync report. A published release reaches every assigned device on
+    // its next sync.
     ["GET", /^\/resources$/, () => admin.request("GET", "/api/v1/admin/resources")],
+    ["POST", /^\/resources$/, (body) => admin.request("POST", "/api/v1/admin/resources", body)],
     ["GET", /^\/resources\/(res_[a-z0-9]{16,64})$/, (_body, m) =>
       admin.request("GET", `/api/v1/admin/resources/${m[1]}`)],
+    ["POST", /^\/resources\/(res_[a-z0-9]{16,64})\/releases$/, (body, m) =>
+      admin.request("POST", `/api/v1/admin/resources/${m[1]}/releases`, body)],
+    ["POST", /^\/resources\/(res_[a-z0-9]{16,64})\/publish$/, (body, m) =>
+      admin.request("POST", `/api/v1/admin/resources/${m[1]}/publish`, body)],
+    ["POST", /^\/resources\/(res_[a-z0-9]{16,64})\/rollback$/, (body, m) =>
+      admin.request("POST", `/api/v1/admin/resources/${m[1]}/rollback`, body)],
     // Org-wide usage: totals, a per-user breakdown and a time series. The
     // management service scopes every one of them to the administrator's
     // organization.

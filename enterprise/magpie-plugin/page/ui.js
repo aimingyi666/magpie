@@ -427,6 +427,24 @@ const ADMIN_MESSAGES = {
     auditBytes: "{bytes} bytes",
     auditClose: "Close",
     resTitle: "Resources",
+    publishTitle: "Publish a resource",
+    publishKind: "Kind",
+    publishName: "Name",
+    publishDelivery: "Delivery",
+    publishScope: "Scope (organization ids, comma separated; empty for everyone)",
+    publishVersion: "Version",
+    publishReason: "Reason",
+    publishApproval: "Approval id",
+    publishContent: "Content",
+    publishSubmit: "Create and publish",
+    publishWorking: "Publishing…",
+    publishDone: "Published {name}. Devices get it on their next sync.",
+    releaseTitle: "1. Create a draft and its release",
+    releaseSubmit: "Create and add release",
+    releaseCreated: "Release {release} added to {resource}. Ask an approver for it, then publish below.",
+    publishResourceId: "Resource id",
+    publishReleaseId: "Release id",
+    publishFailed: "The resource was not published: {message}",
     resEmpty: "The enterprise has not published any resources.",
     resCount: "{count} resources",
     resUpdated: "updated {time}",
@@ -603,6 +621,24 @@ const ADMIN_MESSAGES = {
     auditBytes: "{bytes} 字节",
     auditClose: "关闭",
     resTitle: "企业资源",
+    publishTitle: "发布资源",
+    publishKind: "类型",
+    publishName: "名称",
+    publishDelivery: "下发方式",
+    publishScope: "范围（组织 id，逗号分隔；留空为全员）",
+    publishVersion: "版本",
+    publishReason: "原因",
+    publishApproval: "审批 ID",
+    publishContent: "内容",
+    publishSubmit: "创建并发布",
+    publishWorking: "正在发布…",
+    publishDone: "已发布「{name}」。设备会在下一次同步获取。",
+    releaseTitle: "1. 创建草稿并添加版本",
+    releaseSubmit: "创建并添加版本",
+    releaseCreated: "已为 {resource} 添加版本 {release}。请让审批人批准该版本，然后在下方发布。",
+    publishResourceId: "资源 ID",
+    publishReleaseId: "版本 ID",
+    publishFailed: "资源未发布：{message}",
     resEmpty: "企业还没有发布任何资源。",
     resCount: "{count} 个资源",
     resUpdated: "更新于 {time}",
@@ -779,6 +815,24 @@ const ADMIN_MESSAGES = {
     auditBytes: "{bytes} 位元組",
     auditClose: "關閉",
     resTitle: "企業資源",
+    publishTitle: "發佈資源",
+    publishKind: "類型",
+    publishName: "名稱",
+    publishDelivery: "下發方式",
+    publishScope: "範圍（組織 id，逗號分隔；留空為全員）",
+    publishVersion: "版本",
+    publishReason: "原因",
+    publishApproval: "審批 ID",
+    publishContent: "內容",
+    publishSubmit: "建立並發佈",
+    publishWorking: "正在發佈…",
+    publishDone: "已發佈「{name}」。裝置會在下一次同步取得。",
+    releaseTitle: "1. 建立草稿並新增版本",
+    releaseSubmit: "建立並新增版本",
+    releaseCreated: "已為 {resource} 新增版本 {release}。請讓審批人核准該版本，然後在下方發佈。",
+    publishResourceId: "資源 ID",
+    publishReleaseId: "版本 ID",
+    publishFailed: "資源未發佈：{message}",
     resEmpty: "企業還沒有發布任何資源。",
     resCount: "{count} 個資源",
     resUpdated: "更新於 {time}",
@@ -955,6 +1009,24 @@ const ADMIN_MESSAGES = {
     auditBytes: "{bytes} バイト",
     auditClose: "閉じる",
     resTitle: "エンタープライズリソース",
+    publishTitle: "リソースを公開",
+    publishKind: "種類",
+    publishName: "名前",
+    publishDelivery: "配信方法",
+    publishScope: "範囲（組織 ID、カンマ区切り。空なら全員）",
+    publishVersion: "バージョン",
+    publishReason: "理由",
+    publishApproval: "承認 ID",
+    publishContent: "内容",
+    publishSubmit: "作成して公開",
+    publishWorking: "公開中…",
+    publishDone: "「{name}」を公開しました。デバイスは次回の同期で取得します。",
+    releaseTitle: "1. 下書きとリリースを作成",
+    releaseSubmit: "作成してリリースを追加",
+    releaseCreated: "{resource} にリリース {release} を追加しました。承認者に承認を依頼し、下で公開してください。",
+    publishResourceId: "リソース ID",
+    publishReleaseId: "リリース ID",
+    publishFailed: "リソースを公開できませんでした: {message}",
     resEmpty: "まだリソースが配布されていません。",
     resCount: "{count} 件のリソース",
     resUpdated: "{time} 更新",
@@ -1131,6 +1203,24 @@ const ADMIN_MESSAGES = {
     auditBytes: "{bytes} Bytes",
     auditClose: "Schließen",
     resTitle: "Unternehmensressourcen",
+    publishTitle: "Ressource veröffentlichen",
+    publishKind: "Art",
+    publishName: "Name",
+    publishDelivery: "Zustellung",
+    publishScope: "Umfang (Organisations-IDs, kommagetrennt; leer für alle)",
+    publishVersion: "Version",
+    publishReason: "Grund",
+    publishApproval: "Genehmigungs-ID",
+    publishContent: "Inhalt",
+    publishSubmit: "Erstellen und veröffentlichen",
+    publishWorking: "Wird veröffentlicht…",
+    publishDone: "„{name}“ veröffentlicht. Geräte erhalten sie bei der nächsten Synchronisierung.",
+    releaseTitle: "1. Entwurf und Release anlegen",
+    releaseSubmit: "Anlegen und Release hinzufügen",
+    releaseCreated: "Release {release} zu {resource} hinzugefügt. Lassen Sie ihn genehmigen und veröffentlichen Sie ihn unten.",
+    publishResourceId: "Ressourcen-ID",
+    publishReleaseId: "Release-ID",
+    publishFailed: "Die Ressource wurde nicht veröffentlicht: {message}",
     resEmpty: "Das Unternehmen hat noch keine Ressourcen veröffentlicht.",
     resCount: "{count} Ressourcen",
     resUpdated: "aktualisiert {time}",
@@ -1799,6 +1889,8 @@ function renderAdmin() {
   const signedIn = Boolean(state.signedIn);
   $("adminSignedOut").hidden = signedIn;
   $("adminSignedIn").hidden = !signedIn;
+  $("releaseForm").hidden = !signedIn;
+  $("publishForm").hidden = !signedIn;
   $("adminGateText").textContent = state.configured
     ? ta("adminGateText")
     : ta("adminUnavailable");
@@ -1857,6 +1949,101 @@ async function loadResources() {
     if (!(error instanceof AdminApiError) || error.status !== 403) throw error;
   }
   renderAdminResources(catalog.resources || [], reports.reports || []);
+}
+
+// publishResource creates a draft, adds its first release and publishes it
+// in one action: the three steps the resource service audits separately.
+// Every assigned device picks the published release up on its next sync.
+async function createResourceRelease(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const note = $("releaseNote");
+  const submit = $("releaseSubmit");
+  const values = form.elements;
+  const name = values.name.value.trim();
+  const reason = values.reason.value.trim();
+  const content = values.content.value;
+  if (!name || !reason || !content.trim()) {
+    note.textContent = ta("publishFailed", { message: ta("publishName") });
+    return;
+  }
+  const assignments = values.assignments.value.split(",").map((id) => id.trim()).filter(Boolean);
+  if (assignments.length === 0) assignments.push("*"); // everyone
+  submit.disabled = true;
+  note.textContent = ta("publishWorking");
+  try {
+    const created = await adminApi("/resources", {
+      method: "POST",
+      body: {
+        kind: values.kind.value,
+        name,
+        deliveryMode: values.deliveryMode.value,
+        assignments,
+        compatibility: { minClientVersion: "1.0.0" },
+        reason,
+      },
+    });
+    const release = await adminApi(`/resources/${created.resource.id}/releases`, {
+      method: "POST",
+      body: {
+        resourceVersion: values.resourceVersion.value.trim(),
+        content,
+        reason,
+        expectedUpdatedAt: created.resource.updatedAt,
+      },
+    });
+    note.textContent = ta("releaseCreated", {
+      resource: created.resource.id,
+      release: release.release.id,
+    });
+    const publish = $("publishForm").elements;
+    publish.resourceId.value = created.resource.id;
+    publish.releaseId.value = release.release.id;
+    publish.reason.value = reason;
+    publish.approvalId.focus();
+    await loadResources();
+  } catch (error) {
+    note.textContent = ta("publishFailed", {
+      message: error?.message || ta("adminUnreachable"),
+    });
+  } finally {
+    submit.disabled = false;
+  }
+}
+
+// Publishing needs an approval id: an approver reviewed this release on
+// this resource, and the management service refuses one it did not issue.
+async function publishResource(event) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const note = $("publishNote");
+  const submit = $("publishSubmit");
+  const values = form.elements;
+  const resourceId = values.resourceId.value.trim();
+  const releaseId = values.releaseId.value.trim();
+  const approvalId = values.approvalId.value.trim();
+  const reason = values.reason.value.trim();
+  if (!resourceId || !releaseId || !approvalId || !reason) {
+    note.textContent = ta("publishFailed", { message: ta("publishApproval") });
+    return;
+  }
+  submit.disabled = true;
+  note.textContent = ta("publishWorking");
+  try {
+    await adminApi(`/resources/${encodeURIComponent(resourceId)}/publish`, {
+      method: "POST",
+      body: { releaseId, approvalId, reason },
+    });
+    note.textContent = ta("publishDone", { name: releaseId });
+    form.reset();
+    await loadResources();
+  } catch (error) {
+    note.textContent = ta("publishFailed", {
+      message: error?.message || ta("adminUnreachable"),
+    });
+  } finally {
+    submit.disabled = false;
+  }
 }
 
 function renderAdminResources(resources, reports) {
@@ -3002,6 +3189,13 @@ function translateAdmin() {
     audit: "tabAudit",
   };
   $("resTitle").textContent = ta("resTitle");
+  $("releaseTitle").textContent = ta("releaseTitle");
+  $("releaseSubmit").textContent = ta("releaseSubmit");
+  $("publishTitle").textContent = ta("publishTitle");
+  $("publishSubmit").textContent = ta("publishSubmit");
+  for (const label of document.querySelectorAll("#releaseForm .lbl[data-k], #publishForm .lbl[data-k]")) {
+    label.textContent = ta(label.dataset.k);
+  }
   $("syncTitle").textContent = ta("syncTitle");
   $("auditTitle").textContent = ta("auditTitle");
   $("auditReadNote").textContent = ta("auditNote");
@@ -3088,6 +3282,8 @@ $("auditFilter").addEventListener("submit", (event) => {
 });
 $("auditDetailClose").addEventListener("click", () => { $("auditDetail").hidden = true; });
 $("consoleForm").addEventListener("submit", saveConsole);
+$("releaseForm").addEventListener("submit", createResourceRelease);
+$("publishForm").addEventListener("submit", publishResource);
 $("providerAdd").addEventListener("click", () => openProviderForm(null));
 $("providerForm").addEventListener("submit", saveProvider);
 $("providerForm").querySelector("[data-close=providerForm]")

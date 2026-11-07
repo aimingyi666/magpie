@@ -176,12 +176,13 @@ test("the administrator tabs say which one is selected", () => {
   assert.match(JS, /setAttribute\("aria-selected", String\(on\)\)/);
 });
 
-test("the resources tab reads the catalog and each device's sync report", () => {
+test("the resources tab reads the catalog, publishes, and shows each device's sync report", () => {
   // The tab shows what an administrator can read in the client: the
-  // published catalog and the last sync report per device. Publishing and
-  // rollback are not here, so the page must not promise them.
+  // published catalog and the last sync report per device, and it can
+  // create a resource, add its release and publish it.
   for (const id of ["resTitle", "resCount", "resList", "resEmpty",
     "resDetail", "resDetailTitle", "resReleases", "resReleasesEmpty",
+    "publishForm", "publishTitle", "publishSubmit", "publishNote",
     "syncTitle", "syncCount", "syncList", "syncEmpty"]) {
     assert.match(HTML, new RegExp(`id="${id}"`), `ui.html should contain #${id}`);
   }
@@ -195,6 +196,12 @@ test("the resources tab reads the catalog and each device's sync report", () => 
   assert.match(JS, /function openResource\(/);
   assert.match(JS, /adminApi\(`\/resources\/\$\{encodeURIComponent\(resource\.id\)\}`\)/);
   assert.match(JS, /function releaseRow\(/);
+  // Publishing is three writes from this page: the draft, its release and
+  // the publish, each with the reason the audit keeps.
+  assert.match(JS, /async function publishResource\(/);
+  assert.match(JS, /adminApi\("\/resources", \{/);
+  assert.match(JS, /\/releases`/);
+  assert.match(JS, /\/publish`/);
 });
 
 test("an attempt row names what served it, not just the route", () => {

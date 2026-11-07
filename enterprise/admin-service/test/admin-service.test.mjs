@@ -19,6 +19,7 @@ import {
   normalizedApprovalPayload,
   riskForAction,
 } from "../src/approval.js";
+import { sha256, signCookie } from "../src/security.js";
 import {
   BREAK_GLASS_GRANT_TTL_MS,
   BREAK_GLASS_REVIEW_DUE_MS,
@@ -526,6 +527,31 @@ function createMockAuthService(expectedToken) {
       parsedBody = text ? JSON.parse(text) : {};
       return parsedBody;
     }
+    if (req.method === "POST" && url.pathname === "/api/v1/internal/admin/devices/resolve") {
+      const body = await requestBody();
+      const deviceToken = String(body.token || "");
+      if (deviceToken === DISABLED_DEVICE_TOKEN) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "device_disabled" } }));
+        return;
+      }
+      if (deviceToken !== ALICE_DEVICE_TOKEN && deviceToken !== BOB_DEVICE_TOKEN) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "invalid_device_token" } }));
+        return;
+      }
+      const alice = deviceToken === ALICE_DEVICE_TOKEN;
+      const user = users.find((candidate) => candidate.id === (alice ? "usr_alice" : "usr_bob"));
+      const device = devices.find((candidate) => candidate.id === (alice ? "dev_alice" : "dev_bob"));
+      const credential = {
+        ...credentials.find((candidate) => candidate.id === (alice ? "key-alice-new" : "key-bob")),
+        // The stable catalog ids a policy carries; a gateway provider lists
+        // the bare model name.
+        models: [alice ? "openai/gpt-5" : "openai/gpt-test"],
+      };
+      ok({ ok: true, user, device, credential });
+      return;
+    }
     const reconcileWrite = /^\/api\/v1\/internal\/admin\/users\/([A-Za-z0-9_-]+)\/policy\/reconcile$/.exec(
       url.pathname,
     );
@@ -831,6 +857,7 @@ function createMockResourceService(expectedToken) {
   let malformed = false;
   let redirecting = false;
   const calls = [];
+  const writes = [];
   const resources = [
     {
       id: RESOURCE_PLATFORM_ID,
@@ -973,6 +1000,69 @@ function createMockResourceService(expectedToken) {
       send(401, { error: { code: "unauthorized" } });
       return;
     }
+    async function writeBody() {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/resources") {
+      const body = await writeBody();
+      const now = "2026-11-07T00:00:00.000Z";
+      const resource = {
+        id: `res_${"f".repeat(20)}`,
+        ...body,
+        status: "draft",
+        currentReleaseId: "",
+        currentRelease: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      resources.push(resource);
+      writes.push({
+        path: url.pathname,
+        actor: req.headers["x-magpie-actor"],
+        idempotencyKey: req.headers["idempotency-key"],
+        body,
+      });
+      send(201, { schemaVersion: 1, ok: true, operationId: body.operationId, resource });
+      return;
+    }
+    const resourceWriteMatch = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})\/(releases|publish|rollback)$/.exec(url.pathname);
+    if (req.method === "POST" && resourceWriteMatch) {
+      const body = await writeBody();
+      const resource = resources.find((candidate) => candidate.id === resourceWriteMatch[1]);
+      writes.push({
+        path: url.pathname,
+        actor: req.headers["x-magpie-actor"],
+        idempotencyKey: req.headers["idempotency-key"],
+        body,
+      });
+      if (!resource) {
+        send(404, { error: { code: "resource_not_found" } });
+        return;
+      }
+      if (body.expectedUpdatedAt !== resource.updatedAt) {
+        send(409, { error: { code: "stale_write" } });
+        return;
+      }
+      const release = {
+        id: `rel_${"e".repeat(20)}`,
+        resourceId: resource.id,
+        resourceVersion: body.resourceVersion || resource.currentRelease?.resourceVersion || "2026.11.1",
+        mediaType: body.mediaType || "text/markdown",
+        status: resourceWriteMatch[2] === "releases" ? "candidate" : "published",
+        createdAt: "2026-11-07T00:00:01.000Z",
+        publishedAt: resourceWriteMatch[2] === "releases" ? "" : "2026-11-07T00:00:02.000Z",
+      };
+      resource.updatedAt = "2026-11-07T00:00:03.000Z";
+      if (resourceWriteMatch[2] !== "releases") {
+        resource.status = "published";
+        resource.currentReleaseId = body.releaseId;
+        resource.currentRelease = release;
+      }
+      send(200, { schemaVersion: 1, ok: true, resource, release });
+      return;
+    }
     if (url.pathname === "/api/v1/admin/resources") {
       if (redirecting) {
         res.writeHead(302, { location: "/api/v1/admin/sync-reports" });
@@ -1019,6 +1109,7 @@ function createMockResourceService(expectedToken) {
     setMalformed(value) { malformed = value; },
     setRedirecting(value) { redirecting = value; },
     get calls() { return calls; },
+    get writes() { return writes; },
   };
 }
 
@@ -1858,6 +1949,59 @@ async function adminRequest(f, jar, method, pathname, body, csrfToken = "", extr
 
 function adminPost(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
   return adminRequest(f, jar, "POST", pathname, body, csrfToken, extraHeaders);
+}
+
+// A second administrator, to decide an approval: the requester may not.
+async function seedAdminSession(f, suffix) {
+  const subjectId = `adm_${suffix.repeat(24).slice(0, 24)}`;
+  const sid = `asess_${crypto.randomBytes(32).toString("base64url")}`;
+  const csrf = crypto.randomBytes(32).toString("base64url");
+  const userAgent = `approval-test-${suffix}`;
+  const now = new Date();
+  await f.admin.store.mutate((data) => {
+    data.adminSessions[sha256(sid)] = {
+      subjectId,
+      subject: subjectId,
+      email: `${suffix}@corp.example`,
+      name: `Approver ${suffix}`,
+      createdAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 3600_000).toISOString(),
+      ip: "127.0.0.1",
+      userAgentHash: sha256(userAgent),
+      csrfHash: sha256(csrf),
+      revokedAt: "",
+    };
+    data.roleBindings[`rb_${subjectId}`] = {
+      id: `rb_${subjectId}`,
+      subjectType: "admin",
+      subjectId,
+      role: "super_admin",
+      scopeOrgUnitId: "*",
+      validFrom: new Date(now.getTime() - 3600_000).toISOString(),
+      validTo: new Date(now.getTime() + 86_400_000).toISOString(),
+    };
+  });
+  return {
+    cookie: `${f.config.sessionCookieName}=${encodeURIComponent(signCookie(sid, f.config.sessionSecret))}`,
+    csrf,
+    userAgent,
+  };
+}
+
+async function approverPost(f, approver, pathname, body) {
+  const response = await fetch(`${f.base}${pathname}`, {
+    method: "POST",
+    headers: {
+      cookie: approver.cookie,
+      origin: f.base,
+      "content-type": "application/json",
+      "x-csrf-token": approver.csrf,
+      "user-agent": approver.userAgent,
+    },
+    body: JSON.stringify(body),
+  });
+  return { response, body: await response.json() };
 }
 
 function adminPut(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
@@ -9543,8 +9687,8 @@ function createMockGatewayAdmin(options = {}) {
       host: "api.openai.com",
       chat: "https://api.openai.com/v1",
       baseAPI: "chat",
-      models: ["gpt-5"],
-      modelCount: 1,
+      models: ["gpt-5", "gpt-4"],
+      modelCount: 2,
       keyState: "set",
       keyName: "",
       keyMasked: "sk-…abcd",
@@ -9794,6 +9938,25 @@ function createMockGatewayAdmin(options = {}) {
       });
       return;
     }
+    if (url.pathname === "/v1/magpie/admin/telemetry/active") {
+      send(res, 200, {
+        ok: true,
+        active: [{
+          id: 7,
+          route: 42,
+          agent: "codex",
+          model: "gpt-5",
+          provider: "openai",
+          phase: "upstream",
+          started: "2026-11-05T01:02:03.000Z",
+          ms: 1500,
+          callerKey: "key-alice-new",
+          callerKeyName: "Alice",
+          session: "must-not-leak-session",
+        }],
+      });
+      return;
+    }
     if (url.pathname === "/v1/magpie/admin/telemetry/requests") {
       send(res, 200, {
         ok: true,
@@ -9812,8 +9975,8 @@ function createMockGatewayAdmin(options = {}) {
           provider: "openai",
           providerName: "OpenAI",
           account: "ops@corp.example",
-          callerKeyId: "key_1",
-          callerKeyName: "Alice",
+          callerKeyId: "key-alice-new",
+          callerKeyName: "Enterprise · alice@corp.example · Alice PC",
           computerName: "workstation-7",
           tries: 2,
           attempts: 2,
@@ -9897,6 +10060,10 @@ async function gatewayFixture(options = {}) {
 }
 
 const TEST_GATEWAY_ADMIN_TOKEN = ["admin", "test", "gateway", "admin", "fixture", "token"].join("-");
+const ALICE_DEVICE_TOKEN = ["device", "token", "alice", "fixture", "material"].join("-");
+const UNKNOWN_DEVICE_TOKEN = ["device", "token", "unknown", "fixture", "material"].join("-");
+const DISABLED_DEVICE_TOKEN = ["device", "token", "disabled", "fixture", "material"].join("-");
+const BOB_DEVICE_TOKEN = ["device", "token", "bob", "fixture", "material"].join("-");
 
 test("M4-C gateway reads project only allowlisted fields and never a credential", {
   timeout: 30000,
@@ -9936,6 +10103,19 @@ test("M4-C gateway reads project only allowlisted fields and never a credential"
   assert.equal(requests.body.rows[0].ttft, 300);
   assert.equal(requests.body.rows[0].fallback, true);
   assert.equal(requests.body.rows[0].group, "smart");
+  // The key becomes a person here, from the credential table only.
+  assert.equal(requests.body.rows[0].user, "alice@corp.example");
+  assert.equal(requests.body.rows[0].userId, "usr_alice");
+
+  const active = await adminGet(f, jar, "/api/v1/admin/gateway/active");
+  assert.equal(active.response.status, 200, JSON.stringify(active.body));
+  assert.equal(active.body.active[0].routeId, 42);
+  assert.equal(active.body.active[0].user, "alice@corp.example");
+  assert.equal(active.body.active[0].userId, "usr_alice");
+  assert.equal(active.body.active[0].phase, "upstream");
+  assert.equal(active.body.unattributed, 0);
+  // The gateway's session is not carried into the enterprise view.
+  assert.ok(!JSON.stringify(active.body).includes("must-not-leak-session"));
 
   const route = await adminGet(f, jar, "/api/v1/admin/gateway/routes/42");
   assert.equal(route.response.status, 200);
@@ -9950,6 +10130,64 @@ test("M4-C gateway reads project only allowlisted fields and never a credential"
   assert.ok(f.gateway.calls.length > 0);
   assert.ok(f.gateway.calls.every((call) =>
     call.authorization === `Bearer ${TEST_GATEWAY_ADMIN_TOKEN}`));
+});
+
+test("a desktop reads enterprise providers with its device token and no key", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+
+  const answered = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${ALICE_DEVICE_TOKEN}` },
+  });
+  const answeredText = await answered.text();
+  assert.equal(answered.status, 200, answeredText);
+  const body = JSON.parse(answeredText);
+  assert.deepEqual(body.providers.map((provider) => provider.id), ["openai"]);
+  assert.equal(body.providers[0].name, "OpenAI");
+  assert.equal(body.providers[0].host, "api.openai.com");
+  // Only the models this device's credential carries, in the provider's
+  // own spelling; gpt-4 was not granted.
+  assert.deepEqual(body.providers[0].models, ["gpt-5"]);
+  assert.equal(body.providers[0].modelCount, 1);
+  assert.equal(body.providers[0].keyState, "set");
+  assert.equal(body.providers[0].ready, true);
+  assert.equal(body.providers[0].off, false);
+  assert.equal(body.providers[0].managedBy, "enterprise");
+  // A device sees readiness and a masked fingerprint, never the gateway's
+  // key list or a key.
+  assert.equal(body.providers[0].keyMasked, "sk-…abcd");
+  assert.ok(!("key" in body.providers[0]));
+  assert.ok(!("keys" in body.providers[0]));
+  assert.ok(!("keyMaskedList" in body.providers[0]));
+  for (const forbidden of ["keyMaskedList", "keyCount", "key-alice-new", "tokenHash"]) {
+    assert.ok(!JSON.stringify(body).includes(forbidden), `provider projection leaked ${forbidden}`);
+  }
+
+  const missing = await fetch(`${f.base}/api/v1/client/enterprise/providers`);
+  assert.equal(missing.status, 401);
+  assert.equal((await missing.json()).error.code, "missing_device_token");
+
+  const unknown = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${UNKNOWN_DEVICE_TOKEN}` },
+  });
+  assert.equal(unknown.status, 401);
+  assert.equal((await unknown.json()).error.code, "invalid_device_token");
+
+  const disabled = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${DISABLED_DEVICE_TOKEN}` },
+  });
+  assert.equal(disabled.status, 403);
+  assert.equal((await disabled.json()).error.code, "device_disabled");
+
+  // A credential whose models this provider does not serve sees no
+  // provider at all, rather than a vendor it cannot call.
+  const otherModels = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${BOB_DEVICE_TOKEN}` },
+  });
+  assert.equal(otherModels.status, 200);
+  assert.deepEqual((await otherModels.json()).providers, []);
 });
 
 test("M4-C gateway writes require step-up, an approval for H, and audit both outcomes", {
@@ -10692,4 +10930,181 @@ test("a half-finished web sign-in does not stand in for a desktop one", {
   );
   assert.equal(desktop.status, 400);
   assert.equal((await desktop.json()).error.code, "login_expired");
+});
+
+test("usage groups and filters by device and by routing group", { timeout: 30000 }, async (t) => {
+  const now = Date.now();
+  const usageContent = [
+    JSON.stringify({
+      t: new Date(now - 3600 * 1000).toISOString(),
+      callerKeyId: "key-alice-new",
+      callerKeyName: "Alice new",
+      agent: "claude",
+      provider: "deepseek",
+      req: "group/smart",
+      computer: "alice-pc",
+      status: 200,
+      in: 10,
+      out: 5,
+      cost: 0.01,
+    }),
+    JSON.stringify({
+      t: new Date(now - 2 * 3600 * 1000).toISOString(),
+      callerKeyId: "key-bob",
+      callerKeyName: "Bob",
+      agent: "codex",
+      provider: "openai",
+      req: "gpt-test",
+      computer: "bob-mac",
+      status: 200,
+      in: 7,
+      out: 3,
+      cost: 0.02,
+    }),
+  ].join("\n") + "\n";
+  const f = await fixture({ usageContent });
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const from = new Date(now - 24 * 3600 * 1000).toISOString();
+  const to = new Date(now + 3600 * 1000).toISOString();
+  const query = `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+
+  const byDevice = await adminGet(
+    f, jar, `/api/v1/admin/usage/timeseries?${query}&bucket=day&groupBy=device`,
+  );
+  assert.equal(byDevice.response.status, 200, JSON.stringify(byDevice.body));
+  assert.deepEqual(
+    [...new Set(byDevice.body.points.flatMap((point) => point.groups.map((row) => row.device)))].sort(),
+    ["alice-pc", "bob-mac"],
+  );
+
+  const byGroup = await adminGet(
+    f, jar, `/api/v1/admin/usage/timeseries?${query}&bucket=day&groupBy=group`,
+  );
+  assert.equal(byGroup.response.status, 200, JSON.stringify(byGroup.body));
+  assert.deepEqual(
+    [...new Set(byGroup.body.points.flatMap((point) => point.groups.map((row) => row.group)))].sort(),
+    ["(unknown)", "smart"],
+  );
+
+  const filtered = await adminGet(
+    f, jar, `/api/v1/admin/usage/summary?${query}&device=alice-pc`,
+  );
+  assert.equal(filtered.body.totals.requests, 1);
+  const byGroupFilter = await adminGet(
+    f, jar, `/api/v1/admin/usage/summary?${query}&group=smart`,
+  );
+  assert.equal(byGroupFilter.body.totals.requests, 1);
+
+  const unknownGroupBy = await adminGet(
+    f, jar, `/api/v1/admin/usage/timeseries?${query}&bucket=day&groupBy=project`,
+  );
+  assert.equal(unknownGroupBy.response.status, 400);
+});
+
+test("an administrator publishes a resource and the client catalog carries it", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const csrf = current.body.csrfToken;
+
+  const created = await adminPost(f, jar, "/api/v1/admin/resources", {
+    kind: "skill",
+    name: "Release check",
+    deliveryMode: "forced",
+    assignments: ["org-platform"],
+    compatibility: {},
+    reason: "Pilot onboarding",
+  }, csrf, { "idempotency-key": "publish-test-create-0001" });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  const resourceId = created.body.resource.id;
+  assert.equal(created.body.resource.status, "draft");
+
+  const release = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/resources/${resourceId}/releases`,
+    {
+      resourceVersion: "2026.11.1",
+      content: "---\nname: release-check\n---\nRun it.\n",
+      reason: "Pilot onboarding",
+      expectedUpdatedAt: created.body.resource.updatedAt,
+    },
+    csrf,
+    { "idempotency-key": "publish-test-release-0001" },
+  );
+  assert.equal(release.response.status, 201, JSON.stringify(release.body));
+  assert.equal(release.body.release.status, "candidate");
+  assert.equal(release.body.release.mediaType, "text/markdown; charset=utf-8");
+
+  const approval = await adminPost(f, jar, "/api/v1/admin/approvals", {
+    action: "resource.publish",
+    targetId: resourceId,
+    reason: "Pilot onboarding",
+    releaseId: release.body.release.id,
+    expectedUpdatedAt: release.body.resource.updatedAt,
+  }, csrf, { "idempotency-key": "publish-test-approval-0001" });
+  assert.equal(approval.response.status, 201, JSON.stringify(approval.body));
+  const approvalId = approval.body.approval.approvalId;
+
+  // A second administrator approves it; the requester cannot.
+  const selfDecision = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/approvals/${approvalId}/decisions`,
+    { decision: "approve", reason: "Reviewed" },
+    csrf,
+  );
+  assert.equal(selfDecision.response.status, 403);
+  assert.equal(selfDecision.body.error.code, "approval_separation_required");
+
+  const approver = await seedAdminSession(f, "b");
+  const decided = await approverPost(
+    f,
+    approver,
+    `/api/v1/admin/approvals/${approvalId}/decisions`,
+    { decision: "approve", reason: "Reviewed" },
+  );
+  assert.equal(decided.response.status, 200, JSON.stringify(decided.body));
+
+  const published = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/resources/${resourceId}/publish`,
+    {
+      releaseId: release.body.release.id,
+      approvalId,
+      reason: "Pilot onboarding",
+      expectedUpdatedAt: release.body.resource.updatedAt,
+    },
+    csrf,
+    { "idempotency-key": "publish-test-publish-0001" },
+  );
+  assert.equal(published.response.status, 200, JSON.stringify(published.body));
+  assert.equal(published.body.resource.status, "published");
+
+  // Each write reached the resource service as the administrator, with its
+  // own idempotency key, and never with the management session.
+  assert.equal(f.resource.writes.length, 3);
+  assert.ok(f.resource.writes.every((write) => write.actor && write.idempotencyKey));
+  assert.ok(f.resource.writes.every((write) => !write.body.reason || write.body.reason === "Pilot onboarding"));
+  assert.ok(!JSON.stringify(f.resource.writes).includes(f.secrets.sessionSecret));
+
+  // An approval is spent by its publish: the same one cannot be reused.
+  const stale = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/resources/${resourceId}/publish`,
+    {
+      releaseId: release.body.release.id,
+      approvalId,
+      reason: "Pilot onboarding",
+      expectedUpdatedAt: created.body.resource.updatedAt,
+    },
+    csrf,
+    { "idempotency-key": "publish-test-publish-0002" },
+  );
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.error.code, "approval_consumed");
 });

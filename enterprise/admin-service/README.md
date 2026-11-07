@@ -81,15 +81,22 @@ APR-01c 已提供独立 OIDC Client 的 step-up：`prompt=login`、`max_age`、e
   对话正文或任何 Key/token 材料。
 - M4-E 内容治理客户端只由 admin-service 服务端使用独立审计令牌访问 `audit-service`；
   浏览器的读取正文/下载导出 token 均为一次性且不持久化。
-- M3-C-2 只读资源/同步 API：`GET /api/v1/admin/resources`（`resources.read`）、
+- M3-C-2 资源/同步 API：`GET /api/v1/admin/resources`（`resources.read`）、
   `GET /api/v1/admin/resources/{resourceId}`、`GET /api/v1/admin/resource-sync/reports`
   和 `GET /api/v1/admin/resource-sync/reports/{deviceId}`（`devices.read`）。资源按 `"*"`
   或管理员组织范围可见；同步报告要求设备存在、设备属于可见用户且报告的 `userId` 与设备
   一致，否则隐藏。详情对范围外或不可解析记录分别返回 `403 forbidden_scope` /
   `404 target_not_found`。
-- 资源服务客户端使用独立 `ADMIN_RESOURCE_SERVICE_TOKEN`，只发 GET、不跟随重定向、默认
-  5 秒超时和 4 MiB 响应上限。响应只含白名单字段；资源内容、签名私钥、服务令牌、上游
-  actor 字段、设备令牌和同步凭证不会离开管理服务。
+- 资源发布写接口（`resources.write`，CSRF/桌面令牌、`reason` 必填）：
+  `POST /api/v1/admin/resources` 建草稿、`POST .../resources/{id}/releases` 建候选版本、
+  `POST .../resources/{id}/publish` 发布、`POST .../resources/{id}/rollback` 回滚。
+  发布和回滚还要求一个**已批准**的审批（`resource.publish` / `resource.rollback`，
+  绑定版本 id 与 `expectedUpdatedAt`，非请求人批准，一次性消费）；管理服务校验后才把
+  审批 id 交给资源服务。发布了资源的设备在下一次同步取到；客户端插件每 5 分钟自动同步一次。
+- 资源服务客户端使用独立 `ADMIN_RESOURCE_SERVICE_TOKEN`，不跟随重定向、默认
+  5 秒超时和 4 MiB 响应上限。读只发 GET；写只发上面的四个 POST，并带
+  `X-Magpie-Actor` 与 `Idempotency-Key`。响应只含白名单字段；资源内容、签名私钥、
+  服务令牌、上游 actor 字段、设备令牌和同步凭证不会离开管理服务。
 - 四个受控管理写接口：停用/启用用户、吊销设备、轮换当前凭证。每次写操作校验会话、CSRF、
   权限、目标组织子树和 `reason`；auth-service 故障稳定映射为 `502 dependency_unavailable`。
 - 两个额度/模型策略写接口：`PUT .../policy/quota` 和 `PATCH .../policy/models`。管理服务
@@ -376,6 +383,7 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 | `GET` | `/api/v1/admin/devices` | 当前范围内设备元数据 |
 | `GET` | `/api/v1/admin/credentials` | 当前范围内凭证元数据；不含 Key/hash |
 | `GET` | `/api/v1/admin/models` | 返回正式只读模型目录的安全投影和 `catalog` 摘要；未配置目录时才退回 `ADMIN_MODELS` 兼容显示 |
+| `GET` | `/api/v1/client/enterprise/providers` | 桌面客户端专用；校验设备令牌后返回企业供应商的安全投影（名称、地址、该凭证可用的模型、就绪状态、脱敏指纹），不含 Key；模型按凭证白名单过滤，命不中任何模型的供应商不返回 |
 | `GET` | `/api/v1/admin/usage/summary` | Token、费用、成功率及人/部门/模型/Agent 汇总 |
 | `GET` | `/api/v1/admin/usage/timeseries` | `bucket=hour\|day`、`groupBy=user\|department\|model\|agent\|all` 的趋势 |
 | `GET` | `/api/v1/admin/health` | 管理服务读取 auth-service 最小状态 |

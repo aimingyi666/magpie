@@ -264,6 +264,24 @@ test("the page's routes reach the named management APIs only", async (t) => {
       "GET /api/v1/admin/devices": (_req, _res, send) => send(200, devices),
       "GET /api/v1/admin/gateway/requests": (_req, _res, send) => send(200, requests),
       "GET /api/v1/admin/gateway/routes/7": (_req, _res, send) => send(200, route),
+      "GET /api/v1/admin/resources": (_req, _res, send) => send(200, {
+        resources: [{ id: "res_ssssssssssssssss", kind: "skill", name: "Release check" }],
+      }),
+      "POST /api/v1/admin/resources": (_req, _res, send) => send(201, {
+        resource: { id: "res_ssssssssssssssss", updatedAt: "2026-11-07T00:00:00.000Z" },
+      }),
+      "POST /api/v1/admin/resources/res_ssssssssssssssss/releases": (_req, _res, send) => send(201, {
+        resource: { id: "res_ssssssssssssssss", updatedAt: "2026-11-07T00:00:01.000Z" },
+        release: { id: "rel_ssssssssssssssss", status: "candidate" },
+      }),
+      "POST /api/v1/admin/resources/res_ssssssssssssssss/publish": (_req, _res, send) => send(200, {
+        resource: { id: "res_ssssssssssssssss", status: "published" },
+        release: { id: "rel_ssssssssssssssss", status: "published" },
+      }),
+      "POST /api/v1/admin/resources/res_ssssssssssssssss/rollback": (_req, _res, send) => send(200, {
+        resource: { id: "res_ssssssssssssssss", status: "published" },
+        release: { id: "rel_ssssssssssssssss", status: "published" },
+      }),
     },
   });
   const { plugin, token } = await signIn(t, null, mock);
@@ -310,6 +328,27 @@ test("the page's routes reach the named management APIs only", async (t) => {
     headers: headers,
   });
   assert.equal(response.status, 200);
+
+  // Publishing a resource is three writes the page can drive itself.
+  for (const [pathname, body] of [
+    ["/v1/admin/resources", { kind: "skill", name: "Release check", reason: "pilot" }],
+    ["/v1/admin/resources/res_ssssssssssssssss/releases", {
+      resourceVersion: "2026.11.1", content: "# check", reason: "pilot",
+    }],
+    ["/v1/admin/resources/res_ssssssssssssssss/publish", {
+      releaseId: "rel_ssssssssssssssss", reason: "pilot",
+    }],
+    ["/v1/admin/resources/res_ssssssssssssssss/rollback", {
+      releaseId: "rel_ssssssssssssssss", reason: "pilot",
+    }],
+  ]) {
+    response = await request(plugin.port, pathname, {
+      method: "POST",
+      headers: { ...headers, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    assert.equal(response.status, 200, `${pathname}: ${response.body}`);
+  }
 
   response = await request(plugin.port, "/v1/admin/anything", { headers });
   assert.equal(response.status, 404);

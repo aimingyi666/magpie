@@ -152,6 +152,7 @@ func (s *Server) adminHandler(token string) http.Handler {
 	mux.HandleFunc("PATCH /v1/magpie/admin/gateway/keys/{id}", s.adminGatewayKeyPatch)
 
 	mux.HandleFunc("GET /v1/magpie/admin/telemetry/requests", s.adminTelemetryRequests)
+	mux.HandleFunc("GET /v1/magpie/admin/telemetry/active", s.adminTelemetryActive)
 	mux.HandleFunc("GET /v1/magpie/admin/telemetry/routes/{id}", s.adminTelemetryRoute)
 
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1401,6 +1402,13 @@ func (s *Server) adminGatewayKeyPatch(w http.ResponseWriter, r *http.Request) {
 		resp["key"] = adminProjectKey(keys[i])
 	}
 	adminJSON(w, 200, resp)
+}
+
+// adminTelemetryActive is the requests in flight now: the same rows the
+// status bar reads, plus the key that let each one in, so the management
+// service can say whose call is running.
+func (s *Server) adminTelemetryActive(w http.ResponseWriter, r *http.Request) {
+	adminJSON(w, 200, map[string]any{"ok": true, "active": s.Active()})
 }
 
 func (s *Server) adminTelemetryRequests(w http.ResponseWriter, r *http.Request) {

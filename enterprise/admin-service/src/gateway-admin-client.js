@@ -292,6 +292,12 @@ export class GatewayAdminClient {
     return payload;
   }
 
+  async activeRequests() {
+    const payload = await this.request("GET", "/v1/magpie/admin/telemetry/active");
+    if (!Array.isArray(payload.active)) throw new GatewayAdminError();
+    return payload.active;
+  }
+
   async routeTrace(routeId) {
     const payload = await this.request(
       "GET",
