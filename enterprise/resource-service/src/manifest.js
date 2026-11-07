@@ -8,6 +8,10 @@ export const RESOURCE_KINDS = Object.freeze([
   "instructions",
   "subagent",
   "template",
+  // A redact resource is the enterprise's masking policy: rules added to
+  // the user's own, and whether the baseline categories may be turned off.
+  // The client writes it beside magpie's settings, never into an agent.
+  "redact",
   // A hook is executable code delivered to an agent, so it is the highest
   // risk kind: the catalog accepts it, and the client must not apply one
   // without its own approval. Publishing it here does not execute it.

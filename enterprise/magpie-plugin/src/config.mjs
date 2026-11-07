@@ -142,6 +142,11 @@ export function readSyncConfig(dir = stateDirectory()) {
   }
   if (!data || typeof data !== "object") return { state: "invalid", dir, file, reason: "object" };
 
+  // magpie's plugin host passes where magpie keeps settings.json, so a
+  // distributed masking policy lands where magpie reads it.
+  const magpieConfigDir = typeof process.env.MAGPIE_CONFIG_DIR === "string"
+    ? process.env.MAGPIE_CONFIG_DIR
+    : "";
   const resourceBaseUrl = typeof data.resourceBaseUrl === "string" ? data.resourceBaseUrl.trim() : "";
   if (!resourceBaseUrl) return { state: "invalid", dir, file, reason: "resourceBaseUrl" };
   try {
@@ -210,6 +215,11 @@ export function readSyncConfig(dir = stateDirectory()) {
     rootDir: typeof data.rootDir === "string" && data.rootDir.trim()
       ? path.resolve(dir, data.rootDir.trim())
       : path.join(dir, "resources"),
+    // Where magpie keeps settings.json. magpie's plugin host sets it; a
+    // sync without it caches redact resources but applies none.
+    magpieConfigDir: typeof magpieConfigDir === "string" && magpieConfigDir.trim()
+      ? path.resolve(magpieConfigDir.trim())
+      : "",
     clientSyncModule: typeof data.clientSyncModule === "string" ? data.clientSyncModule.trim() : "",
     clientVersion: typeof data.clientVersion === "string" ? data.clientVersion.trim() : "",
     displayNames,

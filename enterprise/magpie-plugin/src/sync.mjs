@@ -36,6 +36,9 @@ async function runSync({ config, credential }) {
     ...(config.agents && Object.keys(config.agents).length
       ? { agents: config.agents }
       : {}),
+    ...(config.magpieConfigDir
+      ? { managedRedactPath: path.join(config.magpieConfigDir, "managed-redact.json") }
+      : {}),
   });
 
   const result = await engine.syncOnce();

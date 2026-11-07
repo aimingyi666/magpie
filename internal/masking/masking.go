@@ -25,8 +25,12 @@ import (
 // Masker masks as the settings say, read on each call.
 type Masker struct{}
 
-// Wanted says settings st ask for anything to be masked.
+// Wanted says settings st ask for anything to be masked, or an enterprise
+// policy distributed here requires it.
 func Wanted(st settings.Settings) bool {
+	if policy, ok := managedPolicy(); ok && (policy.RequireBaseline || len(policy.Rules) > 0) {
+		return true
+	}
 	return st.Redact || st.RedactPersonal || len(st.RedactWords) > 0
 }
 
@@ -49,6 +53,8 @@ func optionsCtx(ctx context.Context) redact.Options {
 	st := settings.Shared()
 	o := redact.Options{Secrets: st.Redact, Personal: st.RedactPersonal, Kinds: st.RedactKinds, Words: st.RedactWords, WordsAnyCase: st.RedactWordsAnyCase, WordsWhole: st.RedactWordsWhole, Rules: st.RedactRules,
 		Actions: st.RedactActions, Allow: st.RedactAllow, Shape: st.RedactShape}
+	policy, managedOK := managedPolicy()
+	o = withManaged(o, policy, managedOK)
 	o.Route, _ = ctx.Value(routeKey{}).(string)
 	if (st.Redact || st.RedactPersonal) && ModelWanted(st) {
 		// until the model is on disk the rules mask alone, and nothing is

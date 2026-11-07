@@ -1812,13 +1812,14 @@ func hostEnv(env []string) []string {
 			out = append(out, "MAGPIE_"+k+"="+netproxy.ForBun(v))
 		case "NO_PROXY":
 			out = append(out, "MAGPIE_"+k+"="+v)
-		case "MAGPIE_ADDR":
-			// an empty one is Settings' (hostAddr)
+		case "MAGPIE_ADDR", "MAGPIE_CONFIG_DIR":
+			// an empty MAGPIE_ADDR is Settings' (hostAddr); the config
+			// folder is magpie's own and is set below
 		default:
 			out = append(out, e)
 		}
 	}
-	return append(out, "MAGPIE_ADDR="+addr)
+	return append(out, "MAGPIE_ADDR="+addr, "MAGPIE_CONFIG_DIR="+settings.Dir())
 }
 
 // Fetch sends r through the provider's plugin — its loader's fetch, or

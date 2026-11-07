@@ -625,3 +625,218 @@ test("an agent file that cannot be written is reported, not a failed sync", asyn
   assert.equal(result.applyErrors.length, 1);
   assert.equal(result.applyErrors[0].code, "agent_config_malformed");
 });
+
+test("skills and MCP servers reach both agents, subagents only Claude Code", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const skill = signedResource(identity, {
+    resourceId: "res_skill_release",
+    releaseId: "rel_skill_1",
+    kind: "skill",
+    content: "---\nname: release-check\n---\n\nRun the checklist.\n",
+  });
+  const subagent = signedResource(identity, {
+    resourceId: "res_subagent_reviewer",
+    releaseId: "rel_subagent_1",
+    kind: "subagent",
+    content: "---\nname: reviewer\n---\n\nReview the diff.\n",
+  });
+  const mcp = signedResource(identity, {
+    resourceId: "res_mcp_context",
+    releaseId: "rel_mcp_1",
+    kind: "mcp",
+    content: JSON.stringify({ name: "context7", command: "npx", args: ["-y", "context7-mcp"] }),
+  });
+  const claudeRoot = path.join(root, "home-claude");
+  const codexRoot = path.join(root, "home-codex");
+  const engine = engineFor(root, identity, async () => desired([skill, subagent, mcp]), {
+    agents: { claude: claudeRoot, codex: codexRoot },
+  });
+
+  const result = await engine.syncOnce();
+  assert.equal(result.status, "synced", JSON.stringify(result));
+  assert.deepEqual(result.applyErrors, []);
+  // Claude Code: skill, subagent, MCP. Codex: skill, MCP.
+  assert.equal(result.applied.length, 5);
+
+  const skillFile = path.join(claudeRoot, "skills", "release-check", "SKILL.md");
+  assert.match(fs.readFileSync(skillFile, "utf8"), /Run the checklist\./);
+  const agentFile = path.join(claudeRoot, "agents", "reviewer.md");
+  assert.match(fs.readFileSync(agentFile, "utf8"), /Review the diff\./);
+  const mcpConfig = JSON.parse(fs.readFileSync(path.join(claudeRoot, ".mcp.json"), "utf8"));
+  assert.equal(mcpConfig.mcpServers.context7.command, "npx");
+  assert.equal(mcpConfig.mcpServers.context7["x-magpie-resource"], "res_mcp_context");
+
+  // Codex reads skills and MCP servers too, but has no subagent file
+  // magpie knows: nothing was invented for it.
+  assert.match(
+    fs.readFileSync(path.join(codexRoot, "skills", "release-check", "SKILL.md"), "utf8"),
+    /Run the checklist\./,
+  );
+  const codexConfig = fs.readFileSync(path.join(codexRoot, "config.toml"), "utf8");
+  assert.match(codexConfig, /^\[mcp_servers\.context7\]$/m);
+  assert.equal(fs.existsSync(path.join(codexRoot, "agents")), false);
+});
+
+test("a resource taken out of the desired state leaves the agent file", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const skill = signedResource(identity, {
+    resourceId: "res_skill_release",
+    releaseId: "rel_skill_1",
+    kind: "skill",
+    content: "---\nname: release-check\n---\n\nRun the checklist.\n",
+  });
+  const mcp = signedResource(identity, {
+    resourceId: "res_mcp_context",
+    releaseId: "rel_mcp_1",
+    kind: "mcp",
+    content: JSON.stringify({ name: "context7", command: "npx" }),
+  });
+  const claudeRoot = path.join(root, "home-claude");
+  let current = [skill, mcp];
+  let revision = "desired-1";
+  const engine = engineFor(root, identity, async () => desired(current, revision), {
+    agents: { claude: claudeRoot },
+  });
+  assert.equal((await engine.syncOnce()).status, "synced");
+  const skillFile = path.join(claudeRoot, "skills", "release-check", "SKILL.md");
+  assert.equal(fs.existsSync(skillFile), true);
+
+  current = [];
+  revision = "desired-2";
+  const second = await engine.syncOnce();
+  assert.equal(second.status, "synced", JSON.stringify(second));
+  assert.deepEqual(second.applyErrors, []);
+  assert.equal(fs.existsSync(skillFile), false);
+  const mcpConfig = JSON.parse(fs.readFileSync(path.join(claudeRoot, ".mcp.json"), "utf8"));
+  assert.deepEqual(mcpConfig.mcpServers, {});
+});
+
+test("a redact resource becomes the masking policy magpie reads", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const policy = signedResource(identity, {
+    resourceId: "res_redact_policy",
+    releaseId: "rel_redact_1",
+    kind: "redact",
+    content: JSON.stringify({
+      schemaVersion: 1,
+      requireBaseline: true,
+      rules: [{ kind: "acme key", prefix: "acme_" }],
+    }),
+  });
+  const redactPath = path.join(root, "config", "managed-redact.json");
+  let current = [policy];
+  const engine = engineFor(root, identity, async () => desired(current), {
+    managedRedactPath: redactPath,
+  });
+
+  const result = await engine.syncOnce();
+  assert.equal(result.status, "synced", JSON.stringify(result));
+  assert.deepEqual(result.applyErrors, []);
+  const written = JSON.parse(fs.readFileSync(redactPath, "utf8"));
+  assert.equal(written.schemaVersion, 1);
+  assert.equal(written.requireBaseline, true);
+  assert.deepEqual(written.rules, [{ kind: "acme key", prefix: "acme_" }]);
+  assert.equal(written.source, "enterprise");
+
+  // Taking the resource away clears its rules, and the baseline lock with
+  // it; the file stays, because magpie reads it on every request.
+  current = [];
+  const second = await engine.syncOnce();
+  assert.equal(second.status, "synced", JSON.stringify(second));
+  assert.deepEqual(second.applyErrors, []);
+  const cleared = JSON.parse(fs.readFileSync(redactPath, "utf8"));
+  assert.equal(cleared.requireBaseline, false);
+  assert.deepEqual(cleared.rules, []);
+});
+
+test("a redact resource that cannot work is reported, not written", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const bad = signedResource(identity, {
+    resourceId: "res_redact_bad",
+    releaseId: "rel_redact_bad_1",
+    kind: "redact",
+    content: JSON.stringify({
+      schemaVersion: 1,
+      requireBaseline: true,
+      rules: [{ kind: "x", regex: "(" }],
+    }),
+  });
+  const redactPath = path.join(root, "config", "managed-redact.json");
+  const engine = engineFor(root, identity, async () => desired([bad]), {
+    managedRedactPath: redactPath,
+  });
+  const result = await engine.syncOnce();
+  assert.equal(result.status, "synced", JSON.stringify(result));
+  assert.equal(result.applyErrors.length, 1);
+  assert.equal(result.applyErrors[0].resourceId, "managed-redact");
+  assert.equal(result.applyErrors[0].code, "invalid_resource_content");
+});
+
+test("a hook reaches each agent's hook file and comes back out", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const hook = signedResource(identity, {
+    resourceId: "res_hook_notify",
+    releaseId: "rel_hook_1",
+    kind: "hook",
+    content: JSON.stringify({ event: "turn-end", command: "notify-send done" }),
+  });
+  const claudeRoot = path.join(root, "home-claude");
+  const codexRoot = path.join(root, "home-codex");
+  let current = [hook];
+  const engine = engineFor(root, identity, async () => desired(current), {
+    agents: { claude: claudeRoot, codex: codexRoot },
+  });
+
+  const result = await engine.syncOnce();
+  assert.equal(result.status, "synced", JSON.stringify(result));
+  assert.deepEqual(result.applyErrors, []);
+  const claude = JSON.parse(fs.readFileSync(path.join(claudeRoot, "settings.json"), "utf8"));
+  assert.equal(claude.hooks.Stop[0].hooks[0].command, "notify-send done");
+  const codex = JSON.parse(fs.readFileSync(path.join(codexRoot, "hooks.json"), "utf8"));
+  assert.equal(codex.hooks.Stop[0].hooks[0].command, "notify-send done");
+  const journal = JSON.parse(fs.readFileSync(path.join(root, "agent-hooks.json"), "utf8"));
+  assert.ok(journal.resources.res_hook_notify.claude);
+  assert.ok(journal.resources.res_hook_notify.codex);
+
+  current = [];
+  const second = await engine.syncOnce();
+  assert.equal(second.status, "synced", JSON.stringify(second));
+  assert.deepEqual(second.applyErrors, []);
+  const claudeAfter = JSON.parse(fs.readFileSync(path.join(claudeRoot, "settings.json"), "utf8"));
+  assert.deepEqual(claudeAfter.hooks.Stop, []);
+  const codexAfter = JSON.parse(fs.readFileSync(path.join(codexRoot, "hooks.json"), "utf8"));
+  assert.deepEqual(codexAfter.hooks.Stop, []);
+  assert.deepEqual(
+    JSON.parse(fs.readFileSync(path.join(root, "agent-hooks.json"), "utf8")).resources,
+    {},
+  );
+});
+
+test("an unreadable hook journal leaves hooks alone and says so", async (t) => {
+  const root = temporaryRoot(t);
+  const identity = newSigningIdentity();
+  const hook = signedResource(identity, {
+    resourceId: "res_hook_notify",
+    releaseId: "rel_hook_1",
+    kind: "hook",
+    content: JSON.stringify({ event: "turn-end", command: "notify-send done" }),
+  });
+  const claudeRoot = path.join(root, "home-claude");
+  fs.mkdirSync(root, { recursive: true });
+  fs.writeFileSync(path.join(root, "agent-hooks.json"), "{ not json", "utf8");
+  const engine = engineFor(root, identity, async () => desired([hook]), {
+    agents: { claude: claudeRoot },
+  });
+  const result = await engine.syncOnce();
+  assert.equal(result.status, "synced", JSON.stringify(result));
+  assert.deepEqual(result.applied, []);
+  assert.equal(result.applyErrors.length, 1);
+  assert.equal(result.applyErrors[0].resourceId, "agent-hooks");
+  assert.equal(result.applyErrors[0].code, "invalid_state");
+  assert.equal(fs.existsSync(path.join(claudeRoot, "settings.json")), false);
+});

@@ -8,7 +8,19 @@ import {
   validateManifestShape,
   verifySignedManifest,
 } from "../../resource-service/src/manifest.js";
-import { applyInstruction, INSTRUCTION_FILES } from "./agent-apply.js";
+import {
+  applyHook,
+  applyInstruction,
+  applyMcpServer,
+  applySkill,
+  applySubagent,
+  INSTRUCTION_FILES,
+  removeHook,
+  removeInstruction,
+  removeMcpServer,
+  removeSkill,
+  removeSubagent,
+} from "./agent-apply.js";
 import { ClientSyncError, asClientSyncError, publicError } from "./errors.js";
 import {
   assertSafeSegment,
@@ -403,6 +415,268 @@ async function readCachedRelease(root, keys, manifest) {
   }
 }
 
+// --- agent files ------------------------------------------------------
+//
+// A synced resource is written into each agent the device configured.
+// Instructions are blocks in the agent's own file; a skill, subagent or
+// MCP server is a file of its own. Applying is repeated on every sync, so
+// an employee's edit is followed by the enterprise's file again; taking a
+// resource away deletes only what magpie wrote.
+
+const AGENT_FILE_KINDS = new Set(["instructions", "skill", "subagent", "mcp"]);
+
+// --- the enterprise masking policy ------------------------------------
+//
+// A redact resource is a policy, not a file for an agent: every one this
+// device receives is merged into one file beside magpie's settings, which
+// magpie reads on each request. requireBaseline is the enterprise saying
+// secrets and personal data may not be turned off here.
+
+function redactPolicyOf(content) {
+  let value;
+  try {
+    value = JSON.parse(Buffer.isBuffer(content) ? content.toString("utf8") : String(content ?? ""));
+  } catch {
+    throw new ClientSyncError("invalid_resource_content", "a redact resource must be JSON");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value) || value.schemaVersion !== 1) {
+    throw new ClientSyncError("invalid_resource_content", "a redact resource needs schemaVersion 1");
+  }
+  if (!Array.isArray(value.rules)) {
+    throw new ClientSyncError("invalid_resource_content", "a redact resource needs a rules list");
+  }
+  const rules = value.rules.map((rule) => {
+    if (!rule || typeof rule !== "object" || Array.isArray(rule)
+        || typeof rule.kind !== "string" || !rule.kind.trim()) {
+      throw new ClientSyncError("invalid_resource_content", "a redact rule needs a kind");
+    }
+    const prefix = typeof rule.prefix === "string" ? rule.prefix.trim() : "";
+    const regex = typeof rule.regex === "string" ? rule.regex.trim() : "";
+    if (Boolean(prefix) === Boolean(regex)) {
+      throw new ClientSyncError("invalid_resource_content", "a redact rule has a prefix or a regular expression, not both");
+    }
+    if (prefix && (prefix.length < 3 || prefix.length > 64)) {
+      throw new ClientSyncError("invalid_resource_content", "a redact rule's prefix is 3 to 64 characters");
+    }
+    if (regex) {
+      if (regex.length > 300) {
+        throw new ClientSyncError("invalid_resource_content", "a redact rule's regular expression is too long");
+      }
+      try {
+        // Same check magpie makes: a pattern that matches nothing would
+        // mask everywhere.
+        if (new RegExp(regex).test("")) {
+          throw new ClientSyncError("invalid_resource_content", "a redact rule matches nothing at all");
+        }
+      } catch (error) {
+        if (error instanceof ClientSyncError) throw error;
+        throw new ClientSyncError("invalid_resource_content", "a redact rule's regular expression does not work");
+      }
+    }
+    return { kind: rule.kind.trim().slice(0, 24), ...(prefix ? { prefix } : {}), ...(regex ? { regex } : {}) };
+  });
+  if (rules.length > 32) {
+    throw new ClientSyncError("invalid_resource_content", "a redact policy has at most 32 rules");
+  }
+  return { requireBaseline: value.requireBaseline === true, rules };
+}
+
+async function writeManagedRedact(file, body) {
+  const directory = path.dirname(file);
+  await fs.mkdir(directory, { recursive: true, mode: 0o700 });
+  const stat = await lstatOrNull(file);
+  if (stat?.isSymbolicLink()) {
+    throw new ClientSyncError("path_symlink", "the managed masking policy must not be a symbolic link");
+  }
+  const temporary = path.join(directory, `.${path.basename(file)}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await fs.open(temporary, "wx", 0o600);
+    await handle.writeFile(body);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(temporary, file);
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {});
+    await fs.unlink(temporary).catch(() => {});
+    if (error instanceof ClientSyncError) throw error;
+    throw new ClientSyncError("agent_file_write_failed", "the managed masking policy could not be written");
+  }
+}
+
+// applyManagedRedact merges every redact resource into the one file magpie
+// reads. With none, it writes the empty policy: a resource taken away must
+// take its rules with it.
+async function applyManagedRedact({ file, records, readActive }) {
+  let requireBaseline = false;
+  const rules = [];
+  for (const record of records) {
+    if (record.kind !== "redact") continue;
+    const active = await readActive(record.resourceId);
+    const policy = redactPolicyOf(active.content);
+    requireBaseline = requireBaseline || policy.requireBaseline;
+    rules.push(...policy.rules);
+  }
+  if (rules.length > 32) {
+    throw new ClientSyncError("invalid_resource_content", "the managed masking policy has at most 32 rules");
+  }
+  const body = `${JSON.stringify({ schemaVersion: 1, requireBaseline, rules, source: "enterprise" }, null, 2)}\n`;
+  const existing = await fs.readFile(file, "utf8").catch(() => null);
+  if (existing === body) return false;
+  await writeManagedRedact(file, body);
+  return true;
+}
+
+function resourceText(content) {
+  return Buffer.isBuffer(content) ? content.toString("utf8") : String(content ?? "");
+}
+
+async function readCachedContent(root, record) {
+  const directory = await releasePath(root, record);
+  await assertNoSymlinkAncestors(root, directory);
+  return fs.readFile(path.join(directory, CONTENT_FILE));
+}
+
+async function applyResourceToAgents({ record, content, agents }) {
+  const applied = [];
+  if (record.kind === "instructions") {
+    const text = resourceText(content);
+    for (const [agent, root] of Object.entries(agents || {})) {
+      if (!root) continue;
+      const result = await applyInstruction({ agent, root, resourceId: record.resourceId, text });
+      applied.push({ resourceId: record.resourceId, agent, file: result.file });
+    }
+    return applied;
+  }
+  // Every other kind goes to each agent that has a place for it. An agent
+  // with no such place (Codex has no subagent file magpie knows) says
+  // unsupported and is left out.
+  for (const [agent, root] of Object.entries(agents || {})) {
+    if (!root) continue;
+    let result;
+    if (record.kind === "skill") {
+      result = await applySkill({ agent, root, resourceId: record.resourceId, content });
+    } else if (record.kind === "subagent") {
+      result = await applySubagent({ agent, root, resourceId: record.resourceId, content });
+    } else if (record.kind === "mcp") {
+      result = await applyMcpServer({ agent, root, resourceId: record.resourceId, content });
+    } else {
+      continue;
+    }
+    if (result.state === "unsupported") continue;
+    applied.push({
+      resourceId: record.resourceId,
+      agent,
+      file: result.file,
+      ...(result.name ? { name: result.name } : {}),
+    });
+  }
+  return applied;
+}
+
+async function removeResourceFromAgents({ root, record, agents }) {
+  if (!AGENT_FILE_KINDS.has(record.kind)) return;
+  if (record.kind === "mcp") {
+    for (const [agent, agentRoot] of Object.entries(agents || {})) {
+      if (!agentRoot) continue;
+      await removeMcpServer({ agent, root: agentRoot, resourceId: record.resourceId });
+    }
+    return;
+  }
+  const content = await readCachedContent(root, record);
+  if (record.kind === "instructions") {
+    for (const [agent, agentRoot] of Object.entries(agents || {})) {
+      if (!agentRoot) continue;
+      await removeInstruction({ agent, root: agentRoot, resourceId: record.resourceId });
+    }
+    return;
+  }
+  for (const [agent, agentRoot] of Object.entries(agents || {})) {
+    if (!agentRoot) continue;
+    if (record.kind === "skill") {
+      await removeSkill({ agent, root: agentRoot, resourceId: record.resourceId, content });
+    } else if (record.kind === "subagent") {
+      await removeSubagent({ agent, root: agentRoot, resourceId: record.resourceId, content });
+    }
+  }
+}
+
+// --- hooks' exact entries ----------------------------------------------
+//
+// A hook entry has no place for a marker, so the sync keeps what it wrote
+// in a file of its own: taking a hook away removes that entry, and leaves
+// one the employee edited alone.
+
+const HOOK_JOURNAL_FILE = "agent-hooks.json";
+
+async function readHookJournal(root) {
+  const target = path.join(root, HOOK_JOURNAL_FILE);
+  const stat = await lstatOrNull(target);
+  if (!stat) return { version: 1, resources: {} };
+  if (stat.isSymbolicLink() || !stat.isFile()) {
+    throw new ClientSyncError("invalid_state", "the hook journal is not a regular file");
+  }
+  let value;
+  try {
+    value = JSON.parse(await fs.readFile(target, "utf8"));
+  } catch {
+    throw new ClientSyncError("invalid_state", "the hook journal does not parse");
+  }
+  if (!value || value.version !== 1 || typeof value.resources !== "object"
+      || value.resources === null || Array.isArray(value.resources)) {
+    throw new ClientSyncError("invalid_state", "the hook journal is not one this build writes");
+  }
+  return value;
+}
+
+async function writeHookJournal(root, journal) {
+  const target = path.join(root, HOOK_JOURNAL_FILE);
+  const temporary = path.join(root, `.${HOOK_JOURNAL_FILE}.${process.pid}.${crypto.randomUUID()}.tmp`);
+  let handle;
+  try {
+    handle = await fs.open(temporary, "wx", 0o600);
+    await handle.writeFile(`${JSON.stringify(journal, null, 2)}\n`);
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await fs.rename(temporary, target);
+  } catch (error) {
+    if (handle) await handle.close().catch(() => {});
+    await fs.unlink(temporary).catch(() => {});
+    if (error instanceof ClientSyncError) throw error;
+    throw new ClientSyncError("agent_file_write_failed", "the hook journal could not be written");
+  }
+}
+
+async function applyHookResource({ record, content, agents, journal }) {
+  const applied = [];
+  for (const [agent, root] of Object.entries(agents || {})) {
+    if (!root) continue;
+    const prior = journal.resources[record.resourceId]?.[agent] || null;
+    const result = await applyHook({
+      agent, root, resourceId: record.resourceId, content, prior,
+    });
+    if (result.state !== "applied") continue;
+    journal.resources[record.resourceId] = {
+      ...(journal.resources[record.resourceId] || {}),
+      [agent]: { file: result.file, event: result.event, entry: result.entry },
+    };
+    applied.push({ resourceId: record.resourceId, agent, file: result.file });
+  }
+  return applied;
+}
+
+async function removeHookResource({ resourceId, agents, journal }) {
+  const record = journal.resources[resourceId];
+  if (!record) return;
+  for (const [agent, prior] of Object.entries(record)) {
+    if (!agents?.[agent]) continue;
+    await removeHook({ agent, root: agents[agent], prior });
+  }
+  delete journal.resources[resourceId];
+}
+
 async function stageRelease(root, keys, resource, previous, at, validateInstalled) {
   const { manifest, content } = resource;
   const directory = await releasePath(root, manifest);
@@ -520,6 +794,7 @@ export class ClientSyncEngine {
     maxResourceBytes = DEFAULT_MAX_RESOURCE_BYTES,
     lockStaleMs = DEFAULT_LOCK_STALE_MS,
     agents = null,
+    managedRedactPath = "",
   }) {
     if (typeof rootDir !== "string" || !path.isAbsolute(rootDir)) {
       throw new ClientSyncError("invalid_config", "rootDir must be an absolute path");
@@ -571,6 +846,16 @@ export class ClientSyncEngine {
         }
       }
       this.agents = { ...agents };
+    }
+    // Where magpie reads the masking policy an enterprise distributed.
+    // Unset: redact resources are cached like any other and applied by
+    // nobody, which the page says.
+    this.managedRedactPath = "";
+    if (managedRedactPath !== "" && managedRedactPath !== null && managedRedactPath !== undefined) {
+      if (typeof managedRedactPath !== "string" || !path.isAbsolute(managedRedactPath)) {
+        throw new ClientSyncError("invalid_config", "managedRedactPath must be an absolute path");
+      }
+      this.managedRedactPath = managedRedactPath;
     }
   }
 
@@ -779,18 +1064,34 @@ export class ClientSyncEngine {
         const applied = [];
         const applyErrors = [];
         if (this.agents) {
-          for (const record of nextResources) {
-            if (record.kind !== "instructions") continue;
+          // A journal that cannot be read means it is unknown which hook
+          // entries magpie wrote: hooks are left alone rather than guessed
+          // at, and the sync says so.
+          let hookJournal = null;
+          try {
+            hookJournal = await readHookJournal(this.rootDir);
+          } catch (error) {
+            applyErrors.push({
+              resourceId: "agent-hooks",
+              code: typeof error?.code === "string" ? error.code : "invalid_state",
+            });
+          }
+          // A resource this device no longer gets takes its file back out
+          // before the next one is written.
+          const kept = new Set(nextResources.map((record) => record.resourceId));
+          for (const record of state.resources) {
+            if (kept.has(record.resourceId)) continue;
             try {
-              const active = await this.readActiveResource(record.resourceId);
-              const text = Buffer.isBuffer(active.content)
-                ? active.content.toString("utf8")
-                : String(active.content ?? "");
-              for (const [agent, root] of Object.entries(this.agents)) {
-                const result = await applyInstruction({
-                  agent, root, resourceId: record.resourceId, text,
+              if (record.kind === "hook") {
+                if (hookJournal) {
+                  await removeHookResource({
+                    resourceId: record.resourceId, agents: this.agents, journal: hookJournal,
+                  });
+                }
+              } else {
+                await removeResourceFromAgents({
+                  root: this.rootDir, record, agents: this.agents,
                 });
-                applied.push({ resourceId: record.resourceId, agent, file: result.file });
               }
             } catch (error) {
               applyErrors.push({
@@ -798,6 +1099,50 @@ export class ClientSyncEngine {
                 code: typeof error?.code === "string" ? error.code : "agent_apply_failed",
               });
             }
+          }
+          for (const record of nextResources) {
+            try {
+              const active = await this.readActiveResource(record.resourceId);
+              if (record.kind === "hook") {
+                if (!hookJournal) continue;
+                applied.push(...await applyHookResource({
+                  record, content: active.content, agents: this.agents, journal: hookJournal,
+                }));
+              } else {
+                applied.push(...await applyResourceToAgents({
+                  record, content: active.content, agents: this.agents,
+                }));
+              }
+            } catch (error) {
+              applyErrors.push({
+                resourceId: record.resourceId,
+                code: typeof error?.code === "string" ? error.code : "agent_apply_failed",
+              });
+            }
+          }
+          if (hookJournal) {
+            try {
+              await writeHookJournal(this.rootDir, hookJournal);
+            } catch (error) {
+              applyErrors.push({
+                resourceId: "agent-hooks",
+                code: typeof error?.code === "string" ? error.code : "agent_file_write_failed",
+              });
+            }
+          }
+        }
+        if (this.managedRedactPath) {
+          try {
+            await applyManagedRedact({
+              file: this.managedRedactPath,
+              records: nextResources,
+              readActive: (resourceId) => this.readActiveResource(resourceId),
+            });
+          } catch (error) {
+            applyErrors.push({
+              resourceId: "managed-redact",
+              code: typeof error?.code === "string" ? error.code : "agent_apply_failed",
+            });
           }
         }
         return {
