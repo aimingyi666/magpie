@@ -1264,6 +1264,58 @@ func InstallSkills(input string, paths, agents []string) (*Result, error) {
 	return installChange(func(l *Library, in *installed) error { return installFrom(l, p, paths, agents, true, in) })
 }
 
+// InstallSkillFromDir adds one skill from a folder of the user's own: the
+// folder holding its SKILL.md. It is what a machine controller hands a
+// skill it fetched itself, where the page's picker isn't involved.
+//
+// The folder is read where it is; nothing is downloaded. A skill already
+// had from the same folder is left as it is instead of being added twice,
+// and a folder whose SKILL.md names another skill than the folder is
+// named may be added by a name of its own (skill_beside.go).
+func InstallSkillFromDir(dir string, agents []string) (*Result, error) {
+	dir = strings.TrimSpace(dir)
+	if !filepath.IsAbs(dir) {
+		return nil, fmt.Errorf("%s isn't a full path: a skill is installed from the folder that holds its SKILL.md", dir)
+	}
+	fi, err := os.Stat(dir)
+	if err != nil || !fi.IsDir() {
+		return nil, fmt.Errorf("%s isn't a folder", dir)
+	}
+	src := &Source{Kind: "folder", Dir: dir}
+	cands := candidates(dir, "", filepath.Base(dir))
+	var paths []string
+	var only Candidate
+	if len(cands) == 0 {
+		return nil, fmt.Errorf("%s holds no skill: a skill is a folder with a SKILL.md in it", dir)
+	}
+	if len(cands) == 1 && cands[0].Path == "" {
+		// the folder is the skill itself
+		only = cands[0]
+		paths = []string{""}
+	} else {
+		return nil, fmt.Errorf("%s holds %d skills; install one from its own folder (the one with the SKILL.md in it)", dir, len(cands))
+	}
+	if err := checkName("skill", only.Name); err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(only.Description) == "" && !fileHasSkillMd(dir) {
+		return nil, fmt.Errorf("%s has no SKILL.md", dir)
+	}
+	p := &Probe{Source: dir, Kind: "folder", root: dir, src: *src, Candidates: []Candidate{only}}
+	return installChange(func(l *Library, in *installed) error { return installFrom(l, p, paths, agents, true, in) })
+}
+
+// fileHasSkillMd is whether dir holds a SKILL.md, whatever its case on a
+// system that ignores case.
+func fileHasSkillMd(dir string) bool {
+	for _, name := range []string{"SKILL.md", "skill.md", "Skill.md"} {
+		if fi, err := os.Stat(filepath.Join(dir, name)); err == nil && fi.Mode().IsRegular() {
+			return true
+		}
+	}
+	return false
+}
+
 // installed is what an install did with each skill picked: added, had
 // already (the same skill from the same source), or left out, and why.
 type installed struct {

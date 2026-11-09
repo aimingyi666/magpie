@@ -1,0 +1,36 @@
+{
+  "name": "magpie-corp-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Corporate client for magpie: OIDC sign-in, enterprise providers, resource library and telemetry upload",
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "magpie": {
+    "page": {
+      "title": "Corp",
+      "titles": {
+        "zh": "企业",
+        "zh-TW": "企業",
+        "ja": "企業",
+        "de": "Unternehmen"
+      },
+      "file": "page/index.html",
+      "icon": "page/icon.svg",
+      "service": {
+        "port": 3488,
+        "option": "port"
+      }
+    },
+    "options": {
+      "port": 3488,
+      "baseUrl": "",
+      "provider": "corp"
+    }
+  }
+}

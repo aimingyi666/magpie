@@ -1,0 +1,12 @@
+{
+  "name": "magpie-corp-server",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The corporate control plane the magpie corp plugin talks to: sign-in, a gateway key per device, the bundle, and usage back",
+  "type": "module",
+  "main": "src/server.mjs",
+  "scripts": {
+    "start": "node src/server.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

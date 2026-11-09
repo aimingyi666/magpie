@@ -26,20 +26,6 @@
         "port": 3477,
         "option": "port"
       }
-    },
-    "panels": [
-      {
-        "slot": "providers",
-        "title": "Enterprise providers",
-        "titles": {
-          "zh": "企业下发供应商",
-          "zh-TW": "企業下發供應商",
-          "ja": "エンタープライズプロバイダー",
-          "de": "Unternehmensanbieter"
-        },
-        "file": "page/providers-panel.html"
-      }
-    ],
-    "permissions": ["enterprise:providers"]
+    }
   }
 }

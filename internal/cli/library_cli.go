@@ -34,6 +34,8 @@ const libraryUsage = `magpie library                     what the library gives 
                                      there keep them, ticked, and you can turn each off
   magpie library skill hand-back <name>  …and back into ~/.agents/skills, where those agents read it whatever is ticked
   magpie library skill rm <name>     (skills are installed from the app's Library page)
+  magpie library skill from <folder> [agents=a,b…|none]   a skill a controller fetched itself: the
+                                     folder holding its SKILL.md, given to the agents named
   magpie library skill rm --all [--yes]   every skill out of the library and the agents (asks first; --yes doesn't)
   magpie library skill rm --gone [--yes]  every skill an update found removed from its source (asks first; --yes doesn't)
   magpie library skill update [name] fetch a skill from GitHub again; with no name, every one from there
@@ -176,6 +178,26 @@ func libraryCmd(args []string) error {
 			}
 		case len(rest) == 2 && rest[0] == "rm":
 			res, err = library.RemoveSkill(rest[1])
+		case len(rest) >= 2 && rest[0] == "from" && !strings.HasPrefix(rest[1], "-"):
+			// A skill a machine controller fetched itself: a folder with
+			// its SKILL.md in it, and the agents to give it to. A skill
+			// of that name already here, from an earlier staging folder
+			// whose folder is gone, makes the install fail until it is
+			// taken out: said as what to do rather than as a bare refusal.
+			agents, ok, err := skillFromArgs(rest[1:])
+			if err != nil {
+				return err
+			}
+			if !ok {
+				return fmt.Errorf("usage: magpie library skill from <folder> [agents=a,b…]")
+			}
+			name := skillNameIn(rest[1])
+			if res, err = library.InstallSkillFromDir(rest[1], agents); err != nil {
+				if name != "" {
+					return fmt.Errorf("%w\n  magpie library skill rm %s  takes the one already here out, then this one installs", err, name)
+				}
+				return err
+			}
 		case len(rest) == 3 && rest[0] == "use-library":
 			res, err = library.UseLibrarySkill(rest[1], rest[2])
 		case len(rest) == 3 && rest[0] == "keep-own":
@@ -354,6 +376,42 @@ func agentList(s string) []string {
 		}
 	}
 	return out
+}
+
+// skillNameIn is the name a SKILL.md in dir gives its skill, or "" when it
+// can't be read: only for a message that says which skill is in the way.
+func skillNameIn(dir string) string {
+	b, err := os.ReadFile(filepath.Join(dir, "SKILL.md"))
+	if err != nil {
+		return ""
+	}
+	for _, line := range strings.Split(string(b), "\n") {
+		if name, ok := strings.CutPrefix(strings.TrimSpace(line), "name:"); ok {
+			return strings.TrimSpace(name)
+		}
+	}
+	return filepath.Base(dir)
+}
+
+// skillFromArgs reads a `library skill from` call's arguments after the
+// folder: at most one agents=a,b… word, "" for no agent. ok is false when
+// the words aren't that shape.
+func skillFromArgs(args []string) (agents []string, ok bool, err error) {
+	agents = []string{}
+	if len(args) > 2 {
+		return nil, false, nil
+	}
+	for _, word := range args[1:] {
+		value, isAgents := strings.CutPrefix(word, "agents=")
+		if !isAgents {
+			return nil, false, nil
+		}
+		agents, err = libraryAgents(value, "skills")
+		if err != nil {
+			return nil, false, err
+		}
+	}
+	return agents, true, nil
 }
 
 // libraryAgents is agentList with each agent's id, refused when the library

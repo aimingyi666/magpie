@@ -486,7 +486,18 @@ token 轮换/恢复和管理台员工产品流仍未实现；
 验收。Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把 M3-D
 运行时核心写成产品化或生产可用。
 
-### 4.6 员工端 Magpie 插件页（状态 + 立即同步：已实现）
+### 4.6 员工端 Magpie 插件页（状态 + 立即同步：已实现，legacy）
+
+> **状态：legacy。** `enterprise/magpie-plugin` 配套的是 `admin-service` +
+> `resource-service`：原生管理员视图、Ed25519 签名资源同步、`join-enterprise.ps1` 加入。
+> 自建控制面、用 `library` 下发指令/MCP/技能、并需要用量与脱敏回传的部署，用
+> [`corp-plugin/`](corp-plugin/README.md)，接口契约见
+> [`../devtools/corp-plugin-protocol.md`](../devtools/corp-plugin-protocol.md)。
+>
+> 2026-11-08：Providers 页的「企业下发供应商」面板已删除，`enterprise:providers`
+> 这一页面读能力从 `internal/plugin/page.go` 和 `internal/gui/pluginpage.go` 移除；
+> 它背后的 `/v1/enterprise/providers` 也一并删除，这是本插件唯一一个不需要页面令牌
+> 就应答的路由。
 
 `enterprise/magpie-plugin/` 在员工已有的 Magpie 侧边栏增加「企业」页。员工仍然安装同一份
 Magpie，**不需要单独的企业定制版客户端**。这一刀只覆盖员工端：
