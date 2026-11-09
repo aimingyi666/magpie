@@ -2952,6 +2952,19 @@ configs out of it:
 HOME=/tmp/magpie-home XDG_CONFIG_HOME=/tmp/magpie-home/.config make dev
 ```
 
+On Windows, `go run ./build/devwatch` (`make dev-windows`) does the same with a
+GUI build, so neither the windows nor the backend opens a command-line window.
+It starts the shell and the backend, and a Go change rebuilds the backend into
+a process that takes the old one's listening sockets — the gateway, the
+administration API, the backend API and the dev page — so a reply streaming
+through the dev gateway is not cut off. The backend being replaced keeps
+serving what it had and exits once that is done
+([`dev_handover_windows.go`](../internal/gui/dev_handover_windows.go),
+[`build/devwatch`](../build/devwatch/main.go)). The watcher gives the dev
+backend the administration API's own address (`DEV_ADMIN`, default
+`127.0.0.1:3451`) when `MAGPIE_ADMIN_TOKEN` is set, so it doesn't take the
+running magpie's port (`MAGPIE_ADMIN_ADDR`).
+
 `MAGPIE_THEME=light|dark` forces the palette and `MAGPIE_DEBUG=1` prints what the
 gateway translates.
 

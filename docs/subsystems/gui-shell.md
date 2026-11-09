@@ -718,10 +718,17 @@ between turns ends with the old process, and the next turn starts a new
 run as after any restart; the new one's start-up migrations run while the
 old one still serves its last requests.
 
-Windows has no SCM_RIGHTS for a listening socket in this form, and
-`magpie web` re-executes itself in place; both restart as before, waiting
-for the gateway to be idle (#577). `make dev` keeps its own handover, a
-new backend listening beside the old one (`gateway.Handover`, `devBackend`).
+Windows can't share a listening socket with `SO_REUSEPORT`, and `magpie web`
+re-executes itself in place; both restart as before, waiting for the gateway
+to be idle (#577). The Windows dev build has a handover of its own
+(`dev_handover_windows.go`, `build/devwatch`): the old backend starts its
+successor with the listening sockets in hand (a Winsock duplicate, inherited
+by the child), and the successor serves them with a blocking accept, because
+a socket cannot move from one process's I/O completion port to another. The
+gateway, the administration API, the backend API and the dev page stay bound;
+the old backend finishes what it took and exits. `make dev` on the other
+systems keeps its handover, a new backend listening beside the old one
+(`gateway.Handover`, `devBackend`).
 
 `magpie update` in a terminal restarts the app the same way
 (gaubeebangeel on X: an agent the gateway serves ran the update at 4am,

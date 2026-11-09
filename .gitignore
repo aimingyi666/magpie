@@ -7,6 +7,8 @@
 /magpie-dev-backend
 /magpie-dev.new
 /internal/update/launcher-*.com
+# build/devwatch's builds and the token it asks a restart with
+/.dev/
 
 # Local enterprise preview state: stores, usage ledgers and the preview
 # gateway's administration token. Never commit these.
