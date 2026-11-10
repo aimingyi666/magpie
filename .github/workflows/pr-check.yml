@@ -1,0 +1,68 @@
+name: PR check
+
+# A narrow run for a pull request's own packages, beside Test.yml's three-OS
+# matrix: this answers "did the four packages this change touches pass on
+# Linux" while that one answers "does magpie pass everywhere".
+#
+# It runs on a push to the branch, since a PR based on a branch other than
+# main doesn't start a pull_request run in this repository.
+on:
+  push:
+    branches:
+      - "feat/corp-client-and-server"
+  pull_request:
+    branches:
+      - "codex/m4-b-content-audit-core"
+  workflow_dispatch:
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  packages:
+    name: the packages this change touches
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      # the GUI links GTK 3 and WebKitGTK 4.1 through cgo (see the Makefile)
+      - name: Install GTK and WebKitGTK
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libgtk-3-dev libwebkit2gtk-4.1-dev pkg-config
+          echo "GTK installed in $SECONDS s"
+
+      - name: internal/library
+        run: go test -tags gtk3 ./internal/library/ -count=1
+
+      - name: internal/gateway
+        run: go test -tags gtk3 ./internal/gateway/ -count=1 -timeout 15m
+
+      - name: internal/plugin
+        run: go test -tags gtk3 ./internal/plugin/ -count=1 -timeout 10m
+
+      - name: internal/gui
+        run: go test -tags gtk3 ./internal/gui/ -count=1 -timeout 10m
+
+      - name: corp-server tests
+        run: |
+          cd enterprise/corp-server
+          node --test test/oidc.test.mjs
+          node --test test/server.test.mjs
+
+      - name: corp-plugin tests
+        run: |
+          cd enterprise/corp-plugin
+          node --test test/core.test.mjs
+          node --test test/service.test.mjs

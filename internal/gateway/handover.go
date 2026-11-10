@@ -175,6 +175,26 @@ func takeInheritedAdmin(addr string) net.Listener {
 	return ln
 }
 
+// Listener is the socket the gateway serves on, nil before it serves.
+// A dev restart duplicates it into the process that replaces this one
+// (internal/gui/dev_handover_windows.go).
+func (s *Server) Listener() net.Listener {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	if t, ok := s.ln.(*tlsListener); ok {
+		return t.Listener
+	}
+	return s.ln
+}
+
+// AdminListener is the socket the administration API serves on, nil when
+// it serves none.
+func (s *Server) AdminListener() net.Listener {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	return s.adminLn
+}
+
 // AdminAddr is where the administration listener serves, "" when it
 // serves nowhere.
 func (s *Server) AdminAddr() string {

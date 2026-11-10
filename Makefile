@@ -14,6 +14,12 @@ LDFLAGS  = -s -w -X main.version=$(VERSION)
 TAGS     = production
 TARGETS  = darwin/arm64 darwin/amd64 linux/amd64 linux/arm64 windows/amd64 windows/arm64 android/arm64
 
+# Windows links the desktop app as a GUI program: a console build opens a
+# command-line window on every start (make build, make install, make dev).
+ifeq ($(shell go env GOOS),windows)
+  GUILDFLAGS = -H windowsgui
+endif
+
 # The GUI links the platform webview through cgo, so it is built natively.
 # `nogui` builds the terminal-only magpie, which cross-compiles anywhere.
 # macOS 12 is the oldest Go (1.25 and later) runs on; Info.plist says so too.
@@ -32,16 +38,16 @@ ifeq ($(shell go env GOOS),android)
   TAGS = nogui
 endif
 
-.PHONY: build cli install test test-ui app icons release release-cli release-windows release-linux clean dev dev-once
+.PHONY: build cli install test test-ui app icons release release-cli release-windows release-linux clean dev dev-once dev-windows
 
 build:
-	go build -tags "$(TAGS)" -trimpath -ldflags="$(LDFLAGS)" -o magpie .
+	go build -tags "$(TAGS)" -trimpath -ldflags="$(LDFLAGS) $(GUILDFLAGS)" -o magpie .
 
 cli:
 	CGO_ENABLED=0 go build -tags nogui -trimpath -ldflags="$(LDFLAGS)" -o magpie .
 
 install:
-	go install -tags "$(TAGS)" -trimpath -ldflags="$(LDFLAGS)" .
+	go install -tags "$(TAGS)" -trimpath -ldflags="$(LDFLAGS) $(GUILDFLAGS)" .
 
 test:
 	go vet -tags "$(TAGS)" ./... && go test -tags "$(TAGS)" ./...
@@ -150,5 +156,12 @@ dev:
 	else $(MAKE) --no-print-directory dev-once; fi
 
 dev-once:
-	@go build -tags dev -o magpie-dev . && echo "  magpie-dev · UI from internal/gui/assets, reload on save · gateway $(DEV_ADDR)"
+	@go build -tags dev -ldflags="$(GUILDFLAGS)" -o magpie-dev . && echo "  magpie-dev · UI from internal/gui/assets, reload on save · gateway $(DEV_ADDR)"
 	@MAGPIE_ADDR=$(DEV_ADDR) MAGPIE_DEV_UI=$(DEV_UI) ./magpie-dev app
+
+# Windows: the same dev split as make dev, with a GUI build (no console
+# window) and a rebuilt backend that takes the old one's listening sockets,
+# so an agent streaming through the dev gateway is not cut off
+# (internal/gui/dev_handover_windows.go). Go changes rebuild themselves.
+dev-windows:
+	@go run ./build/devwatch
