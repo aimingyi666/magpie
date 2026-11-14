@@ -117,11 +117,37 @@ test("enrolling again replaces the device's key, and the old one stops working",
   assert.equal(fresh.status, 200);
 });
 
+test("a device refreshes its token, and the old one stops working", { skip: !HAVE_GATEWAY && "no gateway admin token" }, async () => {
+  const first = await enroll("unit-refresh@corp.example");
+  const refreshed = await call("/api/v1/device/refresh", {
+    method: "POST",
+    token: first.deviceToken,
+    body: { schemaVersion: 1, deviceToken: first.deviceToken },
+  });
+  assert.equal(refreshed.status, 200, JSON.stringify(refreshed.payload));
+  assert.equal(refreshed.payload.deviceId, first.deviceId);
+  assert.notEqual(refreshed.payload.deviceToken, first.deviceToken);
+  assert.ok(refreshed.payload.expiresAt);
+
+  const stale = await call("/api/v1/client/bundle", { token: first.deviceToken });
+  assert.equal(stale.status, 401, "the token before the refresh is no longer known");
+
+  const fresh = await call("/api/v1/client/bundle", { token: refreshed.payload.deviceToken });
+  assert.equal(fresh.status, 200);
+});
+
 test("a bad token is refused with a stable code", async () => {
   const r = await call("/api/v1/client/bundle", { token: "sk-magpie-key-not-real" });
   assert.equal(r.status, 401);
   assert.equal(r.payload.error.code, "invalid_device_token");
   assert.equal(r.payload.error.retryable, false);
+
+  const refresh = await call("/api/v1/device/refresh", {
+    method: "POST",
+    body: { schemaVersion: 1, deviceToken: "sk-magpie-key-not-real" },
+  });
+  assert.equal(refresh.status, 401);
+  assert.equal(refresh.payload.error.code, "invalid_device_token");
 });
 
 test("the bundle answers 304 for the revision it already gave", { skip: !HAVE_GATEWAY && "a sign-in needs a gateway" }, async () => {

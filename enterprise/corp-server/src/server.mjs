@@ -208,7 +208,7 @@ function sha256(value) {
 // In the demo mode there is no identity provider: the "code" is a demo
 // address, and this is refused unless CORP_ALLOW_DEMO_SIGNIN=true and no
 // client secret is set.
-async function exchangeCode(code, redirectUri, nonce) {
+async function exchangeCode(code, redirectUri, { nonce, codeVerifier } = {}) {
   if (!CONFIG.oidc.clientSecret) {
     if (!CONFIG.allowDemoSignIn) {
       throw new HttpError(501, "oidc_not_configured", "the identity provider is not set up: CORP_OIDC_CLIENT_SECRET is missing");
@@ -226,6 +226,7 @@ async function exchangeCode(code, redirectUri, nonce) {
     client_id: CONFIG.oidc.clientId,
     client_secret: CONFIG.oidc.clientSecret,
   });
+  if (codeVerifier) body.set("code_verifier", String(codeVerifier));
   let response;
   try {
     response = await fetch(new URL("/oauth2/token", CONFIG.oidc.issuer), {
@@ -250,7 +251,7 @@ async function exchangeCode(code, redirectUri, nonce) {
     claims = await verifyIdToken(said.id_token, {
       issuer: CONFIG.oidc.issuer,
       audience: CONFIG.oidc.clientId,
-      nonce: nonce === undefined ? undefined : String(nonce),
+      nonce: nonce == null || nonce === "" ? undefined : String(nonce),
       clockToleranceSeconds: CONFIG.oidc.clockToleranceSeconds,
     }, { keySet: keySetFor(CONFIG.oidc.issuer) });
   } catch (error) {
@@ -393,7 +394,10 @@ async function route(req, res, url) {
     const redirectUri = String(body.redirectUri || "");
     if (!code) throw new HttpError(400, "missing_code", "an authorization code is required");
 
-    const ident = await exchangeCode(code, redirectUri);
+    const ident = await exchangeCode(code, redirectUri, {
+      nonce: body.nonce,
+      codeVerifier: body.codeVerifier,
+    });
 
     // one person may have several devices; each gets its own key
     const userId = `usr_${sha256(ident.subject).slice(0, 20)}`;
@@ -433,6 +437,47 @@ async function route(req, res, url) {
       deviceToken: token,
       expiresAt,
       user: { id: userId, email: ident.email, name: ident.name, department: ident.groups[0] || "" },
+      gateway: { baseUrl: CONFIG.gatewayPublicUrl },
+      bundleRevision: state.bundleRevision,
+    });
+  }
+
+  // ---- a device refreshes its gateway key -----------------------------
+  if (req.method === "POST" && p === "/api/v1/device/refresh") {
+    const body = await readJson(req);
+    // Prefer the Authorization header; the body field is accepted for the
+    // protocol's documented shape and for clients that only send that.
+    const header = String(req.headers.authorization || "");
+    const fromHeader = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+    const token = fromHeader || String(body.deviceToken || "");
+    if (!token) throw new HttpError(401, "missing_device_token", "a device token is required");
+    // Look the device up without refusing an expired token: refresh is how
+    // an expired-but-known device gets a new key. A disabled one stays out.
+    const digest = sha256(token);
+    const device = Object.values(state.devices).find((d) => d.tokenDigest === digest);
+    if (!device) throw new HttpError(401, "invalid_device_token", "the device token is not known here");
+    if (device.state !== "active") throw new HttpError(403, "device_disabled", "this device has been revoked");
+    const user = state.users[device.userId];
+    if (!user) throw new HttpError(401, "not_enrolled", "this device has no user");
+
+    await revokeDeviceKey(device.gatewayKeyID);
+    const key = await issueDeviceKey({ deviceId: device.id, email: user.email, name: user.name });
+    const nextToken = key.secret;
+    const expiresAt = new Date(Date.now() + CONFIG.deviceTokenDays * 86400 * 1000).toISOString();
+    device.gatewayKeyID = key.keyID;
+    device.gatewayKeyDigest = key.digest;
+    device.tokenDigest = sha256(nextToken);
+    device.expiresAt = expiresAt;
+    user.lastSeenAt = new Date().toISOString();
+    saveState();
+    console.log(`corp: ${user.email} refreshed (${device.id}), gateway key ${key.keyID}`);
+
+    return send(res, 200, {
+      schemaVersion: 1,
+      deviceId: device.id,
+      deviceToken: nextToken,
+      expiresAt,
+      user: { id: user.id, email: user.email, name: user.name, department: user.groups?.[0] || "" },
       gateway: { baseUrl: CONFIG.gatewayPublicUrl },
       bundleRevision: state.bundleRevision,
     });

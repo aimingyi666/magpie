@@ -71,6 +71,7 @@ export function providerConfig(cfg, { provider, dir, config, store }) {
     cfg.provider[entry.id] = {
       name: entry.name || entry.id,
       npm: entry.npm || DEFAULT_NPM,
+      ...(base ? { api: String(base) } : {}),
       options: base ? { baseURL: String(base) } : {},
       models: modelsOf(entry, config),
     };

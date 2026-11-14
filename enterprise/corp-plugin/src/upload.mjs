@@ -105,7 +105,7 @@ export function readUsageRows(configDir, since = "", limit = MAX_ROWS) {
   readLines(file, (record) => {
     const row = toUsageRow(record);
     if (!row) return;
-    if (since && row.at <= since) return;
+    if (since && row.at < since) return;
     out.push(row);
   });
   out.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
@@ -128,7 +128,7 @@ export function readMaskingRows(configDir, since = "", limit = MAX_ROWS) {
     readLines(path.join(dir, name), (record) => {
       const row = toMaskingRow(record);
       if (!row?.at) return;
-      if (since && row.at <= since) return;
+      if (since && row.at < since) return;
       out.push(row);
     });
     if (out.length >= limit) break;

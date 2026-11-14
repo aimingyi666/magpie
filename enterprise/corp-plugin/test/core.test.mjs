@@ -104,7 +104,11 @@ test("the ledger is read from a cursor, oldest first, and a broken line skipped"
   const all = readUsageRows(dir, "");
   assert.equal(all.length, 2);
   assert.equal(all[0].at, "2026-11-08T00:01:00Z");
-  assert.equal(readUsageRows(dir, "2026-11-08T00:01:00Z").length, 1);
+  // A cursor is exclusive of earlier rows and inclusive of the same timestamp:
+  // the server dedupes by rowId, so a same-second row must not be dropped.
+  assert.equal(readUsageRows(dir, "2026-11-08T00:01:00Z").length, 2);
+  assert.equal(readUsageRows(dir, "2026-11-08T00:01:00Z")[0].at, "2026-11-08T00:01:00Z");
+  assert.equal(readUsageRows(dir, "2026-11-08T00:02:00Z").length, 1);
 });
 
 test("the bundle's provider is written as magpie's config", () => {
@@ -131,6 +135,7 @@ test("the bundle's provider is written as magpie's config", () => {
   assert.ok(cfg.provider.mine, "a provider the reader added by hand is never touched");
   assert.equal(cfg.provider.corp.name, "Corp Gateway");
   assert.equal(cfg.provider.corp.options.baseURL, "https://ai.corp.example/v1");
+  assert.equal(cfg.provider.corp.api, "https://ai.corp.example/v1");
   assert.deepEqual(Object.keys(cfg.provider.corp.models), ["kimi-k2.5"]);
   assert.deepEqual(saved.appliedProviders, ["corp"]);
   assert.equal(defaultModel({ providers: [{ id: "corp", models: ["a", "b"] }] }, "corp"), "corp/a");
@@ -155,8 +160,14 @@ test("resources land in magpie's library, and only what this plugin added is rem
     return { ok: true, code: "", message: "" };
   };
   const bundle = {
-    instructions: [{ id: "shared", content: "# Rules\n", agents: ["*"], shared: true }],
-    mcp: [{ name: "corp-kb", transport: "http", url: "https://mcp.corp.example/kb", agents: ["*"] }],
+    instructions: [{ id: "ins_corp", content: "# Rules\n", agents: ["*"] }],
+    mcp: [{
+      name: "corp-kb",
+      transport: "http",
+      url: "https://mcp.corp.example/kb",
+      headers: { Authorization: "Bearer corp" },
+      agents: ["*"],
+    }],
     skills: [{ name: "corp-report", agents: ["claude"], files: [{ path: "SKILL.md", content: "# Report\n" }] }],
   };
   const result = await applyResources(bundle, {
@@ -170,6 +181,10 @@ test("resources land in magpie's library, and only what this plugin added is rem
   assert.ok(calls.some((c) => c.startsWith("library instructions set")), "instructions go through the CLI");
   assert.ok(calls.some((c) => c === "library mcp rm gone-one"), "a withdrawn server this plugin added is removed");
   assert.ok(calls.some((c) => c.startsWith("library mcp add corp-kb https://mcp.corp.example/kb")), "a server is added with its agents");
+  assert.ok(
+    calls.some((c) => c.includes("header=Authorization:Bearer corp") && c.includes("agents=")),
+    "MCP headers go through as header=Name:value",
+  );
   assert.ok(
     calls.some((c) => c.startsWith("library skill from ") && c.endsWith("agents=claude")),
     "a skill is installed through the CLI from a staged folder, given to the agents the bundle names",

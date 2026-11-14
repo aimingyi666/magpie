@@ -60,9 +60,26 @@ export default async function corp(input, options = {}) {
           // A device that still works is handed over as it is, so signing
           // in from the page first makes this instant; otherwise the
           // browser flow runs here.
-          authorize: async () => ({ key: (await rt.joiner.current()).deviceToken }),
+          keyless: true,
+          authorize: async () => {
+            const device = await rt.joiner.current();
+            return {
+              type: "success",
+              // Stored as oauth so magpie's renew loop can call auth.refresh
+              // before expires. The device token is the gateway key: secretOf
+              // reads refresh/access for oauth accounts.
+              refresh: device.deviceToken,
+              access: device.deviceToken,
+              expires: Date.parse(device.expiresAt) || (Date.now() + 90 * 24 * 3600 * 1000),
+            };
+          },
         },
       ],
+      // magpie renews an oauth-shaped sign-in through this hook before
+      // expires. The corporate server rotates the gateway key and answers
+      // a fresh device token.
+      refresh: async (stored) => rt.joiner.refresh(stored),
+      refreshLead: 7 * 24 * 3600 * 1000,
     },
 
     // The provider's own name, base and models, read from the bundle the

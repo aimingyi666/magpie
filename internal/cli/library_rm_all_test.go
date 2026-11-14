@@ -110,3 +110,42 @@ func TestLibraryMCPAddNoAgents(t *testing.T) {
 		t.Fatalf("added to claude: %q", got)
 	}
 }
+
+// agents=* expands to every agent on this machine that takes MCP servers,
+// and header=Name:value is kept on a remote server.
+func TestLibraryMCPAddStarAndHeader(t *testing.T) {
+	h := t.TempDir()
+	for k, v := range map[string]string{"HOME": h, "USERPROFILE": h, "XDG_CONFIG_HOME": filepath.Join(h, ".config"), "CLAUDE_CONFIG_DIR": "", "CODEX_HOME": "", "APPDATA": "", "LOCALAPPDATA": ""} {
+		t.Setenv(k, v)
+	}
+	if err := os.MkdirAll(filepath.Join(h, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(h, ".claude/settings.json"), []byte("{}"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := libraryCmd([]string{"library", "mcp", "add", "corp-kb", "https://mcp.example.com/kb", "header=Authorization:Bearer x", "header=X-Corp:1", "agents=*"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v, err := library.Read(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got *library.Server
+	for i := range v.Servers {
+		if v.Servers[i].Name == "corp-kb" {
+			got = v.Servers[i].Server
+			break
+		}
+	}
+	if got == nil {
+		t.Fatal("corp-kb wasn't saved")
+	}
+	if got.Headers["Authorization"] != "Bearer x" || got.Headers["X-Corp"] != "1" {
+		t.Fatalf("headers: %#v", got.Headers)
+	}
+	if len(got.Agents) == 0 || !strings.Contains(strings.Join(got.Agents, ","), "claude") {
+		t.Fatalf("agents=* didn't expand: %#v", got.Agents)
+	}
+}
