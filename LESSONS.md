@@ -435,6 +435,21 @@ ok except gateway" stops being a normal run record.
   goes through would hold it.
 - Seen 2× (2026-10-16, 2026-10-17).
 
+**A quiet `go test ./...` log is not a hang until a package's own time
+says so.** go test prints packages in order, so one slow package holds
+back every line after it, and the log moves in bursts.
+- 705d67efc (11-15) called 0dbdc7481's macOS Test step hung: nothing
+  past internal/libc for 44 minutes. The next run was cancelled at 53
+  minutes for the same reason, and its log showed the step had just
+  finished. internal/library reported 264s but printed at 02:33, so it
+  had started 47 minutes into the step. The step was slow, not stuck
+  (#5267).
+- Before you cancel, compare the last burst's time with the reported
+  seconds of the packages that came before it. go 1.26 waits only 5s for
+  a test binary's pipes once the binary exits, so a lingering child
+  can't explain a silence.
+- Seen 1× (2026-11-15).
+
 **A suite's log is kept whole until its reds are named.**
 - 5b12407e8 (10-17) piped a full run through tail, lost which
   internal/gateway test failed at 2559s, and shipped with an unnamed red.
@@ -532,6 +547,25 @@ the panel and gateway mode.**
   and read the `pageerror` stack before calling a timeout load.
 - Seen 1× (2026-11-13).
 
+**A form's name and its control are lined up by the row, never by a
+padding guessed for one kind of control.** Every editor grid (`.editor`,
+a dialog's body, Advanced's rows, Connect) sets its rows on their first
+baseline; a control with no text of its own (a switch, the icon box)
+carries a text line at its middle. A row that starts with a text field
+is set at its top instead, its name on the field's line (`--field-h`):
+WebKit lays a baseline row out again on every layout, and a focused field
+laid out again scrolls the page back to itself. `form-align.test.cjs`
+measures every label beside its control, in every editor it opens.
+- The owner, 11-12, a second time: Free for me and Redaction sat 4-5px
+  under their ticks. Labels had `padding-top: 5px`, right for a 29px
+  input only; the icon row was 5px off, Extra body and every tick too.
+- A baseline row never takes its baseline from a scroller: at 520px
+  Connect's options wrap instead, since WebKit grew the row 6px each time
+  their scrollbar came and went.
+- A new kind of control in a form row runs form-align.test.cjs, and a new
+  editor is added to it.
+- Seen 1× (2026-11-12).
+
 **Playwright's WebKit is not WebKitGTK.** A GUI change with motion or a new
 browser API is tried in the real Linux app too.
 - 18e82adc6 (10-11) traded the layouts in a view transition. The GUI suite
@@ -626,6 +660,21 @@ checks the write.**
 - A cleanup that goes through the code under test inherits its guards.
   Restore with the bytes read before, or give the test its own HOME.
 - Seen 1× (2026-11-13).
+
+**A change to which tests share a process runs a pairing check on the
+package-global state they leave.**
+- 0dbdc7481 (11-15) ran internal/gateway's plain Test step in chunks as
+  Race does, green on mote's 12 workers. On CI the chunks held other
+  tests, and TestEffortChangeKeepsTheCache started held by a Codex
+  usage-limit rest that six tests left in restingUntil (#6717): its
+  helper set a home without fresh(t), and fresh only cleared rests at a
+  test's start. 6e0b8113d clears them at the end too, and in every
+  helper that sets a home itself; the six pairs were red before it.
+- A green split proves only that split. Run each test that records
+  package state with the one that reads it, in one process
+  (`-run '^(A|B)$'`), and clear the state in a t.Cleanup where it is
+  made.
+- Seen 1× (2026-11-15).
 
 **A value put in a request's context lives as long as anything that
 holds the context, a stopped timer included.**
@@ -1523,6 +1572,32 @@ each one.
     what the change touches (grep the tests for its selectors and
     words), not by name; and a red on main has a first bad commit,
     which `git bisect` finds faster than a list grows.
+  - A new API route runs internal/cli. 5bd41301b (warm-all) added
+    POST /api/warm-all and ran `-run 'WarmAll|WarmNow|...'` in
+    internal/provider only, so TestEveryRouteHasACommandOrIsNamed,
+    which names every route, was red on main from the push.
+    9cd5f3652 saw it an hour later and filed #6724 but shipped past
+    it; 72418591f named the route. A route, a setting or a command
+    reaches internal/cli's parity tests: run that package (43s).
+  - A size budget raised to fit, every day: coreScriptBudget rose 29
+    times from its reset at 8016205e3 (11-11) to b466aa280 (11-15),
+    +7,559 bytes, 12 raises on 11-13 alone, each "no page to move it
+    to". Recording each raise here hasn't slowed them; the bound needs
+    a rate the owner sets, or a raise that moves out as much (#2710).
+  - A "seen again" is still not work on it, a third time (#1794 on
+    10-12, #2444 on 10-17): #5052 (account-eye) had six comments, the
+    last naming the likely cause and "I'm not taking this", and 2e1c0a377
+    shipped past it and four usage-fold reds on #6003 the same way.
+    Instrumented, every red was a detached button; 17d230d65 fixed it
+    in one helper, 240 of 240 green in 8 parallel runs. When a comment
+    can name the cause, the fix is usually shorter than the comment.
+  - GUI tests in every file a change can reach, a guard red 14 days:
+    57246b381 (11-01) put an "All N accounts" strip over each Usage
+    card of several accounts and ran four GUI files, not usage-fold,
+    whose "most on one screen" guard fell from 15 to 11 that day. It
+    was filed on #6003 (11-10) and called "the same on main" for five
+    days; bisected on 11-15, nine steps on mica. A layout change runs
+    every file of its page.
 - **Done right on 10-17.** The retire stack (0f1666b38 to de671719a)
   diffed staticcheck's U1000 against its base for dead code, b98f906b1
   was red on the old code for an own-account gap, and 8 subscriptions

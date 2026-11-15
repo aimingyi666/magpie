@@ -79,7 +79,21 @@ function routingPage(part) {
   const top = el("div", "rt-top");
   const what = el("div", "rt-what");
   const mode = el("p", "rt-mode");
-  top.append(what, mode);
+  // how far the stage opens (openTo), picked at the head's end
+  const depthPick = el("button", "text rt-depth"), depthWord = el("span", "", t("Expand"));
+  depthPick.type = "button";
+  depthPick.id = "rtDepth";
+  depthPick.setAttribute("aria-haspopup", "menu");
+  depthPick.setAttribute("aria-expanded", "false");
+  depthWord.dataset.t = "";
+  depthWord.dataset.en = "Expand";
+  depthPick.dataset.tt = "Expand routes to";
+  depthPick.title = t("Expand routes to");
+  depthPick.innerHTML = '<svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m5 6 3-3 3 3M5 10l3 3 3-3"/></svg>';
+  depthPick.append(depthWord);
+  const topRow = el("div", "rt-toprow");
+  topRow.append(what, depthPick);
+  top.append(topRow, mode);
   const stage = el("div", "rt-stage");
   const wires = document.createElementNS(NS, "svg");
   wires.setAttribute("class", "rt-wires");
@@ -1812,10 +1826,49 @@ function routingPage(part) {
   const isOpen = (k, dflt) => keysShut.has(k) ? false : keysOpen.has(k) ? true : dflt;
   function keepOpen(k, open) {
     if (open) { keysOpen.add(k); keysShut.delete(k); } else { keysOpen.delete(k); keysShut.add(k); }
+    keepFolds();
+  }
+  function keepFolds() {
     try {
       localStorage.setItem("magpie.routingKeysOpen", JSON.stringify([...keysOpen]));
       localStorage.setItem("magpie.routingFolded", JSON.stringify([...keysShut]));
     } catch {}
+  }
+  // How far the stage opens (ipsikent on X: often only which model a
+  // route uses matters, not which provider's account): "" as above, long
+  // lists folded; "models" folds every provider's accounts and keys, two
+  // or more, into their one row; "accounts" opens each. Both open every
+  // group in the group. Picked from the
+  // stage head's Expand, kept in localStorage magpie.routingDepth. Picking
+  // one forgets what the reader opened or folded on the stage, so every
+  // row follows it at once; a row clicked after is kept as before.
+  const DEPTHS = [["", "Automatic", "Long lists start folded, short ones open"],
+    ["models", "Models", "A row for each provider's model, its accounts and keys folded into it"],
+    ["accounts", "Accounts", "A row for each account and key"]];
+  let openTo = "";
+  try { openTo = localStorage.getItem("magpie.routingDepth") || ""; } catch {}
+  if (!DEPTHS.some(([v]) => v === openTo)) openTo = "";
+  // a stage fold of n accounts (acct) or keys starts open?
+  const foldStartsOpen = (acct, n) => openTo === "accounts" || !openTo && acct && n < LONG;
+  // how many side by side fold: two already when only models are shown
+  const foldAt = () => openTo === "models" ? 2 : FOLD_AT;
+  {
+    depthPick.onclick = (e) => {
+      e.stopPropagation();
+      if (depthPick.classList.contains("open")) return closeProtoMenu();
+      openProtoMenu(depthPick, DEPTHS.map(([v, name, title]) => ({ v, name, note: "", title: t(title) })), openTo, (v) => {
+        openTo = v;
+        try { if (v) localStorage.setItem("magpie.routingDepth", v); else localStorage.removeItem("magpie.routingDepth"); } catch {}
+        // the stage's own: Accounts and keys' sums (provider/@, provider/*) stay
+        const own = (k) => !/\/[@*]$/.test(k);
+        keysOpen = new Set([...keysOpen].filter((k) => !own(k)));
+        keysShut = new Set([...keysShut].filter((k) => !own(k)));
+        keepFolds();
+        const rs = staged();
+        if (rs.length) steady(() => rebuild(rs, false));
+        render();
+      }, "Expand routes to", "rt-depth-menu", "right");
+    };
   }
   const agents = new Map(); // agent → { node, ic, name, sub, wire }
   let sets = [];            // the account sets on the stage, in the order they came
@@ -2822,10 +2875,10 @@ function routingPage(part) {
     const foldOf = new Map();
     let run = [];
     const flush = () => {
-      if (run.length >= FOLD_AT) {
+      if (run.length >= foldAt()) {
         const w = rows.get(run[0]).w, f = foldNode(foldKey(w, rows.get(run[0]).path), w), acct = w.kind === "account";
         f.ids = run;
-        shut(f, isOpen(f.pk, acct && run.length < LONG),
+        shut(f, isOpen(f.pk, foldStartsOpen(acct, run.length)),
           acct ? "Fold these accounts into one row" : "Fold these keys into one row", acct ? "Show each account" : "Show each key");
         for (const id of run) foldOf.set(id, f);
       }
@@ -2860,7 +2913,7 @@ function routingPage(part) {
           // a route's heading starts open, whatever its length: a second
           // agent coming shouldn't fold the first's rows away
           if (way) shut(s, isOpen(s.pk, true), "Fold this route into one row", "Show where this route goes");
-          else shut(s, isOpen(s.pk, under.get(key) < LONG), "Fold this group into one row", "Show what this group routes to");
+          else shut(s, isOpen(s.pk, openTo ? true : under.get(key) < LONG), "Fold this group into one row", "Show what this group routes to");
           els.push(s.li);
         }
         // folded: what it routes to is its heading's
@@ -4812,7 +4865,11 @@ function routingPage(part) {
   function cardFor(w) {
     if (w.kind !== "account" || !Array.isArray(quotas)) return null;
     const user = (w.who || "").trim().toLowerCase();
-    const mine = quotas.filter((q) => !q.from && q.kind === "subscription" && (q.provider === w.agent || q.provider === w.provider));
+    // this computer's own cards come with no kind (SubscriptionQuota.Kind
+    // is "" here, only a remote magpie's are told one), so asking for
+    // "subscription" matched none of them in the app (Sdsi134a on X: a
+    // fold of three accounts on one plan said nothing of what was left)
+    const mine = quotas.filter((q) => !q.from && (q.kind || "subscription") === "subscription" && (q.provider === w.agent || q.provider === w.provider));
     return mine.find((q) => (q.user || "").trim().toLowerCase() === user) || (mine.length === 1 && !mine[0].user ? mine[0] : null);
   }
   // cardError: why the Usage page could not read the account, when its
@@ -4823,6 +4880,11 @@ function routingPage(part) {
     const q = cardFor(w);
     return q && !cardOf(w) && q.error ? String(q.error) : "";
   }
+  // plansHidden: the groups page's Hide plans was clicked (kept in
+  // localStorage, so the Routing page's fold reads it too)
+  function plansHidden() {
+    try { return localStorage.getItem("magpie.routingGroupPlans") === "hidden"; } catch { return false; }
+  }
   // foldQuota: what a fold's accounts have left together, from the Usage
   // page's readings (mergeQuotas), as its strip of all of a provider's
   // accounts says it: only when every account in it was read, and all are
@@ -4830,8 +4892,10 @@ function routingPage(part) {
   // have is left out (mergeQuotas). The tightest window that says a share
   // is the figure and the bar; the rest, and when the first of them
   // starts again, are on hover. Null when nothing adds up.
+  // Hide plans on the groups page (magpie.routingGroupPlans) folds these
+  // away too: the user asked for no plans on this page
   function foldQuota(ms) {
-    if (ms.length < 2 || ms.some((m) => m.w.free)) return null;
+    if (ms.length < 2 || ms.some((m) => m.w.free) || plansHidden()) return null;
     const cards = ms.map((m) => cardOf(m.w));
     if (cards.some((q) => !q) || new Set(cards).size !== cards.length) return null;
     if (new Set(cards.map((q) => q.plan || "")).size > 1) return null;
@@ -4843,8 +4907,11 @@ function routingPage(part) {
     const top = bar || ws[0];
     const line = (w) => t(w.name) + " " + quotaText(w);
     const soon = ws.map((w) => w.firstReset).filter(Boolean).sort()[0];
+    // when the figure's window starts again, the soonest of the accounts',
+    // as an account's own row says it
+    const back = top.firstReset ? Date.parse(top.firstReset) - now() : 0;
     return {
-      text: line(top), bar,
+      text: line(top) + (back > 0 ? " · " + t("renews in {d}", { d: dur(back) }) : ""), bar,
       tip: tipLines(...ws.map(line),
         t(top.how === "p" ? "The mean of {n} accounts on one plan" : top.how === "u" ? "Unlimited on each of {n} accounts" : "Added up over {n} accounts", { n: top.accounts }),
         soon && t("The first of them starts again {when}", { when: resetClock(new Date(soon)) })),
@@ -6581,6 +6648,22 @@ function routingPage(part) {
     }
     return lines;
   }
+  // the quota lines folded away from every group, as kept in this window
+  // (Sdsi134a on X: with many plans the list grew long); shown, as before,
+  // until the toolbar's Hide plans is clicked
+  let gPlansHid = plansHidden();
+  function plansButton() {
+    const b = el("button", "text rt-gplans", t(gPlansHid ? "Show plans" : "Hide plans"));
+    b.type = "button";
+    b.title = t("What is left of each provider's accounts, under every group");
+    b.onclick = () => {
+      gPlansHid = !gPlansHid;
+      try { localStorage.setItem("magpie.routingGroupPlans", gPlansHid ? "hidden" : "shown"); } catch {}
+      b.textContent = t(gPlansHid ? "Show plans" : "Hide plans");
+      gList.classList.toggle("rt-noplans", gPlansHid);
+    };
+    return b;
+  }
   function drawGroups() {
     groupsQuotas = typeof quotas === "undefined" ? undefined : quotas;
     // the ones switched off are listed after the ones on, each part in the
@@ -6615,6 +6698,9 @@ function routingPage(part) {
     // in a click (provider.Templates). Cards while the user has no group of
     // their own, a menu by New group after
     const own = all.some((g) => !g.auto), tpls = groups.templates || [];
+    // shown when a group has a line to fold, after the rows are drawn
+    const plans = gSel ? null : plansButton();
+    if (plans) head.push(plans);
     if (!gSel) {
       if (own && tpls.length) head.push(templateButton(tpls));
       const imp = el("button", "text rt-gimportbtn", t("Import"));
@@ -6673,6 +6759,8 @@ function routingPage(part) {
       rows.push(h);
     }
     // the import box's text stays in the page as the list is drawn again
+    if (plans) plans.hidden = !rows.some((r) => r.querySelector?.(".rt-gquota"));
+    gList.classList.toggle("rt-noplans", gPlansHid);
     const was = slotsOf();
     replaceKeeping(gList, rows);
     morphSlots(was);
@@ -7744,7 +7832,7 @@ function routingPage(part) {
             fb.setAttribute("aria-pressed", String(on));
             // on a provider the user added (provider.OwnFast, #1615) it is
             // only asked for: magpie can't know the provider serves it
-            fb.title = ultra ? t("Sent Ultrafast where the account offers it, and fast where it doesn't, whatever the agent asks. Click to send it at the usual speed")
+            fb.title = ultra ? t(m.ownFast ? "Asked for service_tier \"ultrafast\" whatever the agent asks, where your provider serves it. One that turns it away is asked without it. Click to send it at the usual speed" : "Sent Ultrafast where the account offers it, and fast where it doesn't, whatever the agent asks. Click to send it at the usual speed")
               : m.ownFast
               ? (on ? t("Asked for OpenAI's fast mode (service_tier \"priority\") whatever the agent asks: quicker, at a higher price, where your provider serves it. One that turns it away is asked without it") : t("Sent as the agent asks; click to ask your provider for OpenAI's fast mode (service_tier \"priority\")"))
               : (on ? t(m.ultraOK ? "Sent in its vendor's fast mode whatever the agent asks: quicker, at a higher price. Click to send it Ultrafast, where the account offers it" : "Sent in its vendor's fast mode whatever the agent asks: quicker, at a higher price") : t("Sent at its vendor's usual speed; click to send it in fast mode"));

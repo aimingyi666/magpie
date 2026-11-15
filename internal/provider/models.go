@@ -1949,11 +1949,16 @@ func (p Provider) PicksOf(avail []catalog.Model) []string {
 // released up to the newest of them, and a model released after it is the
 // new one. A provider of keys has no such rule: its picks without
 // PickedFrom are served as they are (yuancjun: one old model picked of a
-// relay's ten served all ten).
+// relay's ten served all ten). A remote magpie's routing group made
+// there since is served beside any picks: picking some of its models
+// isn't leaving out the groups its user goes on making, and each one hid
+// until ticked by hand (KoiLx0 on X: office/group/opus missing from the
+// agents' picker). A group listed at Save and left unpicked stays out.
 func (p Provider) withNewlyListed(picks []string, avail []catalog.Model) []string {
 	if len(avail) == 0 {
 		return picks
 	}
+	remote := p.IsRemoteMagpie()
 	picked := make(map[string]bool, len(picks))
 	for _, id := range picks {
 		picked[id] = true
@@ -1985,15 +1990,23 @@ func (p Provider) withNewlyListed(picks []string, avail []catalog.Model) []strin
 		}
 		isNew = func(m catalog.Model) bool { return m.Released > newest }
 	}
-	var added []string
+	var added, groups []string
+	partial := false
 	for _, m := range avail {
 		if picked[m.ID] {
 			continue
 		}
 		if !isNew(m) {
-			return picks // one the user saw and left unpicked
+			partial = true // one the user saw and left unpicked
+			continue
 		}
 		added = append(added, m.ID)
+		if remote && strings.HasPrefix(m.ID, GroupPrefix) {
+			groups = append(groups, m.ID)
+		}
+	}
+	if partial {
+		added = groups
 	}
 	if len(added) == 0 {
 		return picks
@@ -2455,6 +2468,9 @@ func (p Provider) listPriceIn(c priceCats, model string) (catalog.Price, bool, i
 	if p.pluginFree(model) {
 		return catalog.Price{}, true, pricedOwn
 	}
+	if f, ok := mythosFable(model); ok {
+		return p.listPriceIn(c, f)
+	}
 	return catalog.Price{}, false, pricedOwn
 }
 
@@ -2783,6 +2799,9 @@ func MakerPrice(model string) (catalog.Price, bool) {
 		if pr, ok := makerListPrice(m); ok {
 			return pr, true
 		}
+	}
+	if f, ok := mythosFable(model); ok {
+		return MakerPrice(f)
 	}
 	return catalog.Price{}, false
 }
@@ -3254,6 +3273,22 @@ func pricedNamesTo(dst []string, model string) []string {
 	return out
 }
 
+// mythosFable is the Fable of a Mythos id's version (claude-mythos-5.2 ->
+// claude-fable-5.2), the price of a Mythos nothing prices
+// (shangyuan0818 on X): Anthropic gives Mythos 5.1 Fable 5.1's per-token
+// pricing and Mythos 5 Fable 5's, and models.dev's azure lists
+// claude-mythos-5 at claude-fable-5's. It is the last place looked, so a
+// price for the Mythos itself (a catalog's, what Anthropic told Claude
+// Code, a plugin's) always comes first.
+func mythosFable(model string) (string, bool) {
+	l := strings.ToLower(strings.TrimSpace(model))
+	i := strings.Index(l, "claude-mythos-")
+	if i < 0 {
+		return "", false
+	}
+	return l[:i] + "claude-fable-" + l[i+len("claude-mythos-"):], true
+}
+
 // PricedName is the catalog ID used for a list-price estimate. Prefer a
 // directly listed model before falling back to a documented alias.
 func PricedName(model string) string {
@@ -3261,6 +3296,11 @@ func PricedName(model string) string {
 	for _, name := range n {
 		if _, ok := makerListPrice(name); ok {
 			return name
+		}
+	}
+	if f, ok := mythosFable(model); ok {
+		if _, ok := MakerPrice(f); ok {
+			return PricedName(f)
 		}
 	}
 	return n[len(n)-1]

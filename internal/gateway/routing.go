@@ -939,9 +939,40 @@ func liftRests(agent, user string, vendorTill bool) {
 	}
 }
 
+// creditsKnown lifts the rests out of its allowance of a ChatGPT account
+// found to go on past it on credits (provider.OnCredits), whatever time
+// the refusal named: a turn turned away before magpie knew of the credits
+// — bought once the plan ran out, or its reading failed or not come yet —
+// rested the account until its window renewed, days on, while Codex by
+// itself goes on on them (@123xtv03k on X). A rate limit's rest, or one
+// out of the credits themselves, stands; so does Codex's own hold of a
+// relayed turn for them.
+func creditsKnown(agent, user string) {
+	if agent != "codex" {
+		return
+	}
+	restingUntil.Lock()
+	now := time.Now()
+	for k, r := range restingUntil.note {
+		if r.agent != agent || !strings.EqualFold(r.user, user) || !(r.Why == failQuota || r.By == "window") {
+			continue
+		}
+		delete(restingUntil.m, k)
+		delete(restingUntil.note, k)
+		liftedLocked(k, now)
+	}
+	restingUntil.Unlock()
+	codexHolds.Lock()
+	if h, ok := codexHolds.m[strings.ToLower(user)]; ok && h.why == failQuota {
+		delete(codexHolds.m, strings.ToLower(user))
+	}
+	codexHolds.Unlock()
+}
+
 func init() {
 	provider.OnRenewed(renewed)
 	provider.OnStarted(restarted)
+	provider.OnCredits(creditsKnown)
 }
 
 // staleAllowance is provider.StaleAllowance, swapped in tests.
@@ -994,8 +1025,8 @@ func narrowWhenRead(c candidate, r Rest) {
 var (
 	keyAllowance      = provider.KeyAllowance
 	staleKeyAllowance = provider.StaleKeyAllowance
-	// remoteAllowance is provider.RemoteAllowance, swapped in tests
-	remoteAllowance = provider.RemoteAllowance
+	// remoteSeat is provider.RemoteSeat, swapped in tests
+	remoteSeat = provider.RemoteSeat
 )
 
 // RestOf is why what rests by key — a provider's id, or its id#key — is
@@ -2446,6 +2477,10 @@ func (c candidate) allowanceKey() allowanceKey {
 
 type left struct {
 	used float64
+	// freePlan: a Remote magpie's member whose card is of an account
+	// signed in to a free plan there (provider.RemoteSeat); this
+	// magpie's own accounts are told by Account.Plan
+	freePlan bool
 	// weekLow: used is at lowShare or more for its budget windows alone,
 	// no rate cap of it near full (Allowance.CapUsed, routes.Seat.WeekLow)
 	weekLow bool
@@ -2560,7 +2595,7 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 	wg.lefts = map[allowanceKey]left{}
 	for _, c := range cs {
 		var a provider.Allowance
-		var ok bool
+		var ok, free bool
 		whose := c.p.ID // whose wallet a balance is in
 		m := c.model    // the model as its allowance counts it
 		if c.p.IsRemoteMagpie() {
@@ -2568,7 +2603,7 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 			// model there, as last read from it (#6708, zzh11223311 on X);
 			// read again in the background only when there is another to
 			// weigh it against
-			a, m, ok = remoteAllowance(c.p, c.model, len(cs) > 1)
+			a, m, free, ok = remoteSeat(c.p, c.model, len(cs) > 1)
 		} else if c.p.Account == nil {
 			// a key that reads its own windows is weighed by them as an
 			// account is; any other key isn't known
@@ -2596,6 +2631,7 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 				// provider's in the same unit (routes.Seat.LeftIn)
 				l.bal, l.balUnit, l.balIn = b, bu, whose+"\x00"+bu
 			}
+			l.freePlan = free
 			wg.lefts[c.allowanceKey()] = l
 		}
 	}
@@ -2645,7 +2681,7 @@ func weighRouted(p provider.Provider, cs []candidate, model string, from provide
 		}
 		wg.expires = map[string]time.Time{}
 		for i, c := range cs {
-			seats[i].FreePlan = c.p.Account != nil && provider.FreePlan(c.p.Account.Plan)
+			seats[i].FreePlan = c.p.Account != nil && provider.FreePlan(c.p.Account.Plan) || wg.lefts[c.allowanceKey()].freePlan
 			if seats[i].FreePlan {
 				wg.free[c.rest] = true
 			}
