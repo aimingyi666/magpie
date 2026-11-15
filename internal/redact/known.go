@@ -252,6 +252,8 @@ func standsAlone(kind, s string, a, b int) bool {
 			return false
 		}
 		return after != '.' || b+1 >= len(s) || !is(s[b+1], digits)
+	case "USERNAME":
+		return nameAlone(s, a, b)
 	case "EMAIL":
 		if is(before, alnum+"._%+-") || is(after, alnum+"_%+") {
 			return false
@@ -375,4 +377,5 @@ func resetSent() {
 	sentMemo.Lock()
 	defer sentMemo.Unlock()
 	sentMemo.cur, sentMemo.old = nil, nil
+	resetKept()
 }

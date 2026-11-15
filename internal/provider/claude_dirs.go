@@ -283,6 +283,7 @@ func claudeSavedDir(user string) (string, error) {
 		return "", errors.New(why)
 	}
 	if has {
+		claudeOnboarded(dir, nil)
 		return dir, nil
 	}
 	c, _ := parseClaudeCredentials(ls[i].Auth)
@@ -293,19 +294,136 @@ func claudeSavedDir(user string) (string, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return "", err
 	}
+	// the sign-in that was there is out first, so the one the saved login
+	// has is the directory's only holder: an older one left in the
+	// directory's keychain item would shadow the fresh file on a Mac, and
+	// be read back over it the next look. Nothing there, this removes
+	// nothing.
+	clearClaudeDir(dir)
 	if err := writePrivate(filepath.Join(dir, ".credentials.json"), append(b, '\n')); err != nil {
 		return "", err
 	}
 	// who it is, as Claude Code keeps it beside a sign-in it made
+	var acct map[string]any
+	if len(ls[i].Profile) > 0 && json.Unmarshal(ls[i].Profile, &acct) != nil {
+		acct = nil
+	}
+	claudeOnboarded(dir, acct)
+	return dir, nil
+}
+
+// claudeOnboarded marks Claude Code's onboarding done in config directory
+// dir's .claude.json, as Claude Code does once a person has gone through
+// it. Without the mark its interactive mode starts on its first-run
+// screens, and from 2.1.316 on one that asks for a login method beside a
+// sign-in that works (Jaxxxxnn on X), which a run can only end on. A
+// directory -p alone ran in, or one made before magpie wrote the mark,
+// has a .claude.json without it, so the mark is added to what is there,
+// every other key kept. A new file gets the account's profile (acct) too.
+// A file that can't be read or parsed, which Claude Code may be writing,
+// is left as it is.
+func claudeOnboarded(dir string, acct map[string]any) {
 	profile := filepath.Join(dir, ".claude.json")
-	if _, err := os.Stat(profile); os.IsNotExist(err) && len(ls[i].Profile) > 0 {
-		var acct map[string]any
-		if json.Unmarshal(ls[i].Profile, &acct) == nil {
-			pb, _ := json.MarshalIndent(map[string]any{"oauthAccount": acct, "hasCompletedOnboarding": true}, "", "  ")
-			_ = writePrivate(profile, append(pb, '\n'))
+	b, err := os.ReadFile(profile)
+	if os.IsNotExist(err) {
+		m := map[string]any{"hasCompletedOnboarding": true}
+		if acct != nil {
+			m["oauthAccount"] = acct
+		}
+		pb, _ := json.MarshalIndent(m, "", "  ")
+		_ = writePrivate(profile, append(pb, '\n'))
+		return
+	}
+	if err != nil {
+		return
+	}
+	var m map[string]any
+	d := json.NewDecoder(bytes.NewReader(b))
+	d.UseNumber() // Claude Code's numbers go back as they were written
+	if d.Decode(&m) != nil || m == nil {
+		return
+	}
+	if done, _ := m["hasCompletedOnboarding"].(bool); done {
+		return
+	}
+	m["hasCompletedOnboarding"] = true
+	pb, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return
+	}
+	_ = writePrivate(profile, append(pb, '\n'))
+}
+
+// claudeTrustMu keeps two runs' ClaudeTrustFolder from writing one
+// .claude.json at once.
+var claudeTrustMu sync.Mutex
+
+// ClaudeTrustFolder records, in saved account config directory dir, that
+// Claude Code may work in magpie's own folder, which keys names as Claude
+// Code keys its projects (2.1.316: the folder's path, on Windows with
+// forward slashes, "C:/Users/<me>/AppData/Local/Temp/magpie-claude-work"),
+// as Claude Code itself records it once the trust question is answered
+// yes. On mydosu's Windows (#4830) a saved account's directory had no
+// such entry, and every /usage read of that account waited out its time
+// on the question.
+// Only a directory of magpie's saved accounts is written, never the
+// user's own ~/.claude.json; every other key is kept, and a file that
+// can't be read or parsed, which Claude Code may be writing, is left as it
+// is.
+func ClaudeTrustFolder(dir string, keys ...string) error {
+	root := filepath.Clean(claudeDirsRoot())
+	dir = filepath.Clean(dir)
+	if rel, err := filepath.Rel(root, dir); err != nil || rel == "." || strings.HasPrefix(rel, "..") || strings.ContainsAny(rel, `/\`) {
+		return fmt.Errorf("%s is not a saved Claude account's folder", dir)
+	}
+	claudeTrustMu.Lock()
+	defer claudeTrustMu.Unlock()
+	profile := filepath.Join(dir, ".claude.json")
+	m := map[string]any{}
+	b, err := os.ReadFile(profile)
+	switch {
+	case os.IsNotExist(err):
+	case err != nil:
+		return err
+	default:
+		d := json.NewDecoder(bytes.NewReader(b))
+		d.UseNumber() // Claude Code's numbers go back as they were written
+		if err := d.Decode(&m); err != nil || m == nil {
+			return fmt.Errorf("%s can't be read: %v", profile, err)
 		}
 	}
-	return dir, nil
+	projects, ok := m["projects"].(map[string]any)
+	if !ok {
+		if _, there := m["projects"]; there {
+			return fmt.Errorf("%s has projects that aren't an object", profile)
+		}
+		projects = map[string]any{}
+	}
+	changed := false
+	for _, k := range keys {
+		if k == "" {
+			continue
+		}
+		p, ok := projects[k].(map[string]any)
+		if !ok {
+			p = map[string]any{}
+		}
+		if t, _ := p["hasTrustDialogAccepted"].(bool); t {
+			continue
+		}
+		p["hasTrustDialogAccepted"] = true
+		projects[k] = p
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	m["projects"] = projects
+	pb, err := json.MarshalIndent(m, "", "  ")
+	if err != nil {
+		return err
+	}
+	return writePrivate(profile, append(pb, '\n'))
 }
 
 // syncClaudeDir brings the saved Claude login l up to what Claude Code
@@ -317,6 +435,17 @@ func syncClaudeDir(l *savedLogin) (has, changed bool, err error) {
 	c, ok := readClaudeDir(claudeAccountDir(l.User))
 	switch {
 	case ok:
+		// a directory sign-in older than the saved one (#6391): the
+		// directory was made again behind a switch (#4750) and the holder
+		// the agent itself runs on refreshed meanwhile, so the directory's
+		// is spent. Taking it would replace the fresh sign-in with the
+		// spent one, and the next refresh in the directory would empty it,
+		// the account signed out. has=false has claudeSavedDir make the
+		// directory from the saved one instead, as when it holds none.
+		if old, ook := parseClaudeCredentials(l.Auth); ook && old.OAuth.ExpiresAt > 0 &&
+			c.OAuth.ExpiresAt > 0 && c.OAuth.ExpiresAt < old.OAuth.ExpiresAt {
+			return false, false, nil
+		}
 		changed, err = takeClaudeDir(l, c)
 		return true, changed, err
 	case c.cleared():
@@ -338,7 +467,7 @@ func takeClaudeDir(l *savedLogin, c claudeCredentials) (bool, error) {
 	}
 	l.Auth = b
 	if c.OAuth.SubscriptionType != "" {
-		l.Plan = c.OAuth.SubscriptionType
+		l.Plan = c.OAuth.plan()
 	}
 	l.Renewed = time.Now().UTC().Truncate(time.Second)
 	l.Lapsed, l.Refused = "", ""

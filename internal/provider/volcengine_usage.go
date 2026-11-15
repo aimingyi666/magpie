@@ -110,7 +110,10 @@ func volcPlanQuotas(ctx context.Context) []SubscriptionQuota {
 			continue
 		}
 		if p.AccessKeyID == "" || p.SecretAccessKey == "" {
-			keyless = append(keyless, job{p, action, plan, region})
+			// a custom provider is asked for none (AsksAccessKey)
+			if AsksAccessKey(p) != "" {
+				keyless = append(keyless, job{p, action, plan, region})
+			}
 			continue
 		}
 		keyed[action] = true
@@ -177,9 +180,10 @@ func volcPlanQuota(ctx context.Context, p Provider, action, plan, region string)
 	return q
 }
 
-// volcHead is the head of a reply, for a card to say what was answered.
+// volcHead is the head of a reply, for a card to say what was answered,
+// its secrets taken out (QuotedReply).
 func volcHead(raw []byte) string {
-	s := strings.TrimSpace(string(raw))
+	s := strings.TrimSpace(QuotedReply(raw))
 	if len(s) > 300 {
 		s = s[:300] + "…"
 	}
@@ -249,7 +253,7 @@ func volcOpenAPICall(ctx context.Context, ak, sk, region, action string, now tim
 	req.Header.Set("X-Content-Sha256", contentSHA)
 	req.Header.Set("Authorization", auth)
 	req.Header.Set("Accept", "application/json")
-	res, err := http.DefaultClient.Do(req)
+	res, err := Keyed(http.DefaultClient).Do(req)
 	if err != nil {
 		return nil, err
 	}

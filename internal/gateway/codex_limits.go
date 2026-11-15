@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/provider"
@@ -37,6 +38,7 @@ func heardCodexLimits(p provider.Provider, res *http.Response) {
 	}
 	agent, user := p.Account.UsageAgent(), p.Account.User
 	now := time.Now()
+	noteCodexAnswered(agent, user, now)
 	if ls := codexHeaderLimits(res.Header, now); len(ls) > 0 {
 		noteCodexLimits(agent, user, ls)
 	}
@@ -47,13 +49,51 @@ func heardCodexLimits(p provider.Provider, res *http.Response) {
 	}
 }
 
+// codexLearnAgain is how long a Codex account not known that answered is
+// not put first again to be learned (learns): its reply told nothing of
+// the week, or the reading still fails.
+const codexLearnAgain = time.Hour
+
+// codexAnswered is when each Codex account last answered, by
+// agent/lower-cased user.
+var codexAnswered = struct {
+	sync.Mutex
+	m map[string]time.Time
+}{m: map[string]time.Time{}}
+
+func noteCodexAnswered(agent, user string, now time.Time) {
+	codexAnswered.Lock()
+	codexAnswered.m[agent+"/"+strings.ToLower(user)] = now
+	codexAnswered.Unlock()
+}
+
+// codexAnsweredLately: user answered within codexLearnAgain of now.
+func codexAnsweredLately(agent, user string, now time.Time) bool {
+	codexAnswered.Lock()
+	at, ok := codexAnswered.m[agent+"/"+strings.ToLower(user)]
+	codexAnswered.Unlock()
+	return ok && now.Sub(at) < codexLearnAgain
+}
+
 // codexHeaderLimits are the windows the x-codex-primary-* and
 // x-codex-secondary-* headers tell; one that doesn't say how long it runs
-// is left out, as no window read can be told to be it.
+// is left out, as no window read can be told to be it. None when
+// x-codex-active-limit names the image allowance, whose window they then
+// are (codexImageHeaderLimit).
 func codexHeaderLimits(h http.Header, now time.Time) []provider.CodexLimit {
+	if imageLimitName(h.Get("x-codex-active-limit")) {
+		// the x-codex-* windows are the image allowance's (#6412)
+		return nil
+	}
+	return headerLimitsOf(h, "x-codex-", now)
+}
+
+// headerLimitsOf are the windows of the header family fam (x-codex-,
+// x-imagegen-premium-) tells: its primary- and secondary- ones.
+func headerLimitsOf(h http.Header, fam string, now time.Time) []provider.CodexLimit {
 	var out []provider.CodexLimit
 	for _, which := range []string{"primary", "secondary"} {
-		pre := "x-codex-" + which + "-"
+		pre := fam + which + "-"
 		used, err := strconv.ParseFloat(strings.TrimSpace(h.Get(pre+"used-percent")), 64)
 		if err != nil {
 			continue
@@ -66,7 +106,7 @@ func codexHeaderLimits(h http.Header, now time.Time) []provider.CodexLimit {
 		if at, err := strconv.ParseInt(strings.TrimSpace(h.Get(pre+"reset-at")), 10, 64); err == nil && at > 0 {
 			l.Resets = time.Unix(at, 0)
 		} else if after, err := strconv.ParseInt(strings.TrimSpace(h.Get(pre+"reset-after-seconds")), 10, 64); err == nil && after > 0 {
-			l.Resets = now.Add(time.Duration(after) * time.Second)
+			l.Resets = onWall(now.Add(time.Duration(after) * time.Second))
 		}
 		out = append(out, l)
 	}
@@ -106,7 +146,7 @@ func codexEventLimits(data []byte, now time.Time) []provider.CodexLimit {
 		if w.ResetAt > 0 {
 			l.Resets = time.Unix(w.ResetAt, 0)
 		} else if w.ResetAfter > 0 {
-			l.Resets = now.Add(time.Duration(w.ResetAfter) * time.Second)
+			l.Resets = onWall(now.Add(time.Duration(w.ResetAfter) * time.Second))
 		}
 		out = append(out, l)
 	}
@@ -141,7 +181,7 @@ func (t *codexLimitsTap) look() {
 		line := bytes.TrimSpace(t.buf[:i])
 		t.buf = t.buf[i+1:]
 		data, ok := bytes.CutPrefix(line, []byte("data:"))
-		if !ok || !bytes.Contains(data, []byte(`"codex.rate_limits"`)) {
+		if !ok || !bodyHas(data, `"codex.rate_limits"`) {
 			continue
 		}
 		if ls := codexEventLimits(bytes.TrimSpace(data), time.Now()); len(ls) > 0 {

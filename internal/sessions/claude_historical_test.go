@@ -49,12 +49,13 @@ func TestHistoricalClaudeFilesDoNotDisplaceActiveWindows(t *testing.T) {
 				}
 			}
 			read()
+			saved() // the marker below is written on a parse a save may be encoding
 			before := map[string]os.FileInfo{}
 			for _, path := range []string{claude, codex} {
 				if cache[path].revisionWeight() == 0 {
 					t.Fatal("history displaced active summary", path)
 				}
-				cache[path].Named = "incremental marker"
+				cache[path].own().Named = "incremental marker"
 				st, err := os.Stat(callCachePath(path))
 				if err != nil {
 					t.Fatal(err)
@@ -66,7 +67,7 @@ func TestHistoricalClaudeFilesDoNotDisplaceActiveWindows(t *testing.T) {
 				appendText(t, codex, tokenCountLine(i+2, cxUse(100*(i+2), 0, 0, i+2, 0), cxUse(100, 0, 0, 1, 0))+"\n")
 				read()
 				for _, path := range []string{claude, codex} {
-					if cache[path].Named != "incremental marker" {
+					if cache[path].more().Named != "incremental marker" {
 						t.Fatal("reparsed active summary", path)
 					}
 					st, err := os.Stat(callCachePath(path))
@@ -111,7 +112,7 @@ func TestIdleWindowsYieldToRecentWork(t *testing.T) {
 	}
 	// A ten-minute pause is still in the working set. Cost outranks the eight
 	// newer tiny transcripts, so this does not restore the five-minute cliff.
-	candidates = []revisionCandidate{{path: "large", mod: now.Add(-2 * revisionIdle).UnixNano(), size: 1 << 30, weight: claudeRevisionEntries, bounded: true}}
+	candidates = []revisionCandidate{{path: "large", mod: now.Add(-10 * time.Minute).UnixNano(), size: 1 << 30, weight: claudeRevisionEntries, bounded: true}}
 	for i := 0; i < revisionFiles; i++ {
 		candidates = append(candidates, revisionCandidate{path: fmt.Sprint("small-", i), mod: now.UnixNano(), size: 1024, weight: 2, bounded: true})
 	}

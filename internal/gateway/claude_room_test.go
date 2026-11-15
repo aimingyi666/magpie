@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"sync"
@@ -343,6 +344,28 @@ func TestClaudeMemRunsUnknownBoundsNothing(t *testing.T) {
 	}
 }
 
+// A test's root is not this computer, even one naming this computer's
+// system: holding nothing, it leaves memory unknown to every reader that
+// falls back on the computer's memory. The computer's memory stood in for
+// such a root, so each read the test machine's (#5118: a Codex turn's
+// limit on an "unknown" machine was 998 MiB on ubuntu CI, 1994 MiB on WSL).
+func TestAFixtureRootIsNotThisComputer(t *testing.T) {
+	oldGOOS, oldRoot := memGOOS, memRoot
+	memGOOS, memRoot = runtime.GOOS, t.TempDir()
+	t.Cleanup(func() { memGOOS, memRoot = oldGOOS, oldRoot })
+	if n, why := bodyRoomSize(); n != 0 {
+		t.Errorf("body room %d MiB (%s), want none", n>>20, why)
+	}
+	runBudget.Once = sync.Once{}
+	t.Cleanup(func() { runBudget.Once = sync.Once{} })
+	if n, why := claudeRunBudget(); n != claudeRunUnknown {
+		t.Errorf("run budget %d MiB (%s), want the unknown %d MiB", n>>20, why, claudeRunUnknown>>20)
+	}
+	if n := codexBodyLimit(); n != defaultBodyLimit {
+		t.Errorf("Codex turn limit %d MiB, want %d MiB", n>>20, defaultBodyLimit>>20)
+	}
+}
+
 // The user's claudeRunsMost wins over what the memory holds.
 func TestClaudeRunsMostTheUsersOwn(t *testing.T) {
 	testenv.SetHome(t, t.TempDir())
@@ -422,4 +445,61 @@ func TestClaudeNoRoomPassesOnAndRestsNobody(t *testing.T) {
 		t.Fatalf("alone, asked %d times: %+v", len(tries), tries)
 	}
 	noneRested(t, "claude")
+}
+
+// A lead conversation waiting on its subagents' Task calls holds a Claude
+// Code doing nothing, and each subagent needs one of its own: once the
+// lead has waited roomParkLongest, a subagent waiting for room has its
+// place, well before parkLongest and claudeRoomWait. Kept until
+// parkLongest, the lead held the room while its subagents waited 2
+// minutes and were answered 503 (Wing8Aqua on X). A lead parked less
+// than that keeps its run.
+func TestClaudeRoomLetsALeadWaitingOnSubagentsGo(t *testing.T) {
+	fakeClaudeCalling(t)
+	freshRoom(t, 1)
+	oldWait, oldLook, oldPark := claudeRoomWait, roomLook, roomParkLongest
+	roomLook = 20 * time.Millisecond
+	t.Cleanup(func() { claudeRoomWait, roomLook, roomParkLongest = oldWait, oldLook, oldPark })
+
+	t.Run("parked past roomParkLongest", func(t *testing.T) {
+		claudeRoomWait = 30 * time.Second // parkLongest's 5 minutes would run past it
+		roomParkLongest = 100 * time.Millisecond
+		s := New()
+		t.Cleanup(s.subscription.abortAll)
+		lead := askForCall(t, s, context.Background(), "lead: start three subagents")
+		if lead == 0 {
+			return
+		}
+		began := time.Now()
+		sub := askForCall(t, s, context.Background(), "subagent 1: read the code")
+		if sub == 0 {
+			return
+		}
+		if waited := time.Since(began); waited > 15*time.Second {
+			t.Fatalf("the subagent waited %s for room", waited)
+		}
+		if leftover([]int{lead}, 3*time.Second) != 0 {
+			t.Fatal("the lead's Claude Code still runs beside the subagent's, 1 may")
+		}
+	})
+	t.Run("parked a moment", func(t *testing.T) {
+		claudeRoomWait = 300 * time.Millisecond
+		roomParkLongest = time.Hour
+		s := New()
+		t.Cleanup(s.subscription.abortAll)
+		lead := askForCall(t, s, context.Background(), "lead: read a file")
+		if lead == 0 {
+			return
+		}
+		p := provider.Provider{ID: "claude", Account: &provider.Account{Agent: "claude", User: "u"}}
+		body := `{"model":"claude-sonnet-5","max_tokens":100,"messages":[{"role":"user","content":"another conversation"}]}`
+		var u Usage
+		code, msg := s.serveClaudeSubscription(httptest.NewRecorder(), httptest.NewRequest("POST", "/v1/messages", strings.NewReader(body)), provider.Anthropic, p, "claude-sonnet-5", []byte(body), &u)
+		if code != 503 || !strings.Contains(msg, claudeNoRoomSaid) {
+			t.Fatalf("%d %s", code, msg)
+		}
+		if !alive(lead) {
+			t.Fatal("a run waiting on a tool call made a moment ago was let go")
+		}
+	})
 }

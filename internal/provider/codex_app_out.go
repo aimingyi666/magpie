@@ -39,12 +39,14 @@ var codexRecheck struct {
 // for tests.
 var codexReadNow = func(user string) {
 	StaleAllowance("codex", user)
+	// what the sync last went by, before this read changes it
+	known := CodexUsedUpKnown()
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 	defer cancel()
 	if _, err := SwitchWhenSpent(ctx, "codex"); err != nil {
 		log.Printf("codex: switching to an account with room: %v", err)
 	}
-	noteCodexUsedUp(CodexUsedUp(ctx))
+	noteCodexUsedUp(known, CodexUsedUp(ctx))
 }
 
 // CodexMayBeUsedUp is a reply's word that user's ChatGPT account may be
@@ -74,4 +76,26 @@ func CodexMayBeUsedUp(user string) {
 	c.at = time.Now()
 	c.Unlock()
 	go codexReadNow(active)
+}
+
+// CodexServesWhileOut says magpie has something to serve Codex's own
+// model on while the ChatGPT account Codex is signed in to is out: the
+// Codex subscription's fallbacks, set in magpie, or another of its
+// ChatGPT accounts not known out or lapsed. With neither, every turn
+// magpie took over would be refused on that same account, so taking over
+// would only hide the account and its reset from the app and restart the
+// app's app-server twice (xiaoq6285 on Discord, one Plus account).
+func CodexServesWhileOut(model string) bool {
+	if model == "" {
+		return false
+	}
+	if p, _, ok := Resolve("codex/" + model); ok && p.Account != nil && p.Account.Agent == "codex" && len(FallbackModels(p)) > 0 {
+		return true
+	}
+	for _, l := range Logins("codex") {
+		if !l.Active && l.Lapsed == "" && !codexHeldKnown(l.User) {
+			return true
+		}
+	}
+	return false
 }
