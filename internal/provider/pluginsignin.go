@@ -46,10 +46,12 @@ func StartPluginSignInWith(id string, method int, inputs map[string]string, o Si
 		return SignInState{}, err
 	}
 	signIns.Lock()
-	for sid, o := range signIns.m {
-		if o.st.Agent == s.st.Agent {
-			o.finish(SignInState{State: "canceled"})
-			delete(signIns.m, sid)
+	if !o.Concurrent {
+		for sid, other := range signIns.m {
+			if other.st.Agent == s.st.Agent {
+				other.finish(SignInState{State: "canceled"})
+				delete(signIns.m, sid)
+			}
 		}
 	}
 	signIns.m[s.st.ID] = s

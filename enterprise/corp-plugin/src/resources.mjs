@@ -24,7 +24,11 @@ function cleanName(value) {
 
 function agentsOf(value) {
   const list = Array.isArray(value) ? value : [];
-  const ids = list.map((v) => String(v || "").trim()).filter(Boolean);
+  // "*" / "all" mean every agent. magpie's CLI has no such token: omitting
+  // agents= is what gives a server or skill to everyone, so treat them as none.
+  const ids = list
+    .map((v) => String(v || "").trim())
+    .filter((id) => id && id !== "*" && id.toLowerCase() !== "all");
   return ids.length ? ids.join(",") : "none";
 }
 
@@ -136,9 +140,8 @@ export async function applyResources(bundle, { configDir, magpieBin, dir = "", a
   // --- instructions -----------------------------------------------------
   const instructions = (Array.isArray(bundle?.instructions) ? bundle.instructions : [])
     .filter((item) => item && item.enabled !== false && typeof item.content === "string");
-  const shared = instructions.filter((item) => item.shared === true || item.id === "shared");
-  if (shared.length) {
-    const body = shared.map((item) => item.content).join("\n\n");
+  if (instructions.length) {
+    const body = instructions.map((item) => item.content).join("\n\n");
     const file = path.join(configDir, "corp-instructions.md");
     try {
       fs.mkdirSync(configDir, { recursive: true, mode: 0o700 });
@@ -146,7 +149,7 @@ export async function applyResources(bundle, { configDir, magpieBin, dir = "", a
       const result = await call(["library", "instructions", "set", file]);
       if (result.ok) {
         next.instructions.push("shared");
-        const agents = agentsOf(shared[0].agents);
+        const agents = agentsOf(instructions[0].agents);
         if (agents !== "none") await call(["library", "instructions", "agents", agents]);
       } else {
         errors.push({ code: result.code, message: `instructions: ${result.message}` });
@@ -172,7 +175,16 @@ export async function applyResources(bundle, { configDir, magpieBin, dir = "", a
       errors.push({ code: "mcp_incomplete", message: `${server.name}: no url or command` });
       continue;
     }
-    const result = await call(["library", "mcp", "add", server.name, ...spec, `agents=${agentsOf(server.agents)}`]);
+    const headers = [];
+    if (server.headers && typeof server.headers === "object" && !Array.isArray(server.headers)) {
+      for (const [name, value] of Object.entries(server.headers)) {
+        const key = String(name || "").trim();
+        if (!key) continue;
+        headers.push(`header=${key}:${String(value ?? "")}`);
+      }
+    }
+    const agents = agentsOf(server.agents);
+    const result = await call(["library", "mcp", "add", server.name, ...spec, ...headers, ...(agents === "none" ? [] : [`agents=${agents}`])]);
     if (result.ok) next.mcp.push(server.name);
     else errors.push({ code: result.code, message: `${server.name}: ${result.message}` });
   }

@@ -182,14 +182,14 @@ func gatewayKeysToInput(out io.Writer, args []string, input io.Reader) error {
 		}
 		return w.Flush()
 	}
-	in := access.Change{Key: args[1]}
+	change := access.Change{Key: args[1]}
 	if action == "rotate" {
-		in.Secret = own
+		change.Secret = own
 	}
 	if action == "add" {
-		in = access.Change{Name: args[1], Secret: own, ReadOnly: readOnly}
+		change = access.Change{Name: args[1], Secret: own, ReadOnly: readOnly}
 	}
-	secret, err := access.Update(action+"-key", in)
+	secret, err := access.Update(action+"-key", change)
 	if err != nil {
 		return err
 	}
@@ -708,6 +708,68 @@ func gatewayKeyAccounts(out io.Writer, args []string) error {
 		shown = "only " + shown
 	}
 	_, err = fmt.Fprintf(out, "%s: %s\n", k.Name, shown)
+	return err
+}
+
+// gatewayKeyDescribeJSON is the read-only machine protocol:
+//
+//	magpie gateway-key describe <id> --json
+func gatewayKeyDescribeJSON(out io.Writer, args []string) error {
+	usage := fmt.Errorf("usage: magpie gateway-key describe <id> --json")
+	asJSON := slices.Contains(args, "--json")
+	if len(args) != 2 || args[1] != "--json" {
+		if asJSON {
+			return gatewayKeyMachineError(out, usage)
+		}
+		return usage
+	}
+	d, err := access.DescribePolicy(args[0])
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	return gatewayKeyMachineDescribe(out, d)
+}
+
+// gatewayKeyPolicyJSON atomically replaces a key's models and limits:
+//
+//	magpie gateway-key policy apply <id> --json < policy.json
+func gatewayKeyPolicyJSON(out io.Writer, args []string, in io.Reader) error {
+	usage := fmt.Errorf("usage: magpie gateway-key policy apply <id> --json")
+	asJSON := slices.Contains(args, "--json")
+	if len(args) != 3 || args[0] != "apply" || args[2] != "--json" {
+		if asJSON {
+			return gatewayKeyMachineError(out, usage)
+		}
+		return usage
+	}
+	policy, err := access.DecodePolicyApply(in)
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	d, err := access.ApplyPolicy(args[1], policy)
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	return gatewayKeyMachineDescribe(out, d)
+}
+
+func gatewayKeyMachineDescribe(out io.Writer, d access.PolicyDescribe) error {
+	b, err := access.MarshalPolicyDescribe(d)
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	_, err = fmt.Fprintf(out, "%s\n", b)
+	return err
+}
+
+func gatewayKeyMachineError(out io.Writer, err error) error {
+	b, encodeErr := access.MarshalPolicyFailure(err)
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if _, writeErr := fmt.Fprintf(out, "%s\n", b); writeErr != nil {
+		return writeErr
+	}
 	return err
 }
 
@@ -1270,67 +1332,5 @@ func gatewayKeyOIDC(out io.Writer, args []string) error {
 		return err
 	}
 	_, err = fmt.Fprintf(out, "OIDC rule %s: a token from %s with audience %s and %d claim(s) matched gets a key issued under %s, living up to %s.\nPOST it to /v1/magpie/keys/oidc as Authorization: Bearer <token>.\n", r.ID, r.Issuer, r.Audience, len(r.Claims), r.Key, r.Lifetime())
-	return err
-}
-
-// gatewayKeyDescribeJSON is the read-only C4 machine protocol:
-//
-//	magpie gateway-key describe <id> --json
-func gatewayKeyDescribeJSON(out io.Writer, args []string) error {
-	usage := fmt.Errorf("usage: magpie gateway-key describe <id> --json")
-	asJSON := slices.Contains(args, "--json")
-	if len(args) != 2 || args[1] != "--json" {
-		if asJSON {
-			return gatewayKeyMachineError(out, usage)
-		}
-		return usage
-	}
-	d, err := access.DescribePolicy(args[0])
-	if err != nil {
-		return gatewayKeyMachineError(out, err)
-	}
-	return gatewayKeyMachineDescribe(out, d)
-}
-
-// gatewayKeyPolicyJSON atomically replaces a key's models and limits:
-//
-//	magpie gateway-key policy apply <id> --json < policy.json
-func gatewayKeyPolicyJSON(out io.Writer, args []string, in io.Reader) error {
-	usage := fmt.Errorf("usage: magpie gateway-key policy apply <id> --json")
-	asJSON := slices.Contains(args, "--json")
-	if len(args) != 3 || args[0] != "apply" || args[2] != "--json" {
-		if asJSON {
-			return gatewayKeyMachineError(out, usage)
-		}
-		return usage
-	}
-	policy, err := access.DecodePolicyApply(in)
-	if err != nil {
-		return gatewayKeyMachineError(out, err)
-	}
-	d, err := access.ApplyPolicy(args[1], policy)
-	if err != nil {
-		return gatewayKeyMachineError(out, err)
-	}
-	return gatewayKeyMachineDescribe(out, d)
-}
-
-func gatewayKeyMachineDescribe(out io.Writer, d access.PolicyDescribe) error {
-	b, err := access.MarshalPolicyDescribe(d)
-	if err != nil {
-		return gatewayKeyMachineError(out, err)
-	}
-	_, err = fmt.Fprintf(out, "%s\n", b)
-	return err
-}
-
-func gatewayKeyMachineError(out io.Writer, err error) error {
-	b, encodeErr := access.MarshalPolicyFailure(err)
-	if encodeErr != nil {
-		return encodeErr
-	}
-	if _, writeErr := fmt.Fprintf(out, "%s\n", b); writeErr != nil {
-		return writeErr
-	}
 	return err
 }

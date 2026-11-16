@@ -29,6 +29,9 @@ import (
 // the actions that move, restart or rewrite an agent. Setting a key's
 // Admin ("admin-key") is left out so that a key can't give another more
 // than it was given: only the command line and the app do.
+//
+// Importing a sign-in is served ("plugin-import"), the other way round: it
+// takes a secret and keeps it, and tells none back.
 type adminRoute struct {
 	pattern string // "GET /providers": the method, and the path under AdminPath
 	to      string // the app's route under /api it is served by, "" for the same path
@@ -45,6 +48,8 @@ var adminRoutes = []adminRoute{
 	{pattern: "GET /signin/{id}"},
 	{pattern: "POST /signin/{id}/cancel"},
 	{pattern: "POST /signin/{id}/callback"},
+	{pattern: "POST /plugin-signin"},
+	{pattern: "POST /plugin-import"},
 	{pattern: "GET /gateway-keys", to: "/caller-keys"},
 	{pattern: "GET /gateway-keys/models", to: "/caller-keys/models"},
 	{pattern: "GET /gateway-keys/account-windows", to: "/caller-keys/account-windows"},

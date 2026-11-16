@@ -819,10 +819,6 @@ var WhileServing []func(context.Context)
 func (s *Server) ListenAndServe(ctx context.Context) error {
 	migrateLANKeyBestEffort()
 	ScopeOwnBrowserKey()
-	cfg, err := serverTLS()
-	if err != nil {
-		return err
-	}
 	// The enterprise administration listener is bound before the gateway
 	// is: an address that cannot be taken is a startup failure, not a
 	// gateway that runs with no way for an administrator to reach it.
@@ -835,14 +831,15 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 		return err
 	}
 	if adminLn != nil {
-		s.lnMu.Lock()
-		s.adminLn = adminLn
-		s.lnMu.Unlock()
 		go func() {
 			if err := s.serveAdminOn(ctx, adminLn, adminCfg); err != nil {
 				log.Printf("magpie administration API: %v", err)
 			}
 		}()
+	}
+	cfg, err := serverTLS()
+	if err != nil {
+		return err
 	}
 	s.lnMu.Lock()
 	s.tls = cfg

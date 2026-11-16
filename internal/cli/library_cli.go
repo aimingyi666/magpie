@@ -486,6 +486,29 @@ func skillFromArgs(args []string) (agents []string, ok bool, err error) {
 // libraryAgents is agentList with each agent's id, refused when the library
 // has no place in it for kind.
 func libraryAgents(s, kind string) ([]string, error) {
+	if strings.TrimSpace(s) == "*" {
+		out := []string{}
+		for _, t := range library.Targets() {
+			switch kind {
+			case "instructions":
+				if t.Instructions == "" {
+					continue
+				}
+			case "mcp":
+				if t.MCP == nil {
+					continue
+				}
+			case "skills":
+				if t.Skills == "" {
+					continue
+				}
+			default:
+				return nil, fmt.Errorf("unknown kind %q", kind)
+			}
+			out = append(out, t.Agent.ID)
+		}
+		return out, nil
+	}
 	out := []string{}
 	for _, a := range agentList(s) {
 		id, err := library.Takes(a, kind)

@@ -31,7 +31,9 @@ export async function pkce() {
 export function openBrowser(url, { platform = process.platform, spawnFn = spawn } = {}) {
   try {
     if (platform === "win32") {
-      spawnFn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsVerbatimArguments: true }).unref?.();
+      // the URL is quoted for cmd: an unquoted "&" in a query string would
+      // end the command, and the browser would open a truncated address
+      spawnFn("cmd", ["/c", "start", "", `"${url}"`], { detached: true, stdio: "ignore", windowsVerbatimArguments: true }).unref?.();
     } else if (platform === "darwin") {
       spawnFn("open", [url], { detached: true, stdio: "ignore" }).unref?.();
     } else {
@@ -63,6 +65,7 @@ export function createJoiner({ config, store, dir }) {
     }
     const { verifier, challenge } = await pkce();
     const state = randomToken(24);
+    const nonce = randomToken(24);
     const redirectUri = `http://127.0.0.1:${config.servicePort}/oidc/callback`;
     const authority = config.oidc;
     if (!authority?.authorizationEndpoint || !authority?.clientId) {
@@ -74,6 +77,7 @@ export function createJoiner({ config, store, dir }) {
     url.searchParams.set("redirect_uri", redirectUri);
     url.searchParams.set("scope", (authority.scopes || ["openid", "profile", "email"]).join(" "));
     url.searchParams.set("state", state);
+    url.searchParams.set("nonce", nonce);
     url.searchParams.set("code_challenge", challenge);
     url.searchParams.set("code_challenge_method", "S256");
     if (authority.acrValues) url.searchParams.set("acr_values", authority.acrValues);
@@ -98,6 +102,7 @@ export function createJoiner({ config, store, dir }) {
       };
     });
     pending = { state, verifier, redirectUri, promise, settle };
+    pending.nonce = nonce;
 
     if (!openBrowser(url.toString())) {
       settle?.reject?.(new CorpError("no_browser", `Open this address to sign in: ${url.toString()}`));
@@ -124,7 +129,12 @@ export function createJoiner({ config, store, dir }) {
       return { ok: false, code: "no_code", message: "The identity provider sent no code" };
     }
     try {
-      const device = await enroll({ code, codeVerifier: pending.verifier, redirectUri: pending.redirectUri });
+      const device = await enroll({
+        code,
+        codeVerifier: pending.verifier,
+        redirectUri: pending.redirectUri,
+        nonce: pending.nonce,
+      });
       store.saveDevice(device);
       pending.settle.resolve(device.deviceToken);
       return { ok: true, device };
@@ -135,7 +145,7 @@ export function createJoiner({ config, store, dir }) {
     }
   }
 
-  async function enroll({ code, codeVerifier, redirectUri }) {
+  async function enroll({ code, codeVerifier, redirectUri, nonce }) {
     const api = client("");
     const { payload } = await api.request("/api/v1/device/enroll", {
       method: "POST",
@@ -145,6 +155,7 @@ export function createJoiner({ config, store, dir }) {
         code,
         codeVerifier,
         redirectUri,
+        ...(nonce ? { nonce } : {}),
         device: {
           name: hostName(),
           platform: process.platform,
@@ -166,6 +177,23 @@ export function createJoiner({ config, store, dir }) {
     };
   }
 
+  // demoSignIn enrolls without a browser when the server published
+  // demoSignIn. The "code" is demo:<email>; production refuses this the
+  // moment a client secret is configured.
+  async function demoSignIn(email, { admin = false } = {}) {
+    const address = String(email || "").trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) {
+      throw new CorpError("demo_email_invalid", "Use an email like someone@corp.example");
+    }
+    const device = await enroll({
+      code: `${admin ? "demo-admin" : "demo"}:${address}`,
+      codeVerifier: "",
+      redirectUri: `http://127.0.0.1:${config.servicePort}/oidc/callback`,
+    });
+    store.saveDevice(device);
+    return device;
+  }
+
   // current answers the device in use, signing in first when there is
   // none that still works.
   async function current() {
@@ -173,6 +201,54 @@ export function createJoiner({ config, store, dir }) {
     if (deviceUsable(device)) return device;
     const token = await signIn();
     return store.device() || { deviceToken: token };
+  }
+
+  // refresh asks the corporate server for a new gateway key and keeps the
+  // device record. Magpie calls this with the oauth-shaped sign-in it
+  // stored from authorize; the answer is the fields to keep over it.
+  async function refresh(stored) {
+    const token = String(stored?.refresh || stored?.access || store.device()?.deviceToken || "");
+    if (!token) {
+      const err = new CorpError("not_enrolled", "No device token to refresh");
+      err.signIn = "expired";
+      throw err;
+    }
+    const api = client(token);
+    let payload;
+    try {
+      ({ payload } = await api.request("/api/v1/device/refresh", {
+        method: "POST",
+        token,
+        body: { schemaVersion: 1, deviceToken: token },
+      }));
+    } catch (error) {
+      if (error instanceof CorpError && (error.code === "device_token_expired" || error.code === "invalid_device_token" || error.status === 401)) {
+        error.signIn = "expired";
+      }
+      throw error;
+    }
+    if (!payload || typeof payload.deviceToken !== "string" || !payload.deviceToken) {
+      throw new CorpError("bad_refresh", "The server refreshed this device without a token");
+    }
+    const previous = store.device() || {};
+    const device = {
+      ...previous,
+      deviceId: String(payload.deviceId || previous.deviceId || ""),
+      deviceToken: payload.deviceToken,
+      expiresAt: String(payload.expiresAt || ""),
+      refreshAfter: String(payload.refreshAfter || ""),
+      user: payload.user || previous.user || null,
+      gateway: payload.gateway || previous.gateway || null,
+      enrolledAt: previous.enrolledAt || new Date().toISOString(),
+    };
+    store.saveDevice(device);
+    const expires = Date.parse(device.expiresAt);
+    return {
+      type: "success",
+      refresh: device.deviceToken,
+      access: device.deviceToken,
+      expires: Number.isFinite(expires) ? expires : Date.now() + 90 * 24 * 3600 * 1000,
+    };
   }
 
   function status() {
@@ -184,11 +260,16 @@ export function createJoiner({ config, store, dir }) {
       email: device?.user?.email || "",
       name: device?.user?.name || "",
       department: device?.user?.department || "",
+      groups: Array.isArray(device?.user?.groups) ? device.user.groups : [],
+      role: device?.user?.role || "member",
+      gateway: device?.gateway?.baseUrl || "",
+      enrolledAt: device?.enrolledAt || "",
+      refreshAfter: device?.refreshAfter || "",
       expiresAt: device?.expiresAt || "",
     };
   }
 
-  return { signIn, handleCallback, current, status };
+  return { signIn, demoSignIn, handleCallback, current, refresh, status };
 }
 
 function hostName() {

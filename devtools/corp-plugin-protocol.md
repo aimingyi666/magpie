@@ -183,11 +183,38 @@
       "files": [{ "path": "SKILL.md", "content": "…" }],
       "agents": ["*"], "enabled": true
     }
+  ],
+  "plugins": [
+    {
+      "id": "cursor-bridge",            // 只能是插件已知的 id，见下
+      "name": "Cursor · Magpie Bridge",
+      "model": "corp/kimi-k2.5",        // 这个 agent 接入的模型
+      "enabled": true,
+      "required": true
+    }
   ]
 }
 ```
 
 `agents` 用 magpie 的 agent id（`claude`、`codex`、`opencode`…），`["*"]` 表示全部。
+
+`plugins` 是**给这台设备**的插件清单，不是全公司清单：服务端按人/组决定谁收到哪几条，同一个
+`revision` 下不同设备可以拿到不同的 `plugins`。客户端只认白名单里的 `id`
+（当前只有 `cursor-bridge`），**服务端给的 `spec` / 包名一律忽略**——安装源写死在插件里，
+这样即使 bundle 被篡改也不能让员工机执行任意包。`cursor-bridge` 会：
+
+1. `magpie plugin add` 安装（已装则跳过；被关掉则 `magpie plugin on`）；
+2. `magpie cursor-bridge <model>` 把 Cursor 指向本机 magpie 网关；
+3. 策略撤回后执行 `magpie cursor-bridge default` 断开，但**不卸载**插件。
+
+`model` 可以是完整的 magpie 模型 id（如 `corp/kimi-k2.5`），也可以只是企业 provider 下的
+裸模型名（如 `kimi-k2.5`，等价于 `corp/kimi-k2.5`）；留空则用 provider 的 `defaultModel`。
+`required` 目前不影响行为，留给页面展示。
+
+**和 `304` 的关系：** 策略是按设备算的，但每次改动（启用、换人、换模型、撤回）都要发布
+**新的 `revision`**，否则设备拿着旧 revision 会收到 `304`，永远看不到撤回。只要 revision
+随策略一起变，`304` 仍然可以只看设备自己的 revision：它上一次拿到的就是它该有的。
+参考实现（`corp-server/src/server.mjs`）用一个 `bumpRevision()` 同时服务分享变更和插件策略。
 
 ### 3.4 上传（三条通道，独立开关、独立游标）
 
@@ -244,6 +271,69 @@
   `sessions` 数组（由该批 `rows` 按 `sessionId` 聚合而成：轮数、模型、token、错误数），
   服务端没有 session id 时直接忽略。单独的 `/telemetry/sessions` 是留给"只补会话、
   不重发用量"的场合，客户端 v1 不发。
+
+### 3.5 员工共享自己的订阅账号（WorkBuddy）
+
+企业网关装了对应插件时，员工可以把自己的订阅扫码登录进网关，模型随之进入企业供应商。
+v1 只开放 WorkBuddy（`workbuddy` 国内版、`workbuddy-ai` 国际版）。
+
+```jsonc
+// POST /api/v1/share/workbuddy/start        (deviceToken)
+{ "provider": "workbuddy" }                 // 缺省 workbuddy；另一值是 workbuddy-ai
+
+// 200
+{ "schemaVersion": 1,
+  "share": { "id": "shr_…", "provider": "workbuddy",
+             "providerName": "WorkBuddy（国内版）",
+             "state": "waiting",             // waiting | done | failed | canceled
+             "url": "https://copilot.tencent.com/login?state=…",
+             "account": "", "models": [], "error": "",
+             "createdAt": "…", "updatedAt": "…", "completedAt": "" },
+  "instructions": "扫描页面上的二维码登录 WorkBuddy" }
+
+// GET /api/v1/share/workbuddy/{id}          (deviceToken) —— 轮询同一个形状
+// POST /api/v1/share/workbuddy/{id}/cancel  (deviceToken) —— 取消，回同一个形状
+
+// POST /api/v1/share/workbuddy/import       (deviceToken)
+// 本机 magpie 已经登录过的账号，不再扫码，直接把那份登录交给企业网关
+{ "provider": "workbuddy",
+  "account": "138****1234",
+  "auth": { "type": "oauth", "accountId": "138****1234",
+            "access": "…", "refresh": "…", "expires": 1770000000000 } }
+
+// 200 —— 和 start 完成后同一个 share 形状，外加
+{ "schemaVersion": 1,
+  "share": { "id": "shr_…", "state": "done", "account": "138****1234", "models": ["…"] },
+  "removed": true }
+```
+
+规则：
+
+- 服务端向网关管理 API 发 `plugin-signin`（`method: 0`、`concurrent: true`），拿到插件的
+  登录页交给员工；腾讯/WorkBuddy 页面自己显示二维码，控制面**不生成二维码，也不接触 token**。
+- `done` 时服务端读一次该供应商的模型（`on !== false` 的那些）并记入
+  `state.workbuddy.imported`；**导入不等于下发**。
+- 管理员用 `GET /api/v1/admin/workbuddy` 读账号与模型，再用
+  `PUT /api/v1/admin/workbuddy` 勾选要下发的模型（`{"provider":"workbuddy","models":[…]}`，
+  只接受该账号列出的模型）。分享模式为 `native`/`remote` 时发布新 `revision`；
+  `off`/未设置时只保存勾选，等管理员开启分享。
+- `GET /api/v1/device/me` 额外返回 `workbuddy.shares[]`（本设备最近 10 条），供页面刷新后
+  恢复轮询。share 只属于发起它的设备，别人的 id 一律 404。
+- 网关没装插件时 `plugin-signin` 回 400；控制面转成 `409 workbuddy_unavailable`，页面提示
+  联系管理员，不重试。
+- `import` 是给「本机 magpie 里已经登录」的人用的：`auth` 就是本机 `plugin-auth.json`
+  里的那一条（含 access / refresh），本机服务读文件、上传，控制面转发给网关的
+  `POST /v1/magpie/admin/plugin-import`，由网关插件写进自己的账号表。控制面只在请求里
+  见到它一次：**不写 state、不回显、不写日志**；`state.workbuddy.imported` 只记账号名。
+  `removed: true` 表示本机那份登录已经在网关收下之后退出（由本机服务的插件客户端做），
+  这样同一个 token 只有一处会去续期；网关拒绝时本机登录保持不动。
+- 只接受 `auth.type === "oauth"`，provider 只接受 `workbuddy` / `workbuddy-ai`；其余 422。
+  导入同样不等于下发：管理员勾选前它不开任何模型。
+
+客户端可以在 `GET /v1/status` 里带上本机 `plugin-auth.json` 中已登录的 WorkBuddy
+账号名（`localWorkbuddy`），用于在页面上列出「本机已登录」的账号并逐个提供「导入」。
+这个状态只带账号名，永远不带 token；token 只在一次 `import` 请求里，从本机服务直接
+发往企业网关，之后本机退出该账号。
 
 ## 4. 客户端本地状态
 

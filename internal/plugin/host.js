@@ -1238,15 +1238,37 @@ function accountKey(provider, account) {
   return accountsOf(readAuth(), provider)[0] ?? provider
 }
 
+// signingKeys are the keys sign-ins in progress have taken and not saved
+// yet, by when they were taken: two people signing in to one provider at
+// once (a corporate gateway's shared WorkBuddy accounts) take two
+// accounts, not one. A sign-in canceled before it saved its account holds
+// one no longer than a sign-in may last, so a key left behind is free
+// again rather than for the host's life.
+const SIGN_IN_KEY_HOLD = 15 * 60 * 1000
+const signingKeys = new Map()
+
 // freshKey is where a new sign-in to provider goes: its own id while that
-// is free.
+// is free, and not taken by another sign-in on its way.
 function freshKey(provider) {
   const all = readAuth()
-  if (!(provider in all)) return provider
+  const now = Date.now()
+  for (const [k, at] of signingKeys) {
+    if (now - at > SIGN_IN_KEY_HOLD) signingKeys.delete(k)
+  }
+  const free = (k) => !(k in all) && !signingKeys.has(k)
+  if (free(provider)) return provider
   for (;;) {
     const k = provider + "#" + Math.random().toString(36).slice(2, 8)
-    if (!(k in all)) return k
+    if (free(k)) return k
   }
+}
+
+// reserveKey is a new account's key, held for the sign-in until it saves
+// the account (freeKey): freshKey is read again only once that write lands.
+function reserveKey(provider) {
+  const key = freshKey(provider)
+  signingKeys.set(key, Date.now())
+  return key
 }
 
 // inScope runs fn for provider's account key. had is whether the account
@@ -2754,15 +2776,23 @@ function validate(provider, index, key, value) {
 // that one). It gives the provider and where the account is kept.
 async function save(provider, key, result, inputs, apiKey, method) {
   const id = result.provider ?? provider
-  if (id !== provider) key = freshKey(id)
-  if ("refresh" in result) {
-    const { type: _t, provider: _p, refresh, access, expires, ...extra } = result
-    await setAuth(key, { type: "oauth", refresh, access, expires, ...extra })
-  } else if ("key" in result || apiKey) {
-    const md = { ...plainAnswers(provider, method, inputs), ...(result.metadata ?? {}) }
-    await setAuth(key, { type: "api", key: result.key ?? apiKey, ...(Object.keys(md).length ? { metadata: md } : {}) })
+  let took = false
+  if (id !== provider) {
+    key = reserveKey(id)
+    took = true
   }
-  return { provider: id, account: await settle(id, key) }
+  try {
+    if ("refresh" in result) {
+      const { type: _t, provider: _p, refresh, access, expires, ...extra } = result
+      await setAuth(key, { type: "oauth", refresh, access, expires, ...extra })
+    } else if ("key" in result || apiKey) {
+      const md = { ...plainAnswers(provider, method, inputs), ...(result.metadata ?? {}) }
+      await setAuth(key, { type: "api", key: result.key ?? apiKey, ...(Object.keys(md).length ? { metadata: md } : {}) })
+    }
+    return { provider: id, account: await settle(id, key) }
+  } finally {
+    if (took) signingKeys.delete(key)
+  }
 }
 
 // plainAnswers are the answers to an "api" method's questions that the
@@ -2785,7 +2815,7 @@ function plainAnswers(provider, method, inputs) {
 // signInKey is where a sign-in goes: the account named, else a new one.
 function signInKey(provider, account) {
   if (authOf(provider).single === true) return accountsOf(readAuth(), provider)[0] ?? provider
-  return account && account !== "new" && providerOf(account) === provider ? account : freshKey(provider)
+  return account && account !== "new" && providerOf(account) === provider ? account : reserveKey(provider)
 }
 
 let nextSession = 1
@@ -2811,15 +2841,27 @@ async function authorize({ provider, method, inputs, account, proxy }, signal) {
   // auth login) calls, and a plugin told so asks its questions on the
   // terminal, magpie's stdin here (opencode-antigravity-auth waited on its
   // "Project ID" prompt, the sign-in never starting)
-  const a = await signingIn(signal, proxy ?? "", provider, key, () => m.authorize(m.prompts?.length ? inputs ?? {} : undefined, { signal }))
-  if (signal?.aborted) throw abortedSignIn()
+  let a
+  try {
+    a = await signingIn(signal, proxy ?? "", provider, key, () => m.authorize(m.prompts?.length ? inputs ?? {} : undefined, { signal }))
+    if (signal?.aborted) throw abortedSignIn()
+  } catch (e) {
+    signingKeys.delete(key)
+    throw e
+  }
   // a plugin that can't start the sign-in may say why as an api method's
   // authorize does ({ type: "failed", error }) rather than throw; with no
   // callback there is nothing to wait on, and calling the one it lacks
   // said "s.a.callback is not a function" instead of its reason
   // (plugins#658)
-  if (a?.type === "failed") return failed(a)
-  if (typeof a?.callback !== "function") return { ok: false, error: `${provider}'s sign-in gave nothing to finish it with` }
+  if (a?.type === "failed") {
+    signingKeys.delete(key)
+    return failed(a)
+  }
+  if (typeof a?.callback !== "function") {
+    signingKeys.delete(key)
+    return { ok: false, error: `${provider}'s sign-in gave nothing to finish it with` }
+  }
   const session = String(nextSession++)
   sessions.set(session, { provider, key, a, inputs, proxy: proxy ?? "" })
   // opened (not OpenCode's) is a page the plugin's own CLI opened already:
@@ -2850,12 +2892,18 @@ async function callback({ session, code }, signal) {
   const s = sessions.get(session)
   if (!s) throw new Error("no such sign-in")
   sessions.delete(session)
-  const r = await signingIn(signal, s.proxy, s.provider, s.key, () => (s.a.method === "code" ? s.a.callback(code ?? "", { signal }) : s.a.callback(undefined, { signal })))
-  if (signal?.aborted) throw abortedSignIn()
-  if (!r || r.type !== "success") return failed(r)
-  const kept = keptAs(r)
-  if (!kept) return { ok: false, error: `${s.provider}'s sign-in gave nothing to keep` }
-  return { ok: true, ...(await save(s.provider, s.key, kept, undefined)) }
+  // the key is held for this sign-in until it is saved, or given back when
+  // nothing is kept, so a failed sign-in doesn't keep it from the next
+  try {
+    const r = await signingIn(signal, s.proxy, s.provider, s.key, () => (s.a.method === "code" ? s.a.callback(code ?? "", { signal }) : s.a.callback(undefined, { signal })))
+    if (signal?.aborted) throw abortedSignIn()
+    if (!r || r.type !== "success") return failed(r)
+    const kept = keptAs(r)
+    if (!kept) return { ok: false, error: `${s.provider}'s sign-in gave nothing to keep` }
+    return { ok: true, ...(await save(s.provider, s.key, kept, undefined)) }
+  } finally {
+    signingKeys.delete(s.key)
+  }
 }
 
 // keptAs is an OAuth callback's success r as save keeps it. save keeps an
@@ -2938,7 +2986,14 @@ async function importFiles({ provider, texts, proxy }, signal) {
   const a = authOf(provider)
   if (typeof a.import !== "function") throw new Error(`${provider} takes no accounts from a file`)
   const files = (Array.isArray(texts) ? texts : []).filter((t) => typeof t === "string" && t.trim())
-  const got = await signingIn(signal, proxy ?? "", provider, freshKey(provider), () => a.import(files, { signal }))
+  // the hook saves each account it takes under the key the scope gives it
+  const scopeKey = reserveKey(provider)
+  let got
+  try {
+    got = await signingIn(signal, proxy ?? "", provider, scopeKey, () => a.import(files, { signal }))
+  } finally {
+    signingKeys.delete(scopeKey)
+  }
   if (signal?.aborted) throw abortedSignIn()
   const list = (Array.isArray(got) ? got : got ? [got] : []).slice(0, IMPORT_MOST)
   const results = []
@@ -2954,7 +3009,13 @@ async function importFiles({ provider, texts, proxy }, signal) {
       continue
     }
     const had = new Set(accountsOf(readAuth(), r.provider ?? provider))
-    const saved = await save(provider, signInKey(provider), kept)
+    const key = signInKey(provider)
+    let saved
+    try {
+      saved = await save(provider, key, kept)
+    } finally {
+      signingKeys.delete(key)
+    }
     results.push({ status: had.has(saved.account) ? "updated" : "added", user, ...saved })
   }
   return { results }
@@ -2964,17 +3025,21 @@ async function apiKey({ provider, method, inputs, key, account, proxy }, signal)
   const m = authOf(provider).methods[method]
   if (!m || m.type !== "api") throw new Error("not an API key method")
   const at = signInKey(provider, account)
-  if (typeof m.authorize !== "function") {
-    const md = inputs && Object.keys(inputs).length ? { metadata: inputs } : {}
-    await setAuth(at, { type: "api", key, ...md })
-    return { ok: true, provider, account: await settle(provider, at) }
+  try {
+    if (typeof m.authorize !== "function") {
+      const md = inputs && Object.keys(inputs).length ? { metadata: inputs } : {}
+      await setAuth(at, { type: "api", key, ...md })
+      return { ok: true, provider, account: await settle(provider, at) }
+    }
+    const r = await signingIn(signal, proxy ?? "", provider, at, () => m.authorize(inputs ?? {}, { signal }))
+    if (signal?.aborted) throw abortedSignIn()
+    if (!r || r.type !== "success") return failed(r)
+    // nothing to keep: no key typed, and the plugin's authorize gave none
+    if (!("key" in r) && !("refresh" in r) && !key) return { ok: false, error: `${provider}'s sign-in gave no key` }
+    return { ok: true, ...(await save(provider, at, r, inputs, key, method)) }
+  } finally {
+    signingKeys.delete(at)
   }
-  const r = await signingIn(signal, proxy ?? "", provider, at, () => m.authorize(inputs ?? {}, { signal }))
-  if (signal?.aborted) throw abortedSignIn()
-  if (!r || r.type !== "success") return failed(r)
-  // nothing to keep: no key typed, and the plugin's authorize gave none
-  if (!("key" in r) && !("refresh" in r) && !key) return { ok: false, error: `${provider}'s sign-in gave no key` }
-  return { ok: true, ...(await save(provider, at, r, inputs, key, method)) }
 }
 
 // ---- renewing a sign-in ------------------------------------------------------
@@ -3695,9 +3760,13 @@ const handlers = {
       await setAuth(p.key, p.auth)
       return { account: p.key }
     }
-    const key = freshKey(p.provider)
-    await setAuth(key, p.auth)
-    return { account: await settle(p.provider, key) }
+    const key = reserveKey(p.provider)
+    try {
+      await setAuth(key, p.auth)
+      return { account: await settle(p.provider, key) }
+    } finally {
+      signingKeys.delete(key)
+    }
   },
   // take gives the accounts named (else every account of the provider) and
   // forgets them in one step: nothing renews a token between the two

@@ -105,6 +105,19 @@ func TestAdminAPISignInOpensNothing(t *testing.T) {
 	}
 }
 
+// A plugin's sign-in is offered to the management API too, so a corporate
+// gateway can sign several people in to one provider at once: it answers
+// the page and opens nothing here, as the built-in sign-in does.
+func TestAdminAPIPluginSignIn(t *testing.T) {
+	sandboxHome(t)
+	if w := adminDo(t, "POST", "/plugin-signin", `{"provider":"no-such-plugin","method":0,"concurrent":true}`); w.Code != http.StatusBadRequest {
+		t.Fatalf("unknown plugin: %d %s", w.Code, w.Body)
+	}
+	if w := adminDo(t, "POST", "/plugin-signin", `{`); w.Code != http.StatusBadRequest {
+		t.Fatalf("bad body: %d", w.Code)
+	}
+}
+
 // Every route the API serves is one the app has, so it can't list a
 // route that went away.
 func TestAdminRoutesEveryAPIRoute(t *testing.T) {

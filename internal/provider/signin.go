@@ -151,6 +151,10 @@ type SignInOptions struct {
 	Proxy *string
 	// User is the account signed in to again, for the proxy it goes through
 	User string
+	// Concurrent lets this sign-in wait beside others of the same provider
+	// instead of canceling them: several people sign in to one provider at
+	// once through a corporate gateway, each to their own account.
+	Concurrent bool
 }
 
 // via is ctx for the sign-in's requests: through its proxy, so the vendor

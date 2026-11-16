@@ -855,6 +855,9 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 			Key      string  // an "api" method's key
 			Proxy    *string // the one picked to sign in through (#1663)
 			User     string  // the account signed in to again
+			// Concurrent keeps the provider's other sign-ins waiting
+			// instead of canceling them (a corporate gateway's sharing)
+			Concurrent bool
 		}
 		if err := json.NewDecoder(io.LimitReader(r.Body, 64<<10)).Decode(&in); err != nil {
 			fail(rw, err)
@@ -880,12 +883,44 @@ func pluginRoutes(mux *http.ServeMux, w Windows) {
 			writeJSON(rw, provider.SignInState{Agent: id, State: "done"})
 			return
 		}
-		st, err := provider.StartPluginSignInWith(in.Provider, in.Method, in.Inputs, provider.SignInOptions{Proxy: in.Proxy, User: in.User})
+		st, err := provider.StartPluginSignInWith(in.Provider, in.Method, in.Inputs, provider.SignInOptions{Proxy: in.Proxy, User: in.User, Concurrent: in.Concurrent})
 		if err != nil {
 			fail(rw, err)
 			return
 		}
 		writeJSON(rw, openSignIn(w, st, false))
+	})
+	// Importing a sign-in made elsewhere: a corporate gateway takes an
+	// employee's own WorkBuddy sign-in from its client and keeps it as one
+	// of the plugin's accounts. The sign-in is written once, here; nothing
+	// reads it back through this route, and the answer is the account's key.
+	mux.HandleFunc("POST /api/plugin-import", func(rw http.ResponseWriter, r *http.Request) {
+		var in struct {
+			Provider string
+			Auth     map[string]any
+		}
+		if err := json.NewDecoder(io.LimitReader(r.Body, 256<<10)).Decode(&in); err != nil {
+			fail(rw, err)
+			return
+		}
+		if _, ok := pluginProviderByID(in.Provider); !ok {
+			fail(rw, errNoPluginProvider)
+			return
+		}
+		switch in.Auth["type"] {
+		case "oauth", "api":
+		default:
+			fail(rw, pluginErr("the sign-in to import is neither oauth nor an api key"))
+			return
+		}
+		ctx, cancel := context.WithTimeout(r.Context(), time.Minute)
+		defer cancel()
+		key, err := plugin.Import(ctx, in.Provider, in.Auth)
+		if err != nil {
+			fail(rw, err)
+			return
+		}
+		writeJSON(rw, map[string]string{"account": key})
 	})
 }
 
@@ -893,7 +928,10 @@ type pluginErr string
 
 func (e pluginErr) Error() string { return string(e) }
 
-const errNoPluginMethod = pluginErr("the plugin has no such way to sign in; reopen the add sheet")
+const (
+	errNoPluginMethod   = pluginErr("the plugin has no such way to sign in; reopen the add sheet")
+	errNoPluginProvider = pluginErr("no plugin serves a provider of that id")
+)
 
 func pluginProviderByID(id string) (plugin.Provider, bool) {
 	for _, pp := range plugin.Cached() {
