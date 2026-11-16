@@ -1,7 +1,6 @@
 package tui
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,18 +51,21 @@ var keep = keeper{
 // (see above), and is what to say of it.
 func keepGateway(connected bool) string {
 	k := keep
-	if k.goos != "linux" || !connected || k.autostartOn() {
+	if k.goos != "linux" || !connected {
 		return gatewayGoneNote()
+	}
+	if k.autostartOn() {
+		return atLoginNote()
 	}
 	st, err := k.status()
 	switch {
 	case err == nil && st.Installed:
 		if err := k.start(); err == nil {
-			return "magpie: the gateway goes on in magpie's service (magpie daemon status)"
+			return tr("magpie: the gateway goes on in magpie's service (magpie daemon status)")
 		}
 	case err == nil && !k.removed():
 		if err := k.install(); err == nil {
-			msg := "magpie: the gateway goes on in magpie's service, which now starts with this system or your login, so agents connected to magpie reach it with magpie tui closed; magpie daemon uninstall removes it"
+			msg := tr("magpie: the gateway goes on in magpie's service, which now starts with this system or your login, so agents connected to magpie reach it with magpie tui closed; magpie daemon uninstall removes it")
 			if l := k.linger(); l != "" {
 				msg += " (" + l + ")"
 			}
@@ -72,15 +74,24 @@ func keepGateway(connected bool) string {
 	}
 	pid, log, err := k.background()
 	if err != nil {
-		return gatewayGoneNote() + " (couldn't start magpie serve in the background: " + err.Error() + ")"
+		return gatewayGoneNote() + " " + trf("(couldn't start magpie serve in the background: %s)", err.Error())
 	}
-	msg := fmt.Sprintf("magpie: the gateway goes on in the background (magpie serve, pid %d, log %s) until this system stops", pid, log)
+	msg := trf("magpie: the gateway goes on in the background (magpie serve, pid %d, log %s) until this system stops", pid, log)
 	if wslHere() {
-		msg += "; for it to start with WSL, turn systemd on with [boot] systemd=true in /etc/wsl.conf and run magpie daemon install"
+		msg += tr("; for it to start with WSL, turn systemd on with [boot] systemd=true in /etc/wsl.conf and run magpie daemon install")
 	} else {
-		msg += "; magpie daemon install starts it with the system"
+		msg += tr("; magpie daemon install starts it with the system")
 	}
 	return msg
+}
+
+// atLoginNote is said where magpie opens at login, so the terminal left
+// the gateway to the app. On Linux that can be a package's own autostart
+// entry on a box no desktop logs into (NixOS-WSL, a server over SSH),
+// which nothing ever starts (#3756): the note says the switch that has the
+// terminal hand the gateway on instead.
+func atLoginNote() string {
+	return gatewayGoneNote() + tr("; magpie opens at login and serves it then. Where no desktop logs in here, `magpie autostart off` has magpie tui hand it on as it quits")
 }
 
 // BackgroundLog is the log of a magpie serve that magpie tui left
@@ -106,12 +117,12 @@ func serveInBackground() (int, string, error) {
 	cmd := proc.Command(exe, "serve")
 	cmd.Stdout, cmd.Stderr = f, f
 	detach(cmd)
-	if err := cmd.Start(); err != nil {
+	// reaped if it ends while this process runs: a released one stayed
+	// <defunct> until it quit
+	if err := proc.StartReaped(cmd); err != nil {
 		return 0, "", err
 	}
-	pid := cmd.Process.Pid
-	cmd.Process.Release()
-	return pid, log, nil
+	return cmd.Process.Pid, log, nil
 }
 
 // wslHere: this Linux is a WSL distro.

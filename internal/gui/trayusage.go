@@ -6,13 +6,15 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"regexp"
+	"os"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/yetone/magpie/internal/fx"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 	"github.com/yetone/magpie/internal/usage"
@@ -21,7 +23,8 @@ import (
 // Settings → Allowances in the menu bar: the windows of the subscriptions and
 // plans ticked there, beside the tray icon, for keeping an eye on them
 // without opening magpie. The Mac's menu bar draws each as its logo with
-// its two windows stacked, "42%" over "18%", side by side (trayimage), or
+// its two windows stacked, "42%" over "18%", side by side (trayimage), and
+// every window of a card with more in columns of two, or
 // as the windows alone, a thin line between cards, when Settings turns the
 // logos off; a tray elsewhere gets them as text ("42% · 18% | 10% · 5%"), Windows' in
 // the icon's tooltip only, having no room for any.
@@ -31,7 +34,7 @@ import (
 // more than the Usage page asks them: their answers are cached for a
 // minute, and this reads the cache.
 func trayUsageEvery() time.Duration {
-	return time.Duration(settings.Load().TrayUsageEvery) * time.Minute
+	return time.Duration(settings.Shared().TrayUsageEvery) * time.Minute
 }
 
 // trayCardID names a card for settings.TrayUsage: its provider, and the
@@ -251,9 +254,9 @@ func withTrayKinds(qs []provider.SubscriptionQuota) []provider.SubscriptionQuota
 	return out
 }
 
-// trayUsageText is trayCardText with every window shown.
+// trayUsageText is trayCardText with every window shown, in English.
 func trayUsageText(q provider.SubscriptionQuota, now time.Time, left, pace bool) (label, tip string) {
-	return trayCardText(q, now, left, pace, nil)
+	return trayCardText("en", q, now, left, pace, nil)
 }
 
 // trayCardText is the menu bar's text for a card and the tooltip that
@@ -261,8 +264,11 @@ func trayUsageText(q provider.SubscriptionQuota, now time.Time, left, pace bool)
 // it starts again. With pace (settings.TrayPace) each window's Pace number
 // follows its figure, in both, as the Usage page's cards show it. The text
 // has the windows of the kinds given alone (trayShownKinds); the tooltip
-// has them all.
-func trayCardText(q provider.SubscriptionQuota, now time.Time, left, pace bool, kinds []string) (label, tip string) {
+// has them all. The tooltip's own words are in lang (trayLang), as the
+// tray menu's are, and so are a window's name and unit where the page has
+// a word for them, as its card says them (pageWord); an error is the
+// card's.
+func trayCardText(lang string, q provider.SubscriptionQuota, now time.Time, left, pace bool, kinds []string) (label, tip string) {
 	if strings.HasPrefix(q.Provider, trayTotal) {
 		return q.Balance, q.Name // trayTotalCard's: its rows, and its tooltip
 	}
@@ -275,7 +281,7 @@ func trayCardText(q provider.SubscriptionQuota, now time.Time, left, pace bool, 
 		if q.Balance == "" {
 			return "", ""
 		}
-		return q.Balance, q.Name + " · " + q.Balance + trayAsOf(q)
+		return q.Balance, q.Name + " · " + q.Balance + trayAsOf(lang, q)
 	}
 	readAt := now
 	if q.ReadAt != nil && !q.ReadAt.After(now) {
@@ -291,16 +297,16 @@ func trayCardText(q provider.SubscriptionQuota, now time.Time, left, pace bool, 
 		}
 		used := math.Max(0, math.Min(100, w.Used))
 		n := int(math.Round(used))
-		word := "used"
+		word := "%s used"
 		if left {
 			used = 100 - used
-			n, word = 100-n, "left"
+			n, word = 100-n, "%s left"
 		}
 		pct := fmt.Sprintf("%d%%", n)
 		row, paceNote := pct, ""
 		if p, ok := w.Pace(readAt, now); pace && ok {
 			row = pct + " " + trayPace(p, left)
-			paceNote = " · pace " + trayPace(p, left)
+			paceNote = " · " + trayText(lang, "pace %s", trayPace(p, left))
 		}
 		if kinds == nil || picked {
 			short = append(short, row)
@@ -309,20 +315,33 @@ func trayCardText(q provider.SubscriptionQuota, now time.Time, left, pace bool, 
 		if used != math.Trunc(used) {
 			tipPct = fmt.Sprintf("%.1f%%", used)
 		}
-		line := w.Name + " " + tipPct + " " + word
+		// the window's name and its count's unit as its card says them
+		// (t(w.name), t(w.unit) in app.js)
+		name := trayWindowName(lang, w.Name)
+		w.Unit = pageWord(lang, w.Unit)
+		line := name + " " + trayText(lang, word, tipPct)
 		if c := w.Count(left); c != "" {
-			line = w.Name + " " + c + " · " + tipPct + " " + word
+			line = name + " " + c + " · " + trayText(lang, word, tipPct)
 		}
 		line += paceNote
 		if at := resetAt(w, now); !at.IsZero() && at.After(now) {
-			line += " · resets in " + until(at.Sub(now))
+			line += " · " + trayText(lang, "resets in %s", until(lang, at.Sub(now)))
 		}
 		long = append(long, line)
 	}
-	if len(short) > 2 {
-		short = short[:2]
+	// a wallet beside the windows (Kimi Code's booster, "Extra usage"):
+	// what is left on it, as the card's line under its rings says it
+	for _, w := range q.Windows {
+		if w.Balance == nil {
+			continue
+		}
+		amt := strconv.FormatFloat(math.Round(*w.Balance*100)/100, 'f', -1, 64)
+		if u := pageWord(lang, w.Unit); u != "" {
+			amt += " " + u
+		}
+		long = append(long, trayWindowName(lang, w.Name)+" "+trayText(lang, "%s left", amt))
 	}
-	return strings.Join(short, " · "), q.Name + "\n" + strings.Join(long, "\n") + trayAsOf(q)
+	return strings.Join(short, " · "), q.Name + "\n" + strings.Join(long, "\n") + trayAsOf(lang, q)
 }
 
 // trayPace is a window's Pace number as the Usage page writes it
@@ -347,11 +366,11 @@ func trayPace(p float64, left bool) string {
 // trayAsOf is the tooltip's word that a card stands in for one that
 // couldn't be read just now, and when it was read (the Usage page's
 // "As of …"); nothing for a reading just made.
-func trayAsOf(q provider.SubscriptionQuota) string {
+func trayAsOf(lang string, q provider.SubscriptionQuota) string {
 	if q.AsOf == nil {
 		return ""
 	}
-	return "\nas of " + q.AsOf.Local().Format("Jan 2 15:04") + ", couldn't be read just now"
+	return "\n" + trayText(lang, "as of %s, couldn't be read just now", q.AsOf.Local().Format(trayText(lang, "Jan 2 15:04")))
 }
 
 func resetAt(w provider.QuotaWindow, now time.Time) time.Time {
@@ -364,24 +383,25 @@ func resetAt(w provider.QuotaWindow, now time.Time) time.Time {
 	return time.Time{}
 }
 
-// until says a wait in the largest two units: 3d 4h, 2h 10m, 7m.
-func until(d time.Duration) string {
+// until says a wait in the largest two units, in lang: 3d 4h, 2h 10m, 7m.
+func until(lang string, d time.Duration) string {
 	d = d.Round(time.Minute)
 	days, hours, mins := int(d/(24*time.Hour)), int(d%(24*time.Hour)/time.Hour), int(d%time.Hour/time.Minute)
 	switch {
 	case days > 0:
-		return fmt.Sprintf("%dd %dh", days, hours)
+		return trayText(lang, "%dd %dh", days, hours)
 	case hours > 0:
-		return fmt.Sprintf("%dh %dm", hours, mins)
+		return trayText(lang, "%dh %dm", hours, mins)
 	}
-	return fmt.Sprintf("%dm", max(mins, 1))
+	return trayText(lang, "%dm", max(mins, 1))
 }
 
 // trayUsageCards are the cards settings.TrayUsages names, in its order,
 // among the Usage page's (cached as there), and magpie's own totals it
-// names (trayTotal); one gone is left out. The vendors aren't asked when
-// only totals are named.
-func trayUsageCards(ctx context.Context, ids []string) []provider.SubscriptionQuota {
+// names (trayTotal); one gone is left out, and so is one the Usage page's
+// Overview hides, as are the rows it hides (trayShown). The vendors aren't
+// asked when only totals are named.
+func trayUsageCards(ctx context.Context, lang string, ids []string) []provider.SubscriptionQuota {
 	if len(ids) == 0 {
 		return nil
 	}
@@ -399,11 +419,40 @@ func trayUsageCards(ctx context.Context, ids []string) []provider.SubscriptionQu
 		}
 		if currency == "" {
 			currency, rate = trayCurrency()
-			noCost = settings.Load().TrayNoCost
+			noCost = settings.Shared().TrayNoCost
 		}
-		cards = append(cards, trayTotalCard(id, trayMoney(trayTotalSum(p), noCost), currency, rate))
+		cards = append(cards, trayTotalCard(lang, id, trayMoney(trayTotalSum(p), noCost), currency, rate))
 	}
-	return trayPick(cards, ids, time.Now())
+	return trayShown(cards, ids, time.Now(), settings.Shared())
+}
+
+// trayShown is trayPick less what the Usage page's Overview hides
+// (settings.UsageCardsHidden, UsageWindowsHidden): a card hidden there
+// showed on in the menu bar, its tooltip and Windows' tray figure, though
+// the Overview and the tray panel left it out (onkashiko on X). The cells
+// ticked are kept, so a card shown again comes back to its cell. A named
+// cell takes the account's card the Overview still shows (its balance,
+// say, with its plan hidden); a cell following the account in use picks
+// that account among them all, as before, and is left empty when its card
+// is hidden, rather than moving to another account.
+func trayShown(cards []provider.SubscriptionQuota, ids []string, now time.Time, s settings.Settings) []provider.SubscriptionQuota {
+	if len(s.UsageCardsHidden)+len(s.UsageWindowsHidden) == 0 {
+		return trayPick(cards, ids, now)
+	}
+	shown := provider.ShownQuotas(cards, s)
+	var out []provider.SubscriptionQuota
+	for _, id := range ids {
+		if !strings.HasSuffix(id, trayInUse) {
+			out = append(out, trayPick(shown, []string{id}, now)...)
+			continue
+		}
+		for _, q := range trayPick(cards, []string{id}, now) {
+			if !provider.QuotaCardHidden(q, s) {
+				out = append(out, provider.QuotaRowsShown(q, s))
+			}
+		}
+	}
+	return out
 }
 
 // trayTotal starts the id of a card of magpie's own count instead of a
@@ -480,14 +529,14 @@ var trayQuerySum = func(p usage.Period) usage.Totals { return usage.QueryPage(p,
 // marked Σ so it doesn't read as the input alone (NextCommit on Discord),
 // over the cost, in the currency Settings says, "+" when some calls had no
 // known price; nothing beneath the tokens when none had one. Its name is
-// the tooltip, which spells out the input, output and cache.
-func trayTotalCard(id string, t usage.Totals, currency string, rate float64) provider.SubscriptionQuota {
-	when := "Today"
+// the tooltip, which spells out the input, output and cache, in lang.
+func trayTotalCard(lang, id string, t usage.Totals, currency string, rate float64) provider.SubscriptionQuota {
+	when := "Today in magpie"
 	if p, _ := trayTotalPeriod(id); p == usage.Week {
-		when = "Last 7 days"
+		when = "Last 7 days in magpie"
 	}
-	rows := []string{"Σ" + trayCount(t.Tokens()+t.CacheRead+t.CacheWrite)}
-	tip := when + " in magpie\n" + trayTokens(t)
+	rows := []string{"Σ" + trayCount(lang, t.Tokens()+t.CacheRead+t.CacheWrite)}
+	tip := trayText(lang, when) + "\n" + trayTokens(lang, t)
 	if t.Cost > 0 {
 		c := usage.FormatCost(t.Cost, currency, rate)
 		if t.Unpriced > 0 {
@@ -496,9 +545,9 @@ func trayTotalCard(id string, t usage.Totals, currency string, rate float64) pro
 		rows = append(rows, c)
 		tip += "\n≈" + c
 	}
-	tip += fmt.Sprintf("\n%d requests", t.Calls)
+	tip += "\n" + trayText(lang, "%d requests", t.Calls)
 	if t.Unpriced > 0 {
-		tip += fmt.Sprintf(", %d with no known price", t.Unpriced)
+		tip += trayText(lang, ", %d with no known price", t.Unpriced)
 	}
 	return provider.SubscriptionQuota{Provider: id, Name: tip, Balance: strings.Join(rows, " · ")}
 }
@@ -513,10 +562,21 @@ func trayMoney(t usage.Totals, noCost bool) usage.Totals {
 	return t
 }
 
-// trayCurrency is the currency Settings shows costs in, and the yuan's
-// rate when that is CNY.
+// trayCurrency is the currency the menu bar and its tooltip show magpie's
+// totals' cost in (Settings' Menu bar currency, else the totals'), and the
+// yuan's rate when that is CNY.
 func trayCurrency() (currency string, rate float64) {
-	currency = settings.Load().Currency
+	return currencyRate(settings.Load().TrayCostIn())
+}
+
+// totalsCurrency is the currency Settings shows a sum of costs in (a
+// total's, of every provider), and the yuan's rate when that is CNY.
+func totalsCurrency() (currency string, rate float64) {
+	return currencyRate(settings.Load().TotalCostIn())
+}
+
+func currencyRate(currency string) (string, float64) {
+	var rate float64
 	if currency == "cny" {
 		rate = fx.Soon().CNYPerUSD // never waited for, as the Settings page's
 	}
@@ -524,13 +584,13 @@ func trayCurrency() (currency string, rate float64) {
 }
 
 // trayTokens is a total's every token, the cache's too, with what they
-// were: "6.3M tokens (912K in · 318K out · 5.1M cached)".
-func trayTokens(t usage.Totals) string {
-	s := trayCount(t.Tokens()+t.CacheRead+t.CacheWrite) + " tokens (" + trayCount(t.Input) + " in · " + trayCount(t.Output) + " out"
+// were, in lang: "6.3M tokens (912K in · 318K out · 5.1M cached)".
+func trayTokens(lang string, t usage.Totals) string {
+	parts := []string{trayText(lang, "%s in", trayCount(lang, t.Input)), trayText(lang, "%s out", trayCount(lang, t.Output))}
 	if cached := t.CacheRead + t.CacheWrite; cached > 0 {
-		s += " · " + trayCount(cached) + " cached"
+		parts = append(parts, trayText(lang, "%s cached", trayCount(lang, cached)))
 	}
-	return s + ")"
+	return trayText(lang, "%s tokens (%s)", trayCount(lang, t.Tokens()+t.CacheRead+t.CacheWrite), strings.Join(parts, " · "))
 }
 
 // trayIdleTip is the tooltip while the menu bar shows no cards: magpie's
@@ -538,11 +598,13 @@ func trayTokens(t usage.Totals) string {
 // (ylorn on Discord: a Linux bar's tooltip said only "magpie"): every
 // token, split into input, output and cache as the usage:today card's
 // tooltip does (NextCommit on Discord), then the cost and the requests.
-func trayIdleTip(t usage.Totals, currency string, rate float64) string {
+// It is in lang, magpie's language as the tray menu's is (yi_time on
+// Discord: in English on a Windows magpie set to Chinese).
+func trayIdleTip(lang string, t usage.Totals, currency string, rate float64) string {
 	if t.Calls == 0 {
-		return "magpie\nToday: no requests yet"
+		return "magpie\n" + trayText(lang, "Today: no requests yet")
 	}
-	line := "Today: " + trayTokens(t) + "\n"
+	line := trayText(lang, "Today: %s", trayTokens(lang, t)) + "\n"
 	if t.Cost > 0 {
 		c := usage.FormatCost(t.Cost, currency, rate)
 		if t.Unpriced > 0 {
@@ -550,17 +612,34 @@ func trayIdleTip(t usage.Totals, currency string, rate float64) string {
 		}
 		line += "≈" + c + " · "
 	}
-	n := "requests"
+	n := "%d requests"
 	if t.Calls == 1 {
-		n = "request"
+		n = "%d request"
 	}
-	return fmt.Sprintf("magpie\n%s%d %s", line, t.Calls, n)
+	return "magpie\n" + line + trayText(lang, n, t.Calls)
 }
 
-// trayCount is a count as the Usage page says it in English: 133M, 1.2M,
-// 456K, 8.2K, 950.
-func trayCount(n int) string {
+// trayChineseUnits is Settings' 万/亿 choice, read when a count is said.
+var trayChineseUnits = func() bool { return settings.Shared().ChineseUnits }
+
+// trayCount is a count as the Usage page says it (fmtN in app.js): 133M,
+// 1.2M, 456K, 8.2K, 950; with Settings' 万/亿 units and magpie in Chinese,
+// 1.33 亿, 68.1 万 (億 and 萬 in Traditional).
+func trayCount(lang string, n int) string {
 	f := float64(n)
+	if (lang == "zh" || lang == "zh-TW") && trayChineseUnits() {
+		hundredM, tenK := " 亿", " 万"
+		if lang == "zh-TW" {
+			hundredM, tenK = " 億", " 萬"
+		}
+		switch {
+		case n >= 1e8:
+			return strconv.FormatFloat(math.Round(f/1e8*100)/100, 'f', -1, 64) + hundredM
+		case n >= 1e4:
+			return strconv.FormatFloat(math.Round(f/1e4*10)/10, 'f', -1, 64) + tenK
+		}
+		return fmt.Sprint(n)
+	}
 	switch {
 	case n >= 1e9:
 		return fmt.Sprintf("%.2fB", f/1e9)
@@ -665,7 +744,7 @@ func trayName(q provider.SubscriptionQuota) string {
 
 // trayCell is a card as the Mac's menu bar draws it: its logo, and its
 // label's parts stacked, the shortest window over the longer ("42%" over
-// "18%"), or its balance alone.
+// "18%"), in columns of two when it has more, or its balance alone.
 type trayCell struct {
 	ID     string // stable provider/account identity, captured with the drawn cell
 	Icon   []byte // the logo as the Usage page has it (SVG or PNG); nil for none
@@ -685,9 +764,9 @@ func trayPlain(cells []trayCell) []trayCell {
 	return out
 }
 
-// trayUsageView is trayCardsView with every window shown.
+// trayUsageView is trayCardsView with every window shown, in English.
 func trayUsageView(cards []provider.SubscriptionQuota, now time.Time, left, pace bool) (cells []trayCell, label, tip string) {
-	return trayCardsView(cards, now, left, pace, nil)
+	return trayCardsView("en", cards, now, left, pace, nil)
 }
 
 // trayCardsView is what the tray shows for the cards: a cell for each
@@ -695,10 +774,10 @@ func trayUsageView(cards []provider.SubscriptionQuota, now time.Time, left, pace
 // " | " for a tray that shows text; and a tooltip spelling each out. A
 // card's rows are the windows its provider's kinds in pick name
 // (settings.TrayWindows), all when it names none.
-func trayCardsView(cards []provider.SubscriptionQuota, now time.Time, left, pace bool, pick map[string][]string) (cells []trayCell, label, tip string) {
+func trayCardsView(lang string, cards []provider.SubscriptionQuota, now time.Time, left, pace bool, pick map[string][]string) (cells []trayCell, label, tip string) {
 	var labels, tips []string
 	for _, q := range cards {
-		l, t := trayCardText(q, now, left, pace, pick[q.Provider])
+		l, t := trayCardText(lang, q, now, left, pace, pick[q.Provider])
 		if t != "" {
 			tips = append(tips, t)
 		}
@@ -747,9 +826,24 @@ const trayRowMax = 10
 
 // trayIconFile is a card's logo among the page's icons, as its icon() has
 // it: a "-color" one and the PNGs in their own colours, the others a black
-// glyph (a mask there); nil when there is no such file (a picture the user
-// gave their own provider isn't one).
+// glyph (a mask there); a stored picture ("file:…", one a plugin or the
+// user gave a provider) read as pageIconOf reads it, through its checked
+// name only; nil when there is no such file.
 func trayIconFile(name string) (b []byte, mono bool) {
+	if own, ok := strings.CutPrefix(name, "file:"); ok {
+		f, _ := provider.IconServed(own)
+		if f == "" {
+			return nil, false
+		}
+		b, err := os.ReadFile(f)
+		if err != nil || len(b) > maxPageIcon {
+			return nil, false
+		}
+		if strings.HasSuffix(own, ".svg") {
+			b = svgArcFlags(b)
+		}
+		return b, false
+	}
 	if name == "" || strings.ContainsAny(name, `/\:`) {
 		return nil, false
 	}
@@ -763,7 +857,7 @@ func trayIconFile(name string) (b []byte, mono bool) {
 	return svgArcFlags(b), !strings.HasSuffix(name, "-color")
 }
 
-var svgPathData = regexp.MustCompile(`\sd="([^"]*[aA][^"]*)"`)
+var svgPathData = lazyre.New(`\sd="([^"]*[aA][^"]*)"`)
 
 // svgArcFlags spaces out the flags of a path's arcs ("a4.5 4.5 0 004.5 0",
 // the flags run into the number after them), which browsers read and the

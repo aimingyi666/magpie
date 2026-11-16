@@ -21,8 +21,6 @@ import {
   adminBaseUrl,
 } from "./admin.mjs";
 
-const ENTERPRISE_PROVIDERS_PATH = "/v1/enterprise/providers";
-const ENTERPRISE_PROVIDERS_TIMEOUT_MS = 15000;
 // How often a joined device looks for published resources by itself, so a
 // newly published hook or skill arrives without the employee pressing
 // Sync now. The engine's own interval cap is five minutes.
@@ -171,9 +169,10 @@ async function handle(req, res, { accessToken, admin, host }) {
       return sendFile(res, path.join(PAGE_DIR, "icon.svg"), "image/svg+xml");
     case "/healthz":
       return sendJson(res, 200, { ok: true });
-    case ENTERPRISE_PROVIDERS_PATH:
-      if (req.method !== "GET") return sendError(res, 405, "method_not_allowed", "GET only");
-      return serveEnterpriseProviders(res);
+    // /v1/enterprise/providers is gone with the Providers panel magpie used
+    // to draw: it was the one route here that answered without a page
+    // token, and the corporate client plugin shows the providers the
+    // corporation hands out on its own page.
     case "/v1/status":
       if (req.method !== "GET") return sendError(res, 405, "method_not_allowed", "GET only");
       if (!tokenAllowed(req, accessToken)) {
@@ -195,64 +194,6 @@ async function handle(req, res, { accessToken, admin, host }) {
       }
       return sendError(res, 404, "not_found", "no such route");
   }
-}
-
-// serveEnterpriseProviders answers the Providers panel. Magpie's Go
-// process calls it server-side; it uses the device credential on this
-// machine and asks admin-service over the device token. It returns
-// only the public projection (name, host, models, key state, ready/off)
-// and fails closed when the credential or the admin-service is missing.
-async function serveEnterpriseProviders(res) {
-  const dir = stateDirectory();
-  const credential = readCredential(dir);
-  if (credential.state !== "ok") {
-    return sendError(res, 409, "not_joined", "no enterprise device credential was found");
-  }
-  const adminBase = adminBaseUrl() || adminConfiguredFromState();
-  if (!adminBase) {
-    return sendError(res, 409, "admin_not_configured", "the management console address is not configured");
-  }
-  const deviceToken = credential.data.deviceToken;
-  let response;
-  try {
-    response = await fetch(new URL("/api/v1/client/enterprise/providers", adminBase), {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${deviceToken}`,
-      },
-      redirect: "error",
-      signal: AbortSignal.timeout(ENTERPRISE_PROVIDERS_TIMEOUT_MS),
-    });
-  } catch {
-    return sendError(res, 503, "admin_unavailable", "The management service is unreachable");
-  }
-  let payload = null;
-  try {
-    payload = await response.json();
-  } catch {
-    payload = null;
-  }
-  if (!response.ok) {
-    const code = payload?.error?.code && /^(invalid_device_token|device_disabled|device_token_expired|missing_device_token)$/.test(payload.error.code)
-      ? payload.error.code
-      : "admin_unavailable";
-    return sendError(res, code === "admin_unavailable" ? 502 : response.status, code, "The management service refused the request");
-  }
-  const providers = Array.isArray(payload?.providers) ? payload.providers : [];
-  const projected = providers.map((provider) => ({
-    id: String(provider?.id || ""),
-    name: String(provider?.name || ""),
-    host: String(provider?.host || ""),
-    models: Array.isArray(provider?.models) ? provider.models.map(String) : [],
-    modelCount: Number.isSafeInteger(provider?.modelCount) ? provider.modelCount : (Array.isArray(provider?.models) ? provider.models.length : 0),
-    keyState: String(provider?.keyState || "missing"),
-    keyMasked: String(provider?.keyMasked || ""),
-    ready: Boolean(provider?.ready),
-    off: Boolean(provider?.off),
-    revision: String(provider?.revision || ""),
-  })).filter((provider) => provider.id);
-  return sendJson(res, 200, { providers: projected });
 }
 
 // hostAllowed refuses a name that resolves to this machine: the service is

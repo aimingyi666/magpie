@@ -1,5 +1,14 @@
 # Magpie Enterprise 企业页
 
+> **状态：legacy（保留，新部署不要用）。**
+> 这个插件配套的是 `admin-service` + `resource-service` 那一套（原生管理员视图、Ed25519
+> 签名资源同步）。自建控制面、以 `library` 下发指令/MCP/技能、需要用量与脱敏回传的部署，
+> 用 [`../corp-plugin`](../corp-plugin) 代替。
+>
+> 2026-11-08 起，magpie 的 Providers 页不再有「企业下发供应商」面板
+> （`enterprise:providers` 这个页面读能力已从 `internal/plugin` 和 `internal/gui` 移除），
+> 那个面板展示的供应商现在由 corp 插件自己的页面展示。
+
 这个插件在 Magpie 侧边栏增加「企业」页，包含「员工」和「管理员」两个视图。
 员工电脑和管理员电脑仍然使用同一份 Magpie，**不需要安装单独的企业定制版
 客户端**。插件里的本地回环服务负责状态、同步和管理员会话，页面本身不直接

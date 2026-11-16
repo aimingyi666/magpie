@@ -7,12 +7,12 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/yetone/magpie/internal/appdir"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 )
 
@@ -88,10 +88,13 @@ type tracer struct {
 
 // lockEntry is a skill the skills CLI's lock names: the repository, and
 // when the CLI last wrote the skill's folder (updatedAt, else
-// installedAt; zero in a lock that says neither).
+// installedAt; zero in a lock that says neither). github says the
+// repository is on GitHub, as the lock told; one elsewhere is only
+// grouped (repoOf), never updated from.
 type lockEntry struct {
-	repo string
-	at   time.Time
+	repo   string
+	at     time.Time
+	github bool
 }
 
 // lockSlack is how long after its files a lock entry may be written: the
@@ -112,6 +115,29 @@ func (tr *tracer) lockRepo(name, dir string) string {
 		return ""
 	}
 	return e.repo
+}
+
+// lockOrigin is where on GitHub the skills CLI got a skill the library
+// has (npx skills add, its lock), so that it can be updated from there
+// like one installed here (#4645, Apri1qing: brought in or handed over,
+// it kept only a From label, and update left it as it was). Only a lock
+// that says when it wrote the skill's folder, and a folder that is the
+// one it wrote (lockRepo), tells the skill apart from another of its
+// name, and an update writes over it: a lock that says neither only
+// groups. It is the origin of a skill with no source, or one whose folder
+// is in ~/.agents/skills, as lockRepo's grouping has it: a folder of the
+// user's own elsewhere, or a skill with a source of its own, is not the
+// CLI's to be taken over by an update.
+func lockOrigin(s *Skill) (Source, bool) {
+	if s.Source != nil && !within(realDir(s.Source.Dir), realDir(sharedSkillsDir())) {
+		return Source{}, false
+	}
+	tr := &tracer{}
+	e, ok := tr.lock()[s.Name]
+	if !ok || !e.github || e.at.IsZero() || !madeBy(realDir(skillDir(s.Name)), e.at.Add(lockSlack)) {
+		return Source{}, false
+	}
+	return Source{Kind: "github", Repo: e.repo}, true
 }
 
 // madeBy is whether a file in the skill's folder dir was last written by
@@ -178,16 +204,16 @@ func readSkillLock(path string) map[string]lockEntry {
 	}
 	out := map[string]lockEntry{}
 	for name, e := range f.Skills {
-		r := ""
+		r, gh := "", false
 		if e.SourceType == "github" && repoRe.MatchString(e.Source) {
-			r = strings.TrimSuffix(e.Source, ".git")
+			r, gh = strings.TrimSuffix(e.Source, ".git"), true
 		} else if e.SourceType == "well-known" {
 			r = wellKnownBase(e.SourceBaseURL, e.SourceURL)
 		} else if e.SourceURL != "" {
 			r = remoteRepo(e.SourceURL)
 		}
 		if r != "" {
-			le := lockEntry{repo: r}
+			le := lockEntry{repo: r, github: gh}
 			for _, ts := range []string{e.UpdatedAt, e.InstalledAt} {
 				if at, err := time.Parse(time.RFC3339Nano, ts); err == nil {
 					le.at = at
@@ -263,7 +289,10 @@ func siteOf(s string) string {
 // the user's dotfiles rather than where the skill came from.
 func gitRepoOf(dir string) string {
 	h := realDir(home())
-	for i := 0; i < 4 && dir != "" && dir != h; i++ {
+	// a skill's own folder and four above it: a probe finds skills as
+	// far as four folders into a repository (candidates), and a checkout's
+	// skills/team/writing/poem is traced from poem up to the checkout
+	for i := 0; i < 5 && dir != "" && dir != h; i++ {
 		if p := filepath.Dir(dir); p == h && strings.HasPrefix(filepath.Base(dir), ".") {
 			return ""
 		}
@@ -282,7 +311,7 @@ func gitRepoOf(dir string) string {
 	return ""
 }
 
-var originSection = regexp.MustCompile(`^\[\s*remote\s+"origin"\s*\]$`)
+var originSection = lazyre.New(`^\[\s*remote\s+"origin"\s*\]$`)
 
 // originURL is the repository remote "origin" of a git config fetches.
 func originURL(cfg string) string {
@@ -304,7 +333,7 @@ func originURL(cfg string) string {
 	return ""
 }
 
-var scpRemote = regexp.MustCompile(`^(?:[\w.-]+@)?([\w.-]+\.[\w.-]+):(.+)$`)
+var scpRemote = lazyre.New(`^(?:[\w.-]+@)?([\w.-]+\.[\w.-]+):(.+)$`)
 
 // remoteRepo reads a git remote's address as a repository: owner/repo on
 // GitHub, host/path elsewhere. A user or a token in it is never kept.
@@ -380,7 +409,7 @@ func noteFrom(src Source, root string, cands []Candidate) int {
 			if dir := skillDir(s.Name); s.Source == nil && !linked(dir) && sameTree(dir, filepath.Join(root, filepath.FromSlash(c.Path))) {
 				s.Source = &Source{Kind: "github", Repo: src.Repo, Ref: src.Ref, Path: c.Path}
 				s.Hash, s.Own, s.Commit, s.From = hashDir(dir), ownHash(dir), "", ""
-				l.seenAt(src.Repo, src.Ref, c.Path)
+				l.seenAt(repoKey(src.Repo, src.Ref), c.Path)
 				forgetCheck(s.Name)
 				bound++
 			}

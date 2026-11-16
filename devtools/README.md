@@ -21,6 +21,8 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 - [`enterprise-implementation-status.md`](enterprise-implementation-status.md)：当前已实现、已测试和未验证能力。
 - [`enterprise-deployment.md`](enterprise-deployment.md)：团队部署、上游同步、分支保护、MDM 和发布流程。
 - [`enterprise-operating-model.md`](enterprise-operating-model.md)：项目 RACI、协作节奏、GitHub 规则、环境晋级、发布证据、成本容量、培训和试点退出。
+- [`internal-saas-plan.md`](internal-saas-plan.md)：内部人员自助接入形态的方案草案（默认策略模板、IdP 组映射、客户端一键登录），并说明为什么内部场景不做多租户。
+- [`corp-plugin-protocol.md`](corp-plugin-protocol.md)：magpie 企业客户端插件与自建服务端的 API 契约（认证、供应商、资源库、用量/脱敏上传）及安全边界；实现见 [`../enterprise/corp-plugin`](../enterprise/corp-plugin)，服务端参考实现见 [`../enterprise/corp-server`](../enterprise/corp-server)。
 
 ## 企业版当前实施基线
 

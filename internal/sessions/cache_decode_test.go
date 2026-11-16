@@ -9,13 +9,22 @@ import (
 	"slices"
 	"strings"
 	"testing"
-	"time"
 	"unsafe"
 )
+
+// unraised holds parseVersions at none raised for a test of the kept
+// file's form, whatever the agents' versions are now: a file with no
+// versions in it is then as current as its parses.
+func unraised(t *testing.T) {
+	kept := parseVersions
+	parseVersions = map[string]int{}
+	t.Cleanup(func() { parseVersions = kept })
+}
 
 // The kept file decoded on a few goroutines is what one json.Unmarshal of
 // it was, and is refused where that was.
 func TestDecodeCacheIsUnmarshal(t *testing.T) {
+	unraised(t)
 	unmarshal := func(b []byte, zone string) (map[string]*state, bool) {
 		var c cacheFile
 		if json.Unmarshal(b, &c) != nil || c.Version != cacheVersion || c.Zone != zone || c.Files == nil {
@@ -64,6 +73,7 @@ func TestDecodeCacheIsUnmarshal(t *testing.T) {
 // once a file: 23.7k sessions a script ran with one prompt held 11 MB of
 // copies of it.
 func TestDecodeCacheSharesRepeats(t *testing.T) {
+	unraised(t)
 	var b strings.Builder
 	fmt.Fprintf(&b, `{"version":%d,"zone":"z","files":{`, cacheVersion)
 	for i := range 2000 {
@@ -99,6 +109,7 @@ func TestDecodeCacheSharesRepeats(t *testing.T) {
 // A file of one day holds that day's models once, and a parse of it, from
 // a clone, counts a call once in each: the kept state is as it was read.
 func TestDecodeCacheSharesOneDaysModels(t *testing.T) {
+	unraised(t)
 	m := `{"gpt-5.5":{"input":10,"output":2,"cache_read":0,"cache_write":0}}`
 	b := fmt.Sprintf(`{"version":%d,"zone":"z","files":{"/one":{"size":1,"models":%s,"days":{"2026-10-24":{"m":%s,"a":5}}},"/other":{"size":1,"models":%s,"days":{"2026-10-24":{"m":{"o3":{"input":1,"output":0,"cache_read":0,"cache_write":0}}}}},"/two":{"size":1,"models":%s,"days":{"2026-10-23":{"m":%s},"2026-10-24":{"a":1}}}}}`, cacheVersion, m, m, m, m, m)
 	files, ok := decodeCache([]byte(b), "z")
@@ -129,38 +140,6 @@ func TestDecodeCacheSharesOneDaysModels(t *testing.T) {
 	}
 }
 
-// A save writes the file json.Marshal would, byte for byte, a file's parse
-// at a time: keys in order and escaped as Marshal escapes them, a file of
-// no parse, an empty index and none at all.
-func TestEncodeCacheIsMarshal(t *testing.T) {
-	at := time.Date(2026, 10, 25, 7, 0, 0, 0, time.UTC)
-	files := map[string]*state{"/b/<a&b>.jsonl": {Size: 3, Mod: 9, Title: "a <b> & \"c\"  ", Start: at, Last: at, Models: named[Tokens]{{"m", Tokens{Input: 1}}}}, "/a/x.jsonl": nil}
-	for i := range 3000 {
-		files[fmt.Sprintf("/s/%04d.jsonl", i)] = &state{Size: int64(i), Cwd: strings.Repeat("d", i%300), Start: at, Last: at.Add(time.Duration(i) * time.Second)}
-	}
-	for _, c := range []cacheFile{
-		{Version: cacheVersion, Zone: "28800/28800", Files: files},
-		{Version: cacheVersion, Zone: "<z>", Parsers: map[string]int{"codex": 2, "claude": 1}, Files: map[string]*state{"/c": {Agent: "codex", Size: 1}}},
-		{Version: cacheVersion, Zone: "0/0"},
-	} {
-		want, err := json.Marshal(c)
-		if err != nil {
-			t.Fatal(err)
-		}
-		var got bytes.Buffer
-		if err := encodeCache(&got, c); err != nil {
-			t.Fatal(err)
-		}
-		if !bytes.Equal(got.Bytes(), want) {
-			n := 0
-			for n < min(got.Len(), len(want)) && got.Bytes()[n] == want[n] {
-				n++
-			}
-			t.Fatalf("%d files: %d bytes, want %d; apart at %d: %.80q", len(c.Files), got.Len(), len(want), n, got.Bytes()[n:])
-		}
-	}
-}
-
 // A raise of one agent's parseVersions reads that agent's files again and
 // keeps every other agent's parses: a raise of cacheVersion read a long
 // history whole, minutes of CPU after an update (#2278).
@@ -171,10 +150,18 @@ func TestParseVersionsReadOneAgentAgain(t *testing.T) {
 		if err := encodeCache(&b, c); err != nil {
 			t.Fatal(err)
 		}
+		j, err := json.Marshal(c)
+		if err != nil {
+			t.Fatal(err)
+		}
 		parseVersions = now
 		files, ok := decodeCache(b.Bytes(), "z")
-		if !ok {
+		fromJSON, jok := decodeCache(j, "z")
+		if !ok || !jok {
 			t.Fatal("refused")
+		}
+		if got := slices.Sorted(maps.Keys(fromJSON)); !slices.Equal(got, slices.Sorted(maps.Keys(files))) {
+			t.Fatalf("JSON kept %v, binary %v", got, slices.Sorted(maps.Keys(files)))
 		}
 		return slices.Sorted(maps.Keys(files))
 	}

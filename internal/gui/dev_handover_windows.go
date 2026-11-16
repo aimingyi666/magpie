@@ -44,6 +44,9 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/yetone/magpie/internal/gateway"
 	"github.com/yetone/magpie/internal/proc"
@@ -113,13 +116,7 @@ func devPrepareInherited() {
 	}
 	var once sync.Once
 	for _, s := range socks {
-		f := os.NewFile(s.Handle, "handover-"+s.Role)
-		if f == nil {
-			log.Println("dev handover:", s.Role, "is no file handle")
-			continue
-		}
-		ln, err := net.FileListener(f)
-		f.Close()
+		ln, err := newDevListener(syscall.Handle(s.Handle), s.Addr)
 		if err != nil {
 			log.Printf("dev handover: %s on %s: %v", s.Role, s.Addr, err)
 			continue
@@ -181,12 +178,13 @@ func devServeBackend(srv *http.Server, ln net.Listener) error {
 	devWriteState(ln.Addr().String())
 	go srv.Serve(ln)
 	// the old backend stops accepting only once the gateway of the new one
-	// serves the socket it was handed
+	// serves the socket it was handed. No ack when it doesn't: the backend
+	// before this one keeps serving, and the watcher says so.
 	if devGatewayTaken != nil {
 		select {
 		case <-devGatewayTaken:
 		case <-time.After(15 * time.Second):
-			log.Println("dev handover: the gateway didn't take the socket handed over in time")
+			return errors.New("the gateway didn't take the socket handed over")
 		}
 	}
 	devAck()
@@ -376,41 +374,30 @@ func devHandoverTo(exe string) error {
 		return errors.New("this backend serves no gateway")
 	}
 	var (
-		files []*os.File
+		dups  []windows.Handle
 		socks []devSocket
 		hs    []syscall.Handle
 	)
-	add := func(role, addr string, f *os.File) error {
-		h := syscall.Handle(f.Fd())
-		if err := syscall.SetHandleInformation(h, syscall.HANDLE_FLAG_INHERIT, syscall.HANDLE_FLAG_INHERIT); err != nil {
-			f.Close()
+	add := func(role string, ln net.Listener) error {
+		h, err := devInheritableSocket(ln)
+		if err != nil {
 			return fmt.Errorf("%s: %w", role, err)
 		}
-		files = append(files, f)
+		dups = append(dups, windows.Handle(h))
 		hs = append(hs, h)
-		socks = append(socks, devSocket{Role: role, Addr: addr, Handle: uintptr(h)})
+		socks = append(socks, devSocket{Role: role, Addr: ln.Addr().String(), Handle: uintptr(h)})
 		return nil
 	}
 	closeAll := func() {
-		for _, f := range files {
-			f.Close()
+		for _, h := range dups {
+			windows.Closesocket(h)
 		}
 	}
-	gwf, err := gw.ListenerFile()
-	if err != nil {
-		return fmt.Errorf("the gateway's socket: %w", err)
-	}
-	if err := add("gateway", gw.Addr(), gwf); err != nil {
-		closeAll()
+	if err := add("gateway", gw.Listener()); err != nil {
 		return err
 	}
 	if gw.AdminAddr() != "" {
-		af, err := gw.AdminListenerFile()
-		if err != nil {
-			closeAll()
-			return fmt.Errorf("the administration socket: %w", err)
-		}
-		if err := add("admin", gw.AdminAddr(), af); err != nil {
+		if err := add("admin", gw.AdminListener()); err != nil {
 			closeAll()
 			return err
 		}
@@ -419,23 +406,13 @@ func devHandoverTo(exe string) error {
 	backendLn := devHandover.ln
 	devHandover.Unlock()
 	if backendLn != nil {
-		f, err := tcpFile(backendLn)
-		if err != nil {
-			closeAll()
-			return fmt.Errorf("the backend's socket: %w", err)
-		}
-		if err := add("backend", backendLn.Addr().String(), f); err != nil {
+		if err := add("backend", backendLn); err != nil {
 			closeAll()
 			return err
 		}
 	}
 	if devUILn != nil {
-		f, err := tcpFile(devUILn)
-		if err != nil {
-			closeAll()
-			return fmt.Errorf("the dev page's socket: %w", err)
-		}
-		if err := add("ui", devUILn.Addr().String(), f); err != nil {
+		if err := add("ui", devUILn); err != nil {
 			closeAll()
 			return err
 		}
@@ -462,7 +439,8 @@ func devHandoverTo(exe string) error {
 		closeAll()
 		return fmt.Errorf("the new backend didn't start: %w", err)
 	}
-	go cmd.Wait()
+	exited := make(chan error, 1)
+	go func() { exited <- cmd.Wait() }()
 	// the child has the handles now; this one's copies are not needed
 	closeAll()
 	defer os.Remove(ack)
@@ -471,6 +449,11 @@ func devHandoverTo(exe string) error {
 	for {
 		if _, err := os.Stat(ack); err == nil {
 			break
+		}
+		select {
+		case err := <-exited:
+			return fmt.Errorf("the new backend ended before it served: %v", err)
+		default:
 		}
 		if time.Now().After(deadline) {
 			cmd.Process.Kill()
@@ -487,11 +470,124 @@ func devHandoverTo(exe string) error {
 	return nil
 }
 
-// tcpFile is the socket a TCP listener serves on.
-func tcpFile(ln net.Listener) (*os.File, error) {
-	tl, ok := ln.(*net.TCPListener)
-	if !ok {
-		return nil, errors.New("not a TCP listener")
+// devListener serves a listening socket handed over by the backend before
+// this one. Its socket is associated with that process's I/O completion
+// port, which a socket can't be moved from, so Go's netpoller can't take it
+// in another process. It is accepted on in blocking mode instead, which
+// doesn't need one; each connection the operating system accepts there is a
+// socket of its own, which net.FileConn gives the Go poller.
+type devListener struct {
+	h      syscall.Handle
+	addr   *net.TCPAddr
+	mu     sync.Mutex
+	closed bool
+}
+
+// procAccept is Winsock's accept: syscall.Accept is a stub on Windows.
+var procAccept = syscall.NewLazyDLL("ws2_32.dll").NewProc("accept")
+
+func newDevListener(h syscall.Handle, addr string) (*devListener, error) {
+	ta, err := net.ResolveTCPAddr("tcp", addr)
+	if err != nil {
+		syscall.Closesocket(h)
+		return nil, err
 	}
-	return tl.File()
+	// accept blocks; overlapped I/O (the other process's) ignores the flag
+	if err := syscall.SetNonblock(h, false); err != nil {
+		syscall.Closesocket(h)
+		return nil, err
+	}
+	return &devListener{h: h, addr: ta}, nil
+}
+
+func (l *devListener) Accept() (net.Conn, error) {
+	for {
+		h, err := devAccept(l.h)
+		if err != nil {
+			l.mu.Lock()
+			closed := l.closed
+			l.mu.Unlock()
+			if closed {
+				return nil, net.ErrClosed
+			}
+			return nil, err
+		}
+		syscall.SetNonblock(h, true)
+		f := os.NewFile(uintptr(h), "magpie-dev-conn")
+		if f == nil {
+			syscall.Closesocket(h)
+			continue
+		}
+		c, err := net.FileConn(f)
+		f.Close()
+		if err != nil {
+			continue
+		}
+		return c, nil
+	}
+}
+
+func devAccept(h syscall.Handle) (syscall.Handle, error) {
+	var sa syscall.RawSockaddrAny
+	n := int32(unsafe.Sizeof(sa))
+	r, _, e := procAccept.Call(uintptr(h), uintptr(unsafe.Pointer(&sa)), uintptr(unsafe.Pointer(&n)))
+	if syscall.Handle(r) == syscall.InvalidHandle {
+		return 0, e
+	}
+	return syscall.Handle(r), nil
+}
+
+func (l *devListener) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return nil
+	}
+	l.closed = true
+	return syscall.Closesocket(l.h)
+}
+
+func (l *devListener) Addr() net.Addr { return l.addr }
+
+// devInheritableSocket duplicates the socket ln serves on, marked for a
+// child process to inherit. A listener already serving is registered with
+// Go's I/O completion port, and TCPListener.File can't detach it there
+// (DisassociateIOCP fails on a socket); the Winsock duplicate is a socket
+// of its own, which the child makes into a listener of its own.
+func devInheritableSocket(ln net.Listener) (syscall.Handle, error) {
+	var (
+		dup  windows.Handle
+		serr error
+	)
+	dupFrom := func(raw syscall.Handle) {
+		var info windows.WSAProtocolInfo
+		if e := windows.WSADuplicateSocket(windows.Handle(raw), uint32(os.Getpid()), &info); e != nil {
+			serr = e
+			return
+		}
+		dup, serr = windows.WSASocket(-1, -1, -1, &info, 0, windows.WSA_FLAG_OVERLAPPED)
+	}
+	switch l := ln.(type) {
+	case *net.TCPListener:
+		sc, err := l.SyscallConn()
+		if err != nil {
+			return 0, err
+		}
+		if err := sc.Control(func(fd uintptr) { dupFrom(syscall.Handle(fd)) }); err != nil {
+			return 0, err
+		}
+	case *devListener:
+		dupFrom(l.h)
+	default:
+		return 0, errors.New("not a TCP listener")
+	}
+	if serr != nil {
+		return 0, serr
+	}
+	h := syscall.Handle(dup)
+	if err := syscall.SetHandleInformation(h, syscall.HANDLE_FLAG_INHERIT, syscall.HANDLE_FLAG_INHERIT); err != nil {
+		windows.Closesocket(dup)
+		return 0, err
+	}
+	return h, nil
 }

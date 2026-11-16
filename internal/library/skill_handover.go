@@ -27,7 +27,8 @@ import (
 // it, so each goes on having it, now from the library, till it's unticked.
 // A skill not in the library yet (found in ~/.agents/skills) is brought in
 // first. One that can't be handed over stays as it was, in Unmoved, and
-// the others are handed over all the same. HandBackSkill undoes it.
+// the others are handed over all the same. It also turns off the setting
+// that keeps every skill in ~/.agents/skills. HandBackSkill undoes it.
 func HandOverSkills(names []string) (*Result, error) {
 	if len(names) == 0 {
 		return nil, fmt.Errorf("no skills to hand over")
@@ -48,6 +49,13 @@ func HandOverSkills(names []string) (*Result, error) {
 		if len(failed) == len(names) {
 			return errors.New(failed[0].Error)
 		}
+		// Choosing which agents get a skill and the setting that puts every
+		// skill in ~/.agents/skills (SetSkillsWhere) can't both hold: with
+		// it on, every agent reading that folder has every skill and magpie
+		// links each one back there. It goes off, and the sync takes out
+		// magpie's own links there, never the user's entries
+		// (ConatusMoon2222 on X).
+		l.SharedSkills = false
 		return nil
 	})
 	if res != nil {
@@ -81,7 +89,7 @@ func readsSharedHere(ts []*Target) []string {
 	sh := realDir(sharedSkillsDir())
 	var out []string
 	for _, t := range ts {
-		if t.Skills != "" && !t.Gone && t.Desktop == nil && (slices.Contains(readsShared, t.Agent.ID) || realDir(t.Skills) == sh) {
+		if t.Skills != "" && !t.Gone && t.Desktop == nil && (t.readsSharedDir() || realDir(t.Skills) == sh) {
 			out = append(out, t.Agent.ID)
 		}
 	}

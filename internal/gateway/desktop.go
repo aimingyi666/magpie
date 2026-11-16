@@ -1,14 +1,12 @@
 package gateway
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
 	"hash/fnv"
 	"net/http"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
@@ -18,6 +16,7 @@ import (
 	"github.com/yetone/magpie/internal/appdir"
 	"github.com/yetone/magpie/internal/desktopdir"
 	"github.com/yetone/magpie/internal/lastgood"
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/provider"
 	"github.com/yetone/magpie/internal/settings"
 )
@@ -34,8 +33,8 @@ import (
 // Anthropic model") and on the model a session is started with, so
 // anthropic/deepseek/deepseek-flash is turned away for its "deepseek".
 var (
-	desktopDenied = regexp.MustCompile(`ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm|\bling\b|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan|qwen|tc-code|\bunic\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\.nova|nova-|devstral|ministral|ernie|codex|arcee|trinity|abab|phi\d|\bk2\.|\bm2\.|jamba|arctic|solar|mercury|zamba|kat-coder|\bds-|dpsk`)
-	desktopTier   = regexp.MustCompile(`^(sonnet|opus|haiku|fable|mythos)(-[\d.]+)?$`)
+	desktopDenied = lazyre.New(`ark-code|astron|command-r|deepseek|doubao|gemini|gemma|glm|gpt|grok|hermes|hy3|kimi|lfm|\bling\b|llama|longcat|mimo|minimax|mistral|mixtral|moonshot|nemotron|openai|phi-|qianfan|qwen|tc-code|\bunic\b|yi-|stepfun|step-3|seed-|bytedance|hunyuan|granite|amazon\.nova|nova-|devstral|ministral|ernie|codex|arcee|trinity|abab|phi\d|\bk2\.|\bm2\.|jamba|arctic|solar|mercury|zamba|kat-coder|\bds-|dpsk`)
+	desktopTier   = lazyre.New(`^(sonnet|opus|haiku|fable|mythos)(-[\d.]+)?$`)
 	desktopWords  = []string{"claude", "sonnet", "opus", "haiku", "fable", "mythos", "anthropic"}
 )
 
@@ -70,7 +69,7 @@ func desktopAccepts(id string) bool {
 // request that names no build at all, as the Code tab's Claude Code
 // ("claude-cli/… (external, claude-desktop)", known by its key) whose
 // ids are mythos-magpie-<n> already.
-var desktopUAVersion = regexp.MustCompile(` Claude/(\d+)`)
+var desktopUAVersion = lazyre.New(` Claude/(\d+)`)
 
 func desktopKnowsMythos(ua string) bool {
 	m := desktopUAVersion.FindStringSubmatch(ua)
@@ -123,8 +122,8 @@ const (
 // desktopClaude is a model id that is Anthropic's own Claude model, as tIt
 // knows it: claude-<tier>-<version>, a date taken off.
 var (
-	desktopClaude = regexp.MustCompile(`^claude-(?:opus|sonnet|haiku|fable|mythos)-\d+(?:-\d+)?$`)
-	desktopDated  = regexp.MustCompile(`-\d{8}$`)
+	desktopClaude = lazyre.New(`^claude-(?:opus|sonnet|haiku|fable|mythos)-\d+(?:-\d+)?$`)
+	desktopDated  = lazyre.New(`-\d{8}$`)
 )
 
 func aliasNumber(id string) string {
@@ -187,7 +186,8 @@ func DesktopID(e provider.Entry) string { return claudeLooking(e) }
 // display_name, which carries the provider already. Only a Claude model
 // with reasoning levels, listed as magpie-<number>.anthropic.<model>
 // (claudeLooking), is named after Desktop's own catalog ("Opus 5.5"), so
-// two providers' rows read alike and the menu tells them apart by that id.
+// two providers' rows read alike and the menu tells them apart by that id
+// and by the provider in its description (desktopSaidBy).
 // Every other id is the model's own (no number) or an alias Desktop
 // doesn't know (mythos-magpie-<n>, anthropic/magpie-<n>), named by
 // display_name.
@@ -208,7 +208,8 @@ func DesktopNumber(e provider.Entry) string {
 // it keeps (claudeLooking), named as the agents' lists name models
 // (desktopNames: the Provider in model names setting, so its menu reads
 // like Codex's, #1746). Desktop shows the name, not the id, and its
-// description after it, so none is given but a 1M entry's (desktop1M); it
+// description after it, so none is given but a 1M entry's (desktop1M) and
+// the provider of a row Desktop names after its catalog (desktopSaidBy); it
 // folds rows of one name into one entry, so no two of one name read the
 // same (desktopNames). A model of 1M or more is listed by its "[1m]" id
 // under settings.DesktopLongest, described as Desktop's own 1M entry is
@@ -216,7 +217,7 @@ func DesktopNumber(e provider.Entry) string {
 // shown a reasoning-level model by its plain alias instead of the picker
 // one, which such a build would drop whole (#2426).
 func desktopModels(entries []provider.Entry, knowsMythos bool) []map[string]any {
-	names := desktopNames(entries)
+	names := desktopNames("claude-desktop", entries)
 	// the tier each model stands in for: the user's pick only (a model
 	// picked for two is tagged with the first, desktopTierTurn sends the
 	// other). A Claude model is never tagged with its own tier unasked:
@@ -225,14 +226,9 @@ func desktopModels(entries []provider.Entry, knowsMythos bool) []map[string]any 
 	// chat was on AgentRouter's gpt-6.1-sol (cybercaius on Discord).
 	// Untagged, Claude Code asks for its own id of the tier, which
 	// desktopTurn keeps on the chat's provider (servedBeside).
-	picked := DesktopTiers()
-	tierOf := map[string]string{}
-	for _, t := range DesktopTierNames {
-		if id := picked[t]; id != "" && tierOf[id] == "" {
-			tierOf[id] = t
-		}
-	}
-	longest := settings.Load().DesktopLongest
+	tierOf := desktopTierOf(DesktopTiers())
+	longest := settings.Shared().DesktopLongest
+	labels := provider.LabelsFor("claude-desktop", entries)
 	data := make([]map[string]any, 0, len(entries))
 	for i, e := range entries {
 		m := modelObject(e)
@@ -242,9 +238,16 @@ func desktopModels(entries []provider.Entry, knowsMythos bool) []map[string]any 
 			id = aliasFor(e.ID)
 		}
 		m["id"] = id
+		var said []string
 		if desktopListed1M(e, longest) {
 			m["id"] = m["id"].(string) + "[1m]"
-			m["description"] = desktop1MSaid
+			said = append(said, desktop1MSaid)
+		}
+		if by := desktopSaidBy(e, labels[i]); by != "" {
+			said = append(said, by)
+		}
+		if len(said) > 0 {
+			m["description"] = strings.Join(said, " · ")
 		}
 		if t := tierOf[e.ID]; t != "" {
 			m["anthropic_family_tier"], m["is_family_default"] = t, true
@@ -280,12 +283,34 @@ func desktopListed1M(e provider.Entry, longest bool) bool { return longest && e.
 // DesktopListed1M says Claude Desktop is shown e by its "[1m]" id, which
 // its Code tab hands Claude Code, so a session on it has the 1M window.
 func DesktopListed1M(e provider.Entry) bool {
-	return desktopListed1M(e, settings.Load().DesktopLongest)
+	return desktopListed1M(e, settings.Shared().DesktopLongest)
 }
 
 // desktop1MSaid is the description Claude Desktop gives the 1M entry it
 // adds (WLt in its app.asar, 2.7032).
 const desktop1MSaid = "1M context window"
+
+// desktopSaidBy is the provider Claude Desktop's menu says under e, where
+// the name it shows can't: "" but for a row Desktop names after its own
+// model catalog (DesktopNumber), whose label, by the Provider in model
+// names setting, has its provider after it.
+//
+// Desktop 4.4212 labels a picker row by its catalog's name before the
+// gateway's display_name (ngn in its app.asar: labelOverride, then the
+// catalog's name, then display_name; only an admin's inferenceModels list
+// has labelOverride), so every provider's claude-opus-5-5 read "Opus 5.5"
+// and the menu told them apart only by the tail of the id, "(…7922287072
+// .anthropic.claude-opus-5-5)" (4 v5 on Discord: 老林夕, 新林夕, 百德 and
+// chatflowsai's alike). The row's description is the gateway's before the
+// catalog's, which has none for these models, and Desktop shows it under
+// the name, so the provider goes there. The id stays as it was, for a
+// session or a pick saved on it.
+func desktopSaidBy(e provider.Entry, label string) string {
+	if DesktopNumber(e) == "" || e.Provider.Name == "" || !strings.HasSuffix(label, " · "+e.Provider.Name) {
+		return ""
+	}
+	return e.Provider.Name
+}
 
 // Claude Desktop's Code tab runs Claude Code with ANTHROPIC_DEFAULT_<TIER>_MODEL
 // set to "" for every tier, unless the gateway's /v1/models tags a model
@@ -398,25 +423,43 @@ func desktopTierAsked(asked string) bool {
 	return false
 }
 
-// desktopNames are the names Claude Desktop is shown entries by, in order:
+// desktopNames are the names Claude Desktop (or Claude Science, agent) is
+// shown entries by, in order:
 // as the agents' lists name them (provider.Labels, the Provider in model
 // names setting: on, every name with its provider's after it; own, a name
 // the user gave just as they wrote it; off, names plain — but two of one
 // name keep their provider's, so they stay apart), and where that still
-// leaves two alike (one provider's models named alike) the whole catalog id
-// after it, for Desktop's menu shows the name alone.
-func desktopNames(entries []provider.Entry) []string {
-	out := provider.Labels(entries)
-	same := map[string]int{}
-	for _, s := range out {
-		same[strings.ToLower(s)]++
+// leaves two alike (one provider's models named alike) the model's own id
+// after it, short as the name already says the provider, or the whole
+// catalog id where that is still not enough (two providers of one name),
+// for Desktop's menu shows the name alone.
+func desktopNames(agent string, entries []provider.Entry) []string {
+	out := provider.LabelsFor(agent, entries)
+	count := func(names []string) map[string]int {
+		same := map[string]int{}
+		for _, s := range names {
+			same[strings.ToLower(s)]++
+		}
+		return same
 	}
+	same := count(out)
+	short := slices.Clone(out)
 	for i, e := range entries {
 		if same[strings.ToLower(out[i])] > 1 {
-			out[i] += " (" + e.ID + ")"
+			model := e.ID
+			if e.Provider != nil {
+				model = strings.TrimPrefix(e.ID, e.Provider.ID+"/")
+			}
+			short[i] = out[i] + " (" + model + ")"
 		}
 	}
-	return out
+	still := count(short)
+	for i, e := range entries {
+		if short[i] != out[i] && still[strings.ToLower(short[i])] > 1 {
+			short[i] = out[i] + " (" + e.ID + ")"
+		}
+	}
+	return short
 }
 
 // aliased is the catalog id an alias Claude Desktop was given stands for:
@@ -429,12 +472,20 @@ func aliased(id string) (string, bool) {
 	if len(number) != 10 {
 		return "", false
 	}
-	// the catalog Desktop and Science are listed from: a signed-in
-	// subscription's model a group listing alone keeps out of Catalog
-	// is still theirs (provider.SubscriptionKept)
+	// the catalog Desktop and Science are listed from
 	for _, e := range provider.CatalogOf("claude-desktop") {
 		if aliasNumber(e.ID) == number {
 			return e.ID, true
+		}
+	}
+	// a model listed once more for a tier after the first it is picked
+	// for (desktopTierAlias), by whichever tier, so a session saved on it
+	// is served after the picks change too
+	for _, e := range provider.CatalogOf("claude-desktop") {
+		for _, t := range DesktopTierNames {
+			if aliasNumber(desktopTierKey(e.ID, t)) == number {
+				return e.ID, true
+			}
 		}
 	}
 	return "", false
@@ -794,11 +845,17 @@ func desktopDefault(asked string) string {
 }
 
 // desktopSelectorRoots are the Claude-3p folders Desktop keeps its model
-// menus' choices in (desktopChosen): every set desktopdir finds. A test
-// sets its own.
+// menus' choices in (desktopChosen): every set desktopdir finds, and the
+// isolated Desktop's folder (#5671) when it is there (the newest choice
+// counts). A test sets its own.
 var desktopSelectorRoots = func() []string {
 	home, _ := os.UserHomeDir()
 	var out []string
+	if iso := desktopdir.Isolated(desktopdir.OS, home); iso != "" {
+		if fi, err := os.Stat(iso); err == nil && fi.IsDir() {
+			out = append(out, iso)
+		}
+	}
 	for _, d := range desktopdir.Sets(desktopdir.OS, home, appdir.Getenv) {
 		if d.ThreeP != "" {
 			out = append(out, d.ThreeP)
@@ -937,7 +994,7 @@ const desktopTitlePrompt = "You write short session titles."
 // desktopTitle: the request's system prompt is Desktop's title prompt, as a
 // string (Desktop's client) or one of its text blocks (Claude Code's).
 func desktopTitle(body []byte) bool {
-	if !bytes.Contains(body, []byte(desktopTitlePrompt)) {
+	if !bodyHas(body, desktopTitlePrompt) {
 		return false
 	}
 	var v struct {
@@ -976,7 +1033,7 @@ func small(body []byte) bool {
 // hasTools: the request offers the model tools (Anthropic's, Chat's and
 // Responses' "tools" alike).
 func hasTools(body []byte) bool {
-	if !bytes.Contains(body, []byte(`"tools"`)) {
+	if !bodyHas(body, `"tools"`) {
 		return false
 	}
 	var v struct {

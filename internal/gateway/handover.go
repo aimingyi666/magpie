@@ -27,6 +27,10 @@ import (
 // been seen to keep, as `make dev`'s handover waits.
 var handedOffDrain = 15 * time.Minute
 
+// HandedOffDrain is handedOffDrain: the app that handed the gateway over
+// quits by then and a little after, whatever holds it up (gui.quitBy).
+func HandedOffDrain() time.Duration { return handedOffDrain }
+
 // shortDrain is how long the gateway's end waits for its requests when
 // nothing serves the port after it: a quit, or a restart that waits.
 var shortDrain = 2 * time.Second
@@ -173,6 +177,26 @@ func takeInheritedAdmin(addr string) net.Listener {
 		return nil
 	}
 	return ln
+}
+
+// Listener is the socket the gateway serves on, nil before it serves.
+// A dev restart duplicates it into the process that replaces this one
+// (internal/gui/dev_handover_windows.go).
+func (s *Server) Listener() net.Listener {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	if t, ok := s.ln.(*tlsListener); ok {
+		return t.Listener
+	}
+	return s.ln
+}
+
+// AdminListener is the socket the administration API serves on, nil when
+// it serves none.
+func (s *Server) AdminListener() net.Listener {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	return s.adminLn
 }
 
 // AdminAddr is where the administration listener serves, "" when it

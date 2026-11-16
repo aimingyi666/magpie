@@ -119,22 +119,22 @@ func TestBusyModelNotKeptAtNewTurn(t *testing.T) {
 	h.Set("x-claude-code-session-id", "busy-load-kept")
 	turn := []byte(`{"messages":[{"role":"user","content":"hi"}]}`)
 	within := []byte(`{"messages":[{"role":"user","content":"hi"},{"role":"assistant","content":null,"tool_calls":[{"id":"c1","type":"function","function":{"name":"f","arguments":"{}"}}]},{"role":"tool","tool_call_id":"c1","content":"ok"}]}`)
-	_, _, _, key := affine("t", provider.AffinitySession, false, false, false, h, provider.Chat, turn, turn, cs, pl)
+	_, _, _, key := affine("t", provider.AffinitySession, false, false, false, false, h, provider.Chat, turn, turn, cs, pl)
 	answered(key, cs[1], 1, Usage{CacheRead: 50_000})
 	t.Cleanup(func() { sticks.Lock(); delete(sticks.m, key); sticks.Unlock() })
 
-	got, _, aff, _ := affine("t", provider.AffinitySession, false, false, false, h, provider.Chat, within, within, cs, pl)
+	got, _, aff, _ := affine("t", provider.AffinitySession, false, false, false, false, h, provider.Chat, within, within, cs, pl)
 	if got[0].rest != "inhouse-plugin/big" || !aff.Kept {
 		t.Fatalf("within a turn: first %s, kept %v, why %s", got[0].rest, aff.Kept, aff.Why)
 	}
-	got, _, aff, _ = affine("t", provider.AffinitySession, false, false, false, h, provider.Chat, turn, turn, cs, pl)
+	got, _, aff, _ = affine("t", provider.AffinitySession, false, false, false, false, h, provider.Chat, turn, turn, cs, pl)
 	if got[0].rest != "inhouse-plugin/mid" || aff.Kept || aff.Why != "busy" {
 		t.Fatalf("a new turn: first %s, kept %v, why %s", got[0].rest, aff.Kept, aff.Why)
 	}
 
 	// every one busy: kept where it was
 	both := planned{order: []Weighed{{Who: "mid", Busy: 85}, {Who: "big", Busy: 92}}}
-	got, _, aff, _ = affine("t", provider.AffinitySession, false, false, false, h, provider.Chat, turn, turn, cs, both)
+	got, _, aff, _ = affine("t", provider.AffinitySession, false, false, false, false, h, provider.Chat, turn, turn, cs, both)
 	if got[0].rest != "inhouse-plugin/big" || !aff.Kept {
 		t.Fatalf("all busy: first %s, kept %v, why %s", got[0].rest, aff.Kept, aff.Why)
 	}
@@ -144,5 +144,35 @@ func TestBusyModelNotKeptAtNewTurn(t *testing.T) {
 	}
 	if readyForNew(pl.order, 1) {
 		t.Fatal("a new conversation may go to the busy one")
+	}
+}
+
+// A plugin reports a model's load by its own id. One the user lists by
+// another (Listed as) is judged busy by that load all the same (axelburks
+// on Discord: a renamed model was never busy, the others were).
+func TestBusyModelListedAsAnotherID(t *testing.T) {
+	plugin.ForgetLoads()
+	t.Cleanup(plugin.ForgetLoads)
+	s := settings.Load()
+	was := s.ModelIDs
+	s.ModelIDs = map[string]string{"inhouse-plugin/fast": "big", "inhouse-plugin/grok": "grok-4.7@256k"}
+	if err := settings.Save(s); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s := settings.Load(); s.ModelIDs = was; settings.Save(s) })
+	now := time.Now()
+	plugin.NoteLoadsForTest("inhouse", map[string]float64{"big": 92, "grok-4.7": 95}, now)
+	p := provider.PluginForTest("inhouse-plugin", "inhouse")
+	if own := p.OwnModelID("fast"); own != "big" {
+		t.Fatalf("OwnModelID(fast) = %q", own)
+	}
+	for _, model := range []string{"fast", "grok", "big"} {
+		load, busy := busyOf(candidate{p: p, model: model, rest: "inhouse-plugin/" + model}, 80, now)
+		if !busy || load < 92 {
+			t.Errorf("%s: load %v busy %v, want busy over 80", model, load, busy)
+		}
+	}
+	if load, busy := busyOf(candidate{p: p, model: "other", rest: "inhouse-plugin/other"}, 80, now); busy || load != 0 {
+		t.Errorf("other: load %v busy %v, want none", load, busy)
 	}
 }

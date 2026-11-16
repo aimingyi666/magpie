@@ -486,7 +486,18 @@ token 轮换/恢复和管理台员工产品流仍未实现；
 验收。Docker/VM 隔离、共享卷并发、浏览器 E2E、HA 和生产验收也未完成，因此不能把 M3-D
 运行时核心写成产品化或生产可用。
 
-### 4.6 员工端 Magpie 插件页（状态 + 立即同步：已实现）
+### 4.6 员工端 Magpie 插件页（状态 + 立即同步：已实现，legacy）
+
+> **状态：legacy。** `enterprise/magpie-plugin` 配套的是 `admin-service` +
+> `resource-service`：原生管理员视图、Ed25519 签名资源同步、`join-enterprise.ps1` 加入。
+> 自建控制面、用 `library` 下发指令/MCP/技能、并需要用量与脱敏回传的部署，用
+> [`corp-plugin/`](corp-plugin/README.md)，接口契约见
+> [`../devtools/corp-plugin-protocol.md`](../devtools/corp-plugin-protocol.md)。
+>
+> 2026-11-08：Providers 页的「企业下发供应商」面板已删除，`enterprise:providers`
+> 这一页面读能力从 `internal/plugin/page.go` 和 `internal/gui/pluginpage.go` 移除；
+> 它背后的 `/v1/enterprise/providers` 也一并删除，这是本插件唯一一个不需要页面令牌
+> 就应答的路由。
 
 `enterprise/magpie-plugin/` 在员工已有的 Magpie 侧边栏增加「企业」页。员工仍然安装同一份
 Magpie，**不需要单独的企业定制版客户端**。这一刀只覆盖员工端：
@@ -554,7 +565,13 @@ token 最长 8 小时、空闲 30 分钟失效，可手动退出；首期不做�
 原生页首期不实现审批中心；遇到 `approval_required` 时，管理员转到网页管理台完成审批。
 这一版同样不修改网关监听地址/端口、不做局域网共享、重启或进程接管，也不支持在服务器侧
 登录 Cursor、WorkBuddy、Codex 等订阅 OAuth；首期供应商只支持 API Key、自定义 Provider
-和预设 Provider。
+和预设 Provider。（例外：`corp-plugin` + `corp-server` 这一套支持员工在**自己的浏览器**
+扫码登录 WorkBuddy，账号落在企业网关的插件里；管理员勾选后模型才并入企业供应商。控制面
+不保存 token。本机 magpie 已经登录过 WorkBuddy 时，概览页也可以把那份登录一次性导入
+企业网关，之后本机退出该账号；概览页平时只显示本机已登录的账号名。入口在
+corp-plugin 的「概览」页，见
+[`corp-plugin/README.md`](corp-plugin/README.md) 与
+[`corp-server/README.md`](corp-server/README.md)。）
 
 ## 5. 当前员工与管理员流程（只列已实现）
 
@@ -732,6 +749,7 @@ enterprise/
     join-enterprise.ps1     客户端：OIDC 加入
     refresh-client.ps1      客户端：刷新短期 Key
     verify.ps1              验收：模型列表 + chat 请求
+    install-corp-plugin.ps1 客户端：MDM/软件中心静默安装 corp-plugin
   test/
     mock-upstream.mjs       测试用 OpenAI 兼容上游
     mock-oidc.mjs           测试用 OIDC 授权码、Token 和 JWKS
