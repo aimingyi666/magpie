@@ -31,7 +31,9 @@ export async function pkce() {
 export function openBrowser(url, { platform = process.platform, spawnFn = spawn } = {}) {
   try {
     if (platform === "win32") {
-      spawnFn("cmd", ["/c", "start", "", url], { detached: true, stdio: "ignore", windowsVerbatimArguments: true }).unref?.();
+      // the URL is quoted for cmd: an unquoted "&" in a query string would
+      // end the command, and the browser would open a truncated address
+      spawnFn("cmd", ["/c", "start", "", `"${url}"`], { detached: true, stdio: "ignore", windowsVerbatimArguments: true }).unref?.();
     } else if (platform === "darwin") {
       spawnFn("open", [url], { detached: true, stdio: "ignore" }).unref?.();
     } else {
@@ -175,6 +177,23 @@ export function createJoiner({ config, store, dir }) {
     };
   }
 
+  // demoSignIn enrolls without a browser when the server published
+  // demoSignIn. The "code" is demo:<email>; production refuses this the
+  // moment a client secret is configured.
+  async function demoSignIn(email, { admin = false } = {}) {
+    const address = String(email || "").trim();
+    if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(address)) {
+      throw new CorpError("demo_email_invalid", "Use an email like someone@corp.example");
+    }
+    const device = await enroll({
+      code: `${admin ? "demo-admin" : "demo"}:${address}`,
+      codeVerifier: "",
+      redirectUri: `http://127.0.0.1:${config.servicePort}/oidc/callback`,
+    });
+    store.saveDevice(device);
+    return device;
+  }
+
   // current answers the device in use, signing in first when there is
   // none that still works.
   async function current() {
@@ -241,11 +260,16 @@ export function createJoiner({ config, store, dir }) {
       email: device?.user?.email || "",
       name: device?.user?.name || "",
       department: device?.user?.department || "",
+      groups: Array.isArray(device?.user?.groups) ? device.user.groups : [],
+      role: device?.user?.role || "member",
+      gateway: device?.gateway?.baseUrl || "",
+      enrolledAt: device?.enrolledAt || "",
+      refreshAfter: device?.refreshAfter || "",
       expiresAt: device?.expiresAt || "",
     };
   }
 
-  return { signIn, handleCallback, current, refresh, status };
+  return { signIn, demoSignIn, handleCallback, current, refresh, status };
 }
 
 function hostName() {

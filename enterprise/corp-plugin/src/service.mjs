@@ -8,6 +8,18 @@ import http from "node:http";
 import crypto from "node:crypto";
 import { readBundle, enabledProviders } from "./providers.mjs";
 import { syncBundle } from "./sync.mjs";
+import { createClient, CorpError } from "./client.mjs";
+import { renderPage } from "./page.mjs";
+import { openBrowser } from "./auth.mjs";
+import {
+  magpieConfigDir,
+  nativeProviders,
+  nativeKeys,
+  shareNativeProviders,
+  localWorkbuddyAccounts,
+  localWorkbuddySignIn,
+  localGatewayAddress,
+} from "./native.mjs";
 
 const MAX_BODY = 64 << 10;
 const SYNC_EVERY_MS = 5 * 60 * 1000;
@@ -41,9 +53,31 @@ function sendHtml(res, status, body) {
 export function statusOf({ config, store, joiner }) {
   const bundle = readBundle(store.dir);
   const state = store.state();
+  const device = store.device();
+  const named = (value) => String(value || "").trim();
+  let localWorkbuddy = [];
+  if (device) {
+    try {
+      localWorkbuddy = localWorkbuddyAccounts(config);
+    } catch {
+      // a config dir this process can't read is not an error the page shows
+    }
+  }
+  const resources = {
+    instructions: (Array.isArray(bundle?.instructions) ? bundle.instructions : [])
+      .filter((item) => item && item.enabled !== false)
+      .map((item) => named(item.title) || named(item.id) || "shared"),
+    mcp: (Array.isArray(bundle?.mcp) ? bundle.mcp : [])
+      .filter((item) => item && item.enabled !== false && named(item.name))
+      .map((item) => named(item.name)),
+    skills: (Array.isArray(bundle?.skills) ? bundle.skills : [])
+      .filter((item) => item && item.enabled !== false && named(item.name))
+      .map((item) => named(item.name)),
+  };
   return {
     configured: Boolean(config.baseUrl),
     baseUrl: config.baseUrl,
+    corporate: config.corporateName || "",
     provider: config.providerId,
     device: joiner.status(),
     revision: state.revision || bundle?.revision || "",
@@ -54,13 +88,34 @@ export function statusOf({ config, store, joiner }) {
       name: entry.name || entry.id,
       models: Array.isArray(entry.models) ? entry.models.length : 0,
     })),
+    sharing: {
+      mode: String(bundle?.sharing?.mode || ""),
+      updatedAt: String(bundle?.sharing?.updatedAt || ""),
+      sources: (Array.isArray(bundle?.sharing?.sources) ? bundle.sharing.sources : []).map((source) => ({
+        id: String(source?.id || ""),
+        name: String(source?.name || source?.id || ""),
+        models: Array.isArray(source?.models) ? source.models.length : 0,
+      })),
+    },
+    role: String(device?.user?.role || "member"),
+    plugins: (Array.isArray(bundle?.plugins) ? bundle.plugins : [])
+      .filter((item) => item && item.enabled !== false && named(item.id))
+      .map((item) => ({
+        id: named(item.id),
+        name: named(item.name) || named(item.id),
+        model: named(item.model),
+      })),
+    appliedPlugins: Array.isArray(state.appliedPlugins) ? state.appliedPlugins : [],
+    localWorkbuddy,
+    resources,
     cursors: state.cursors,
     lastUploadAt: state.lastUploadAt,
     upload: config.upload,
+    demoSignIn: config.demoSignIn === true,
   };
 }
 
-export function startService({ config, store, joiner, dir, port = config.servicePort }) {
+export function startService({ config, store, joiner, dir, port = config.servicePort, openUrl = openBrowser, client = null }) {
   const pageToken = crypto.randomBytes(32).toString("hex");
   let syncing = null;
   let timer = null;
@@ -101,6 +156,24 @@ export function startService({ config, store, joiner, dir, port = config.service
     return syncing;
   }
 
+  // The administrator routes ask the corporate server as this device.
+  // The page token is not enough: the server decides from the signed-in
+  // person's groups whether the request may do anything at all.
+  function corpClient() {
+    const device = store.device();
+    if (!config.baseUrl) throw new CorpError("base_url_required", "请先填写企业服务端地址");
+    if (!device?.deviceToken) throw new CorpError("not_signed_in", "请先登录企业账号");
+    return createClient({ baseUrl: config.baseUrl, getToken: () => device.deviceToken });
+  }
+
+  function corpFailure(res, error) {
+    const status = error?.status
+      || (error?.code === "base_url_required" ? 409 : error?.code === "not_signed_in" ? 401 : 502);
+    sendJson(res, status, {
+      error: { code: error?.code || "admin_failed", message: String(error?.message || error) },
+    });
+  }
+
   server = http.createServer(async (req, res) => {
     const url = new URL(req.url || "/", `http://127.0.0.1:${boundPort}`);
     if (!allowedHost(req)) {
@@ -121,8 +194,33 @@ export function startService({ config, store, joiner, dir, port = config.service
       return;
     }
 
-    if (url.pathname === "/" || url.pathname === "/index.html") {
-      sendHtml(res, 200, page({ token: pageToken, status: statusOf({ config, store, joiner }) }));
+    // Each page has its own URL, so the plugin frame, a bookmark, or the
+    // browser tab an identity provider sends the employee back to all land
+    // somewhere whole: a sign-in page while this computer has no device, the
+    // overview, the personal page, and the administrator's view.
+    const pages = { "/": "overview", "/login": "login", "/me": "me", "/admin": "admin" };
+    const asked = url.searchParams.get("theme");
+    const theme = asked === "dark" || asked === "light" ? asked : "";
+    const keep = theme ? "?theme=" + theme : "";
+    if (req.method === "GET" && (url.pathname in pages || url.pathname === "/index.html")) {
+      if (url.pathname === "/index.html") {
+        res.writeHead(302, { location: "/" + keep });
+        res.end();
+        return;
+      }
+      const status = statusOf({ config, store, joiner });
+      const signedIn = Boolean(status.device?.enrolled && status.device?.usable);
+      if (url.pathname === "/login" && signedIn && url.searchParams.get("renew") !== "1") {
+        res.writeHead(302, { location: "/" + keep });
+        res.end();
+        return;
+      }
+      if (url.pathname !== "/login" && !status.device?.enrolled) {
+        res.writeHead(302, { location: "/login" + keep });
+        res.end();
+        return;
+      }
+      sendHtml(res, 200, renderPage({ token: pageToken, status, page: pages[url.pathname], theme }));
       return;
     }
 
@@ -136,6 +234,17 @@ export function startService({ config, store, joiner, dir, port = config.service
     }
 
     if (req.method === "GET" && url.pathname === "/v1/status") {
+      if (config.baseUrl && config.demoSignIn === undefined) {
+        try {
+          const { createClient } = await import("./client.mjs");
+          const discovered = await createClient({ baseUrl: config.baseUrl, getToken: () => "" }).discover();
+          config.demoSignIn = discovered?.demoSignIn === true;
+          if (discovered?.oidc) config.oidc = discovered.oidc;
+          if (discovered?.corporate) config.corporateName = String(discovered.corporate);
+        } catch {
+          // status still answers what we know locally
+        }
+      }
       sendJson(res, 200, statusOf({ config, store, joiner }));
       return;
     }
@@ -158,6 +267,8 @@ export function startService({ config, store, joiner, dir, port = config.service
           const { createClient } = await import("./client.mjs");
           const discovered = await createClient({ baseUrl: config.baseUrl, getToken: () => "" }).discover();
           if (discovered?.oidc) config.oidc = discovered.oidc;
+          config.demoSignIn = discovered?.demoSignIn === true;
+          if (discovered?.corporate) config.corporateName = String(discovered.corporate);
         } catch (error) {
           sendJson(res, 502, { error: { code: "discovery_failed", message: String(error?.message || error) } });
           return;
@@ -172,6 +283,37 @@ export function startService({ config, store, joiner, dir, port = config.service
       return;
     }
 
+    if (req.method === "POST" && url.pathname === "/v1/demo-login") {
+      if (!config.baseUrl) {
+        sendJson(res, 409, { error: { code: "base_url_required", message: "Set the corporate server address first" } });
+        return;
+      }
+      try {
+        const { createClient } = await import("./client.mjs");
+        const discovered = await createClient({ baseUrl: config.baseUrl, getToken: () => "" }).discover();
+        config.demoSignIn = discovered?.demoSignIn === true;
+        if (discovered?.oidc) config.oidc = discovered.oidc;
+        if (discovered?.corporate) config.corporateName = String(discovered.corporate);
+      } catch (error) {
+        sendJson(res, 502, { error: { code: "discovery_failed", message: String(error?.message || error) } });
+        return;
+      }
+      if (!config.demoSignIn) {
+        sendJson(res, 403, { error: { code: "demo_signin_disabled", message: "This server is not in demo sign-in mode" } });
+        return;
+      }
+      const body = await readBody(req);
+      try {
+        await joiner.demoSignIn(body.email, { admin: body.role === "admin" });
+        sendJson(res, 200, { status: statusOf({ config, store, joiner }) });
+      } catch (error) {
+        sendJson(res, error?.status || 400, {
+          error: { code: error?.code || "demo_signin_failed", message: String(error?.message || error) },
+        });
+      }
+      return;
+    }
+
     if (req.method === "POST" && url.pathname === "/v1/config") {
       const body = await readBody(req);
       const { saveCorpConfig } = await import("./config.mjs");
@@ -180,6 +322,307 @@ export function startService({ config, store, joiner, dir, port = config.service
       config.providerId = saved.provider;
       if (saved.oidc) config.oidc = saved.oidc;
       sendJson(res, 200, { status: statusOf({ config, store, joiner }) });
+      return;
+    }
+
+    // ---- an employee shares their own WorkBuddy account -----------------
+    //
+    // The page never holds the vendor's URL for longer than it shows it,
+    // and holds no token at all: this service starts the sign-in at the
+    // corporate server, which drives the gateway's plugin, and passes the
+    // URL and the outcome back. An account this computer's magpie already
+    // has is imported instead: the tokens are read here, sent once to the
+    // corporate gateway, and this computer's copy is signed out after.
+
+    if (req.method === "POST" && url.pathname === "/v1/share/workbuddy/start") {
+      const body = await readBody(req);
+      const provider = String(body.provider || "workbuddy").trim();
+      try {
+        const { payload } = await corpClient().request("/api/v1/share/workbuddy/start", {
+          method: "POST",
+          body: { provider },
+        });
+        // magpie shows this page in a sandboxed frame that can't open a
+        // tab, so the machine's own browser opens the vendor's page, as
+        // the corporate sign-in does. `opened` tells the page whether it
+        // worked, so it can offer the address to copy instead.
+        const url = payload?.share?.url;
+        const opened = url ? openUrl(url) : false;
+        sendJson(res, 200, { ...(payload || {}), opened });
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/v1/share/workbuddy/import") {
+      const body = await readBody(req);
+      const provider = String(body.provider || "workbuddy").trim().toLowerCase();
+      const account = String(body.account || "").trim();
+      if (provider !== "workbuddy" && provider !== "workbuddy-ai") {
+        sendJson(res, 422, { error: { code: "invalid_provider", message: "provider is workbuddy or workbuddy-ai" } });
+        return;
+      }
+      if (!account) {
+        sendJson(res, 422, { error: { code: "no_account", message: "请选择本机已登录的 WorkBuddy 账号" } });
+        return;
+      }
+      let local = null;
+      try {
+        local = localWorkbuddySignIn(provider, account, config);
+      } catch {
+        local = null;
+      }
+      if (!local) {
+        sendJson(res, 404, {
+          error: { code: "local_signin_not_found", message: "本机 magpie 里已经没有这个 WorkBuddy 登录，请刷新后重试" },
+        });
+        return;
+      }
+      try {
+        const { payload } = await corpClient().request("/api/v1/share/workbuddy/import", {
+          method: "POST",
+          body: { provider, account: local.account || account, auth: local.auth },
+        });
+        // The gateway has it now. This computer's copy goes, so one token
+        // is renewed in one place; a copy that couldn't be removed is
+        // reported, and the page says to sign it out in magpie.
+        let removed = false;
+        if (client?.auth?.remove) {
+          try {
+            await client.auth.remove({ path: { id: local.key } });
+            removed = true;
+          } catch {
+            removed = false;
+          }
+        }
+        sendJson(res, 200, { ...(payload || {}), removed });
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/v1/share/workbuddy") {
+      try {
+        const { payload } = await corpClient().request("/api/v1/device/me");
+        sendJson(res, 200, { shares: payload?.workbuddy?.shares || [] });
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    if (url.pathname.startsWith("/v1/share/workbuddy/")) {
+      const rest = url.pathname.slice("/v1/share/workbuddy/".length);
+      const cancel = req.method === "POST" && rest.endsWith("/cancel");
+      let id = "";
+      try {
+        id = decodeURIComponent(cancel ? rest.slice(0, -"/cancel".length) : rest);
+      } catch {
+        sendJson(res, 422, { error: { code: "invalid_share", message: "共享 id 不合法" } });
+        return;
+      }
+      if (!/^shr_[0-9a-f]{8,64}$/.test(id) || (!cancel && req.method !== "GET")) {
+        sendJson(res, 422, { error: { code: "invalid_share", message: "共享 id 不合法" } });
+        return;
+      }
+      try {
+        const { payload } = await corpClient().request(
+          `/api/v1/share/workbuddy/${encodeURIComponent(id)}${cancel ? "/cancel" : ""}`,
+          cancel ? { method: "POST" } : {},
+        );
+        sendJson(res, 200, payload || {});
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    // ---- the administrator's view -------------------------------------
+    //
+    // These answer the page only after the corporate server has said the
+    // signed-in person is an administrator. The native magpie's providers
+    // are read here, on this computer, and their keys are handed to the
+    // local service alone: they never pass through the page.
+
+    if (req.method === "GET" && url.pathname === "/v1/admin/session") {
+      let me;
+      try {
+        ({ payload: me } = await corpClient().request("/api/v1/device/me"));
+      } catch (error) {
+        corpFailure(res, error);
+        return;
+      }
+      const admin = me?.user?.role === "admin";
+      let native = null;
+      if (admin) {
+        try {
+          native = {
+            configDir: magpieConfigDir(config),
+            providers: nativeProviders(config),
+            keys: nativeKeys(config),
+            gateway: localGatewayAddress(),
+          };
+        } catch (error) {
+          native = {
+            configDir: magpieConfigDir(config),
+            providers: [],
+            keys: [],
+            gateway: localGatewayAddress(),
+            error: String(error?.message || error),
+          };
+        }
+      }
+      sendJson(res, 200, {
+        admin,
+        reason: admin ? "" : "当前账号不是企业管理员。管理员身份来自登录令牌里的 groups，或服务端配置的 CORP_ADMIN_EMAILS。",
+        user: me?.user || null,
+        device: me?.device || null,
+        gateway: { baseUrl: config.baseUrl, local: localGatewayAddress() },
+        sharing: me?.sharing || { mode: "", updatedAt: "", catalog: [], sources: [] },
+        catalog: Array.isArray(me?.sharing?.catalog) ? me.sharing.catalog : [],
+        native,
+      });
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/v1/admin/share/native") {
+      const body = await readBody(req);
+      const ids = Array.isArray(body.ids) ? body.ids.map((id) => String(id)) : [];
+      if (!ids.length) {
+        sendJson(res, 422, { error: { code: "no_selection", message: "请选择要分享的供应商" } });
+        return;
+      }
+      const picked = shareNativeProviders(ids, config);
+      if (!picked.providers.length) {
+        sendJson(res, 400, {
+          error: { code: "no_shareable_providers", message: "选中的供应商都不能分享", skipped: picked.skipped },
+        });
+        return;
+      }
+      try {
+        const { payload } = await corpClient().request("/api/v1/admin/sharing", {
+          method: "PUT",
+          body: { mode: "native", providers: picked.providers },
+        });
+        sendJson(res, 200, {
+          sharing: payload?.sharing || null,
+          catalog: payload?.catalog || [],
+          skipped: picked.skipped,
+        });
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/v1/admin/share/remote") {
+      const body = await readBody(req);
+      const models = Array.isArray(body.models)
+        ? body.models.map((model) => String(model))
+        : String(body.models || "").split(",").map((model) => model.trim()).filter(Boolean);
+      try {
+        const { payload } = await corpClient().request("/api/v1/admin/sharing", {
+          method: "PUT",
+          body: { mode: "remote", models },
+        });
+        sendJson(res, 200, { sharing: payload?.sharing || null, catalog: payload?.catalog || [] });
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "POST" && url.pathname === "/v1/admin/share/off") {
+      try {
+        const { payload } = await corpClient().request("/api/v1/admin/sharing", {
+          method: "PUT",
+          body: { mode: "off" },
+        });
+        sendJson(res, 200, { sharing: payload?.sharing || null, catalog: [] });
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    // ---- the WorkBuddy accounts employees shared ---------------------
+    //
+    // The page ticks which of a shared account's models the corporation
+    // hands out. The accounts themselves are the corporate server's; this
+    // only passes the selection on.
+    if (url.pathname === "/v1/admin/workbuddy") {
+      if (req.method === "GET") {
+        try {
+          const { payload } = await corpClient().request("/api/v1/admin/workbuddy");
+          sendJson(res, 200, payload || {});
+        } catch (error) {
+          corpFailure(res, error);
+        }
+        return;
+      }
+      if (req.method === "PUT") {
+        const body = await readBody(req);
+        const provider = String(body.provider || "").trim();
+        if (provider !== "workbuddy" && provider !== "workbuddy-ai") {
+          sendJson(res, 422, { error: { code: "invalid_provider", message: "provider is workbuddy or workbuddy-ai" } });
+          return;
+        }
+        const models = Array.isArray(body.models) ? body.models.map((model) => String(model)) : null;
+        if (!models) {
+          sendJson(res, 422, { error: { code: "invalid_models", message: "models must be a list" } });
+          return;
+        }
+        try {
+          const { payload } = await corpClient().request("/api/v1/admin/workbuddy", {
+            method: "PUT",
+            body: { provider, models },
+          });
+          sendJson(res, 200, payload || {});
+        } catch (error) {
+          corpFailure(res, error);
+        }
+        return;
+      }
+      sendJson(res, 405, { error: { code: "method_not_allowed", message: "read the shared accounts, or PUT the models to hand out" } });
+      return;
+    }
+
+    if (req.method === "GET" && url.pathname === "/v1/admin/people") {
+      try {
+        const { payload } = await corpClient().request("/api/v1/admin/people");
+        sendJson(res, 200, payload || {});
+      } catch (error) {
+        corpFailure(res, error);
+      }
+      return;
+    }
+
+    if (req.method === "PATCH" && url.pathname.startsWith("/v1/admin/people/")) {
+      const deviceId = decodeURIComponent(url.pathname.slice("/v1/admin/people/".length));
+      if (!/^[A-Za-z0-9_-]{1,64}$/.test(deviceId)) {
+        sendJson(res, 422, { error: { code: "invalid_device", message: "设备 id 不合法" } });
+        return;
+      }
+      const body = await readBody(req);
+      const patch = {};
+      for (const name of ["name", "models", "readOnly", "off", "limit"]) {
+        if (Object.prototype.hasOwnProperty.call(body, name)) patch[name] = body[name];
+      }
+      if (!Object.keys(patch).length) {
+        sendJson(res, 422, { error: { code: "nothing_to_change", message: "没有要修改的内容" } });
+        return;
+      }
+      try {
+        const { payload } = await corpClient().request(`/api/v1/admin/people/${encodeURIComponent(deviceId)}`, {
+          method: "PATCH",
+          body: patch,
+        });
+        sendJson(res, 200, payload || {});
+      } catch (error) {
+        corpFailure(res, error);
+      }
       return;
     }
 
@@ -214,10 +657,10 @@ export function startService({ config, store, joiner, dir, port = config.service
 }
 
 function callbackPage(result) {
-  const title = result.ok ? "Signed in" : "Sign-in failed";
-  const body = result.ok ? "You can close this tab and go back to magpie." : String(result.message || "");
+  const title = result.ok ? "登录成功" : "登录失败";
+  const body = result.ok ? "可以关闭此标签，回到 magpie。" : String(result.message || "");
   return [
-    '<!doctype html><html lang="en"><head><meta charset="utf-8">',
+    '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">',
     `<title>${escapeHtml(title)}</title>`,
     "<style>body{font:14px/1.5 system-ui,sans-serif;margin:48px;color:#111}",
     "@media (prefers-color-scheme:dark){body{background:#111;color:#eee}}</style></head><body>",
@@ -227,100 +670,4 @@ function callbackPage(result) {
 
 function escapeHtml(value) {
   return String(value ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-}
-
-// The page itself. Nothing of it interpolates a server's words into the
-// script: the status arrives as JSON, and every value is put in as text.
-const PAGE_STYLE = `
-:root{color-scheme:light dark}
-body{font:13px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif;margin:0;padding:20px;color:#111}
-@media (prefers-color-scheme:dark){body{background:#161616;color:#eee}}
-h1{font-size:15px;margin:0 0 4px}
-.sub{opacity:.65;margin:0 0 18px}
-.card{border:1px solid rgba(128,128,128,.3);border-radius:10px;padding:12px 14px;margin-bottom:12px}
-.row{display:flex;justify-content:space-between;gap:12px;padding:3px 0}
-.row span:first-child{opacity:.65}
-code{font:.92em ui-monospace,SFMono-Regular,Consolas,monospace;opacity:.85}
-button{font:inherit;padding:6px 12px;border-radius:8px;border:1px solid rgba(128,128,128,.45);background:transparent;color:inherit;cursor:pointer}
-button.primary{background:#2563eb;border-color:#2563eb;color:#fff}
-button:disabled{opacity:.5;cursor:default}
-.actions{display:flex;gap:8px;margin:14px 0}
-ul{margin:6px 0 0;padding-left:18px}
-.note{opacity:.75;margin-top:10px;font-size:12px}
-.err{color:#c0392b}
-`;
-
-const PAGE_SCRIPT = `
-var TOKEN = window.__CORP_TOKEN;
-var INITIAL = window.__CORP_STATUS;
-function text(v){ return (v === undefined || v === null || v === "") ? "\\u2014" : String(v); }
-function esc(s){ return String(s === undefined || s === null ? "" : s).replace(/[&<>"']/g, function(c){ return ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"})[c]; }); }
-function rows(s){
-  var d = s.device || {};
-  var list = [
-    ["Server", s.baseUrl || "not set"],
-    ["Signed in", d.enrolled ? (d.usable ? "yes" : "expired") : "no"],
-    ["Account", [d.email, d.department].filter(Boolean).join(" \\u00b7 ")],
-    ["Expires", d.expiresAt ? new Date(d.expiresAt).toLocaleString() : "\\u2014"],
-    ["Bundle", s.revision || "not synced"],
-    ["Last sync", s.lastSyncAt ? new Date(s.lastSyncAt).toLocaleString() : "never"]
-  ];
-  return list.map(function(pair){
-    return '<div class="row"><span>' + esc(pair[0]) + '</span><span>' + esc(text(pair[1])) + '</span></div>';
-  }).join("");
-}
-function draw(s){
-  var providers = (s.providers || []).map(function(p){
-    return '<li><code>' + esc(p.id) + '</code> ' + esc(p.name) + ' \\u00b7 ' + p.models + ' models</li>';
-  }).join("");
-  var error = s.lastSyncError ? '<div class="row err"><span>Last error</span><span>' + esc(s.lastSyncError) + '</span></div>' : "";
-  document.getElementById("app").innerHTML =
-    '<div class="card">' + rows(s) + error + '</div>' +
-    '<div class="card"><div class="row"><span>Providers</span><span>' + (s.providers || []).length + '</span></div><ul>' + (providers || "<li>none yet</li>") + '</ul></div>';
-  document.getElementById("note").textContent = s.configured ? "" : "Set the corporate server address in this plugin's options, then sign in.";
-}
-function call(path, method){
-  return fetch(path, { method: method || "GET", headers: { "x-page-token": TOKEN } }).then(function(r){ return r.json().catch(function(){ return {}; }); });
-}
-document.getElementById("login").addEventListener("click", function(event){
-  var button = event.target;
-  button.disabled = true;
-  call("/v1/login", "POST").then(function(r){
-    button.disabled = false;
-    document.getElementById("note").textContent = (r && r.error && r.error.message) || "The browser should have opened. Finish signing in there.";
-  });
-});
-document.getElementById("sync").addEventListener("click", function(event){
-  var button = event.target;
-  button.disabled = true;
-  call("/v1/sync", "POST").then(function(r){
-    button.disabled = false;
-    if (r && r.status) draw(r.status);
-    var errors = (r && r.summary && r.summary.errors ? r.summary.errors : []).map(function(e){ return e.message; }).join("; ");
-    document.getElementById("note").textContent = errors || "Synced.";
-  });
-});
-draw(INITIAL);
-setInterval(function(){
-  call("/v1/status").then(function(s){ if (s && s.device) draw(s); });
-}, 15000);
-`;
-
-function page({ token, status }) {
-  const boot = `window.__CORP_TOKEN=${JSON.stringify(token)};window.__CORP_STATUS=${JSON.stringify(status).replace(/</g, "\\u003c")};`;
-  return [
-    "<!doctype html>",
-    '<html lang="en"><head><meta charset="utf-8">',
-    '<meta name="viewport" content="width=device-width,initial-scale=1">',
-    "<title>Corp</title>",
-    `<style>${PAGE_STYLE}</style></head><body>`,
-    "<h1>Corp</h1>",
-    '<p class="sub">What this machine gets from the corporation, and what it sends back.</p>',
-    '<div id="app"></div>',
-    '<div class="actions"><button id="login">Sign in</button><button id="sync" class="primary">Sync now</button></div>',
-    '<p class="note" id="note"></p>',
-    `<script>${boot}</script>`,
-    `<script>${PAGE_SCRIPT}</script>`,
-    "</body></html>",
-  ].join("\n");
 }

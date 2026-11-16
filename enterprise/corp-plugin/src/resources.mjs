@@ -24,7 +24,11 @@ function cleanName(value) {
 
 function agentsOf(value) {
   const list = Array.isArray(value) ? value : [];
-  const ids = list.map((v) => String(v || "").trim()).filter(Boolean);
+  // "*" / "all" mean every agent. magpie's CLI has no such token: omitting
+  // agents= is what gives a server or skill to everyone, so treat them as none.
+  const ids = list
+    .map((v) => String(v || "").trim())
+    .filter((id) => id && id !== "*" && id.toLowerCase() !== "all");
   return ids.length ? ids.join(",") : "none";
 }
 
@@ -179,7 +183,8 @@ export async function applyResources(bundle, { configDir, magpieBin, dir = "", a
         headers.push(`header=${key}:${String(value ?? "")}`);
       }
     }
-    const result = await call(["library", "mcp", "add", server.name, ...spec, ...headers, `agents=${agentsOf(server.agents)}`]);
+    const agents = agentsOf(server.agents);
+    const result = await call(["library", "mcp", "add", server.name, ...spec, ...headers, ...(agents === "none" ? [] : [`agents=${agents}`])]);
     if (result.ok) next.mcp.push(server.name);
     else errors.push({ code: result.code, message: `${server.name}: ${result.message}` });
   }

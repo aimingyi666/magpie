@@ -7,6 +7,7 @@
 import { createClient } from "./client.mjs";
 import { readBundle } from "./providers.mjs";
 import { applyResources } from "./resources.mjs";
+import { applyPlugins } from "./plugins.mjs";
 import { uploadAll } from "./upload.mjs";
 
 export function clientFor({ config, store }) {
@@ -26,6 +27,7 @@ export async function syncBundle({ config, store, run = undefined, now = () => n
     revision: "",
     providers: 0,
     resources: { instructions: 0, mcp: 0, skills: 0 },
+    plugins: [],
     upload: {},
     errors: [],
   };
@@ -60,6 +62,8 @@ export async function syncBundle({ config, store, run = undefined, now = () => n
       instructions: Array.isArray(payload.instructions) ? payload.instructions : [],
       mcp: Array.isArray(payload.mcp) ? payload.mcp : [],
       skills: Array.isArray(payload.skills) ? payload.skills : [],
+      plugins: Array.isArray(payload.plugins) ? payload.plugins : [],
+      sharing: payload.sharing && typeof payload.sharing === "object" ? payload.sharing : null,
       keptAt: startedAt,
     };
     if (previous && revision && revision < previous) {
@@ -93,6 +97,34 @@ export async function syncBundle({ config, store, run = undefined, now = () => n
   } else {
     summary.revision = previous;
     summary.providers = (readBundle(store.dir)?.providers || []).length;
+  }
+
+  // What the corporation requires installed is applied from the bundle on
+  // disk, so a 304, or a pass that only retries a failed install, still
+  // gets there.
+  const active = readBundle(store.dir);
+  if (active) {
+    const plugins = await applyPlugins(active, {
+      configDir: config.configDir,
+      magpieBin: config.magpieBin,
+      provider: config.providerId,
+      applied: state.appliedPlugins || [],
+      ...(run ? { run } : {}),
+    });
+    summary.plugins = plugins.applied;
+    summary.errors.push(...(plugins.errors || []));
+    if (plugins.errors?.length) {
+      store.update((next) => {
+        next.appliedPlugins = plugins.applied;
+        next.lastSyncError = plugins.errors[0].message;
+        return next;
+      });
+    } else {
+      store.update((next) => {
+        next.appliedPlugins = plugins.applied;
+        return next;
+      });
+    }
   }
 
   try {

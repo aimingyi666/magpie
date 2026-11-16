@@ -10,7 +10,7 @@
 // service, which draws it.
 import { loadCorpConfig, stateDirectory } from "./src/config.mjs";
 import { createStore } from "./src/store.mjs";
-import { providerConfig, providerModels } from "./src/providers.mjs";
+import { providerConfig, providerModels, readBundle } from "./src/providers.mjs";
 import { createJoiner } from "./src/auth.mjs";
 import { startService } from "./src/service.mjs";
 
@@ -33,7 +33,7 @@ function boot(options = {}) {
     service: null,
     startService() {
       if (!this.service) {
-        this.service = startService({ config, store, joiner, dir });
+        this.service = startService({ config, store, joiner, dir, client: options.client });
       }
       return this.service;
     },
@@ -42,7 +42,7 @@ function boot(options = {}) {
 }
 
 export default async function corp(input, options = {}) {
-  const rt = boot(options);
+  const rt = boot({ ...options, client: input.client });
   const provider = rt.config.providerId;
   // the page's own service, without which the page has nothing to ask
   rt.startService().ready.catch(() => {});
@@ -56,7 +56,7 @@ export default async function corp(input, options = {}) {
       methods: [
         {
           type: "api",
-          label: "Corp sign-in",
+          label: "企业登录",
           // A device that still works is handed over as it is, so signing
           // in from the page first makes this instant; otherwise the
           // browser flow runs here.
@@ -80,6 +80,27 @@ export default async function corp(input, options = {}) {
       // a fresh device token.
       refresh: async (stored) => rt.joiner.refresh(stored),
       refreshLead: 7 * 24 * 3600 * 1000,
+
+      // The device token is the corporate gateway's key: the loader points
+      // the provider's requests at the gateway from the bundle and says the
+      // key, whose Bearer header the host would set alone. The plugin's own
+      // fetch carries the token the request loaded with, so a gateway that
+      // checks the header itself is answered, and a refresh makes the next
+      // request load the new one.
+      loader: async (getAuth, info) => {
+        const auth = await getAuth();
+        const token = String(auth.refresh || auth.key || (await rt.joiner.current()).deviceToken || "");
+        const base = String(info?.api || readBundle(rt.dir)?.providers?.find?.((entry) => entry.id === provider)?.baseUrl || rt.config.baseUrl || "");
+        return {
+          apiKey: token,
+          ...(base ? { baseURL: base } : {}),
+          async fetch(url, init) {
+            const headers = new Headers(init.headers);
+            headers.set("authorization", `Bearer ${token}`);
+            return fetch(url, { ...init, headers });
+          },
+        };
+      },
     },
 
     // The provider's own name, base and models, read from the bundle the

@@ -565,7 +565,13 @@ token 最长 8 小时、空闲 30 分钟失效，可手动退出；首期不做�
 原生页首期不实现审批中心；遇到 `approval_required` 时，管理员转到网页管理台完成审批。
 这一版同样不修改网关监听地址/端口、不做局域网共享、重启或进程接管，也不支持在服务器侧
 登录 Cursor、WorkBuddy、Codex 等订阅 OAuth；首期供应商只支持 API Key、自定义 Provider
-和预设 Provider。
+和预设 Provider。（例外：`corp-plugin` + `corp-server` 这一套支持员工在**自己的浏览器**
+扫码登录 WorkBuddy，账号落在企业网关的插件里；管理员勾选后模型才并入企业供应商。控制面
+不保存 token。本机 magpie 已经登录过 WorkBuddy 时，概览页也可以把那份登录一次性导入
+企业网关，之后本机退出该账号；概览页平时只显示本机已登录的账号名。入口在
+corp-plugin 的「概览」页，见
+[`corp-plugin/README.md`](corp-plugin/README.md) 与
+[`corp-server/README.md`](corp-server/README.md)。）
 
 ## 5. 当前员工与管理员流程（只列已实现）
 
@@ -743,6 +749,7 @@ enterprise/
     join-enterprise.ps1     客户端：OIDC 加入
     refresh-client.ps1      客户端：刷新短期 Key
     verify.ps1              验收：模型列表 + chat 请求
+    install-corp-plugin.ps1 客户端：MDM/软件中心静默安装 corp-plugin
   test/
     mock-upstream.mjs       测试用 OpenAI 兼容上游
     mock-oidc.mjs           测试用 OIDC 授权码、Token 和 JWKS
