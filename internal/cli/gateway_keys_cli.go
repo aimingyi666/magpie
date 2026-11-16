@@ -19,14 +19,24 @@ import (
 	"github.com/yetone/magpie/internal/settings"
 )
 
-func gatewayKeys(args []string) error { return gatewayKeysTo(os.Stdout, args) }
+func gatewayKeys(args []string) error { return gatewayKeysToInput(os.Stdout, args, os.Stdin) }
 
 func gatewayKeysTo(out io.Writer, args []string) error {
+	return gatewayKeysToInput(out, args, os.Stdin)
+}
+
+func gatewayKeysToInput(out io.Writer, args []string, input io.Reader) error {
 	args = args[1:]
 	if len(args) == 0 {
 		args = []string{"list"}
 	}
 	action := args[0]
+	if action == "describe" {
+		return gatewayKeyDescribeJSON(out, args[1:])
+	}
+	if action == "policy" {
+		return gatewayKeyPolicyJSON(out, args[1:], input)
+	}
 	if action == "limit" {
 		access.MigrateLegacyLANKeyBestEffort()
 		return gatewayKeyLimit(out, args[1:])
@@ -1260,5 +1270,67 @@ func gatewayKeyOIDC(out io.Writer, args []string) error {
 		return err
 	}
 	_, err = fmt.Fprintf(out, "OIDC rule %s: a token from %s with audience %s and %d claim(s) matched gets a key issued under %s, living up to %s.\nPOST it to /v1/magpie/keys/oidc as Authorization: Bearer <token>.\n", r.ID, r.Issuer, r.Audience, len(r.Claims), r.Key, r.Lifetime())
+	return err
+}
+
+// gatewayKeyDescribeJSON is the read-only C4 machine protocol:
+//
+//	magpie gateway-key describe <id> --json
+func gatewayKeyDescribeJSON(out io.Writer, args []string) error {
+	usage := fmt.Errorf("usage: magpie gateway-key describe <id> --json")
+	asJSON := slices.Contains(args, "--json")
+	if len(args) != 2 || args[1] != "--json" {
+		if asJSON {
+			return gatewayKeyMachineError(out, usage)
+		}
+		return usage
+	}
+	d, err := access.DescribePolicy(args[0])
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	return gatewayKeyMachineDescribe(out, d)
+}
+
+// gatewayKeyPolicyJSON atomically replaces a key's models and limits:
+//
+//	magpie gateway-key policy apply <id> --json < policy.json
+func gatewayKeyPolicyJSON(out io.Writer, args []string, in io.Reader) error {
+	usage := fmt.Errorf("usage: magpie gateway-key policy apply <id> --json")
+	asJSON := slices.Contains(args, "--json")
+	if len(args) != 3 || args[0] != "apply" || args[2] != "--json" {
+		if asJSON {
+			return gatewayKeyMachineError(out, usage)
+		}
+		return usage
+	}
+	policy, err := access.DecodePolicyApply(in)
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	d, err := access.ApplyPolicy(args[1], policy)
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	return gatewayKeyMachineDescribe(out, d)
+}
+
+func gatewayKeyMachineDescribe(out io.Writer, d access.PolicyDescribe) error {
+	b, err := access.MarshalPolicyDescribe(d)
+	if err != nil {
+		return gatewayKeyMachineError(out, err)
+	}
+	_, err = fmt.Fprintf(out, "%s\n", b)
+	return err
+}
+
+func gatewayKeyMachineError(out io.Writer, err error) error {
+	b, encodeErr := access.MarshalPolicyFailure(err)
+	if encodeErr != nil {
+		return encodeErr
+	}
+	if _, writeErr := fmt.Fprintf(out, "%s\n", b); writeErr != nil {
+		return writeErr
+	}
 	return err
 }
