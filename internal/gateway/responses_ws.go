@@ -171,6 +171,13 @@ type responsesSocket struct {
 	writeMu sync.Mutex
 	turns   []heldTurn // the newest last
 
+	// the turn state the last reply said, and the turn it is for
+	// (client_metadata.turn_id): Codex continues a turn on its socket by
+	// previous_response_id and sends no state, the socket being the
+	// routing, while magpie sends each request on whole; the state goes
+	// with each later request of that turn, as Codex sends it over HTTP
+	stateTurn, turnState string
+
 	mu      sync.Mutex
 	away    bool // the gateway is ending: close after this turn
 	turning bool
@@ -199,7 +206,12 @@ func (s *Server) serveResponsesSocket(w http.ResponseWriter, r *http.Request) bo
 		log.Printf("responses socket from %s: %v", r.RemoteAddr, err)
 		return true
 	}
-	c.SetReadLimit(defaultBodyLimit)
+	// a turn on a new socket is the conversation whole (codexBodyLimit)
+	most := int64(defaultBodyLimit)
+	if strings.HasPrefix(r.URL.Path, CodexPath+"/") {
+		most = s.codexLimitOf()
+	}
+	c.SetReadLimit(most)
 	sock := &responsesSocket{s: s, o: o, path: r.URL.Path, c: c, ctx: o.ctx}
 	if !s.sockets.add(sock) {
 		c.Close(websocket.StatusGoingAway, "magpie is restarting")
@@ -487,14 +499,24 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 	delete(q, "type")
 	delete(q, "previous_response_id")
 	delete(q, "generate")
+	// WebSocket mode is always streamed; clients omit the HTTP stream field.
+	q["stream"] = json.RawMessage("true")
 	body, err := turnBody(q, input)
 	if err != nil {
 		rs.writeError(ctx, http.StatusBadRequest, "invalid_request_error", "invalid_json", err.Error(), "")
 		return
 	}
 	rs.sent += int64(len(body))
+	if socketTurnBody != nil {
+		socketTurnBody(body)
+	}
+	turnID := gjson.GetBytes(body, "client_metadata.turn_id").String()
 	req := rs.request(ctx, body)
-	out := &socketTurnWriter{rs: rs, ctx: ctx, run: t, h: http.Header{}}
+	if req.Header.Get("X-Codex-Turn-State") == "" && turnID != "" && turnID == rs.stateTurn {
+		req.Header.Set("X-Codex-Turn-State", rs.turnState)
+	}
+	out := &socketTurnWriter{rs: rs, ctx: ctx, run: t, h: http.Header{},
+		codex: fromCodex(req.Header) || agentOf(req) == "codex"}
 	rs.o.via.ServeHTTP(out, req)
 	out.finish()
 	if ctx.Err() != nil {
@@ -504,10 +526,17 @@ func (rs *responsesSocket) turn(ctx context.Context, t *socketTurnRun, frame []b
 		t.cut = true
 		return
 	}
+	if v := out.h.Get("X-Codex-Turn-State"); v != "" && turnID != "" {
+		rs.stateTurn, rs.turnState = turnID, v
+	}
 	if out.id != "" && out.completed {
 		rs.keep(out.id, held, fresh, out.items)
 	}
 }
+
+// socketTurnBody, set by the tests, is handed each body a turn is served
+// with, to see that nothing keeps it once the turn is over.
+var socketTurnBody func(body []byte)
 
 // turnBody is json.Marshal(q) with input, as json.Marshal writes it, for
 // q's input, written once into a slice of about its size. A turn wrote
@@ -615,8 +644,11 @@ func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Reque
 	req.Header.Set("Accept", "text/event-stream")
 	// what Codex says in client_metadata here and in a header over HTTP
 	// (codexSocketMessage, the other way)
+	// — the turn state in the header alone, which goes on only to the
+	// account that was given it (codex_turnstate.go)
 	if v := gjson.GetBytes(body, `client_metadata.x-codex-turn-state`).String(); v != "" {
 		req.Header.Set("X-Codex-Turn-State", v)
+		body = withoutClientMetadata(body, "x-codex-turn-state")
 	}
 	if strings.EqualFold(gjson.GetBytes(body, `client_metadata.ws_request_header_x_openai_internal_codex_responses_lite`).String(), "true") {
 		req.Header.Set("X-OpenAI-Internal-Codex-Responses-Lite", "true")
@@ -633,10 +665,11 @@ func (rs *responsesSocket) request(ctx context.Context, body []byte) *http.Reque
 // as the socket's frames: each event of a stream as one, an error as an
 // error frame.
 type socketTurnWriter struct {
-	rs  *responsesSocket
-	ctx context.Context
-	run *socketTurnRun
-	h   http.Header
+	rs    *responsesSocket
+	ctx   context.Context
+	run   *socketTurnRun
+	h     http.Header
+	codex bool // the client is Codex's own: the backend's events are for it
 
 	status int
 	stream bool
@@ -710,6 +743,12 @@ func (w *socketTurnWriter) startStream() {
 // response.metadata, the model list's tag in codex.response.metadata,
 // and the account's windows in codex.rate_limits.
 func (w *socketTurnWriter) headerFrames() [][]byte {
+	// Codex's own events, which a typed client on the socket reads as
+	// unknown variants and gives up on (as on the HTTP route, the same
+	// guard in passthrough)
+	if !w.codex {
+		return nil
+	}
 	var out [][]byte
 	meta := map[string]string{}
 	for _, k := range []string{"x-codex-turn-state", "openai-model", "x-reasoning-included"} {

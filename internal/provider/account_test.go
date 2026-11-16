@@ -19,6 +19,7 @@ import (
 
 	"github.com/yetone/magpie/internal/catalog"
 	"github.com/yetone/magpie/internal/codexcat"
+	"github.com/yetone/magpie/internal/plugin"
 	"github.com/yetone/magpie/internal/testenv"
 )
 
@@ -72,10 +73,20 @@ func signIn(t *testing.T) string {
 // logins and forgets anything a previous test cached.
 func isolate(t testing.TB) {
 	t.Helper()
+	// nor a read a test before it left running, though it isolated nothing
+	endReadsOut(t, "before the test")
 	oldKeychain, oldBase, oldExe := claudeKeychain, claudeBase, claudeExecutable
 	oldDevin := DevinExecutable
+	// a read this test leaves running ends with it (#3174): registered
+	// first, this runs after every other cleanup, with the test's fakes
+	// let go
+	t.Cleanup(func() { endReadsOut(t, "after the test") })
 	claudeKeychain = false
 	claudeExecutable = func() string { return "" }
+	// a Claude sign-in with no Claude Code downloads one: never in a test
+	oldDownload := downloadClaudeCode
+	downloadClaudeCode = func(context.Context) error { return errors.New("no Claude Code download in tests") }
+	t.Cleanup(func() { downloadClaudeCode = oldDownload })
 	// the machine's own devin, if it has one, is no test's
 	DevinExecutable = func() string { return "" }
 	forgetClaudeCredential()
@@ -264,6 +275,31 @@ func TestAccountsAreProviders(t *testing.T) {
 	}
 }
 
+// endReadsOut waits for the allowance and usage reads a test left running
+// (readsOut). Left to run on, one reads the sign-in in the next test's
+// home before that test has written it, and caches that there is none:
+// TestClaudeAccountServesModelsListedSinceItsFetch found no Claude
+// account, under load only, after TestClaudeAllSignedOutStaysListed's
+// InUseLogin left its Allowances read past firstWait (#3174).
+func endReadsOut(t testing.TB, when string) {
+	t.Helper()
+	deadline := time.After(time.Minute) // a read gives up after 30s
+	for {
+		readsOut.Lock()
+		n, idle := readsOut.n, readsOut.idle
+		readsOut.Unlock()
+		if n == 0 {
+			return
+		}
+		select {
+		case <-idle:
+		case <-deadline:
+			t.Errorf("%d allowance or usage reads still ran a minute %s", n, when)
+			return
+		}
+	}
+}
+
 // claudeSignIn writes a Claude Code OAuth login into a temp home.
 func claudeSignIn(t *testing.T, home string, expiry time.Time) string {
 	t.Helper()
@@ -290,8 +326,21 @@ func claudeHome(t *testing.T) string {
 	t.Setenv("USERPROFILE", home)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
 	t.Setenv("XDG_CACHE_HOME", filepath.Join(home, ".cache"))
+	// a plugin host is this test's HOME's: one an earlier test left up
+	// would answer a sign-out in that test's files, not these (#6761), so
+	// none is up before, and the one this test starts ends with it
+	stopPluginHost()
+	t.Cleanup(stopPluginHost)
 	forgetClaudeCredential()
 	return home
+}
+
+// stopPluginHost stops a plugin host that is up, so the next call starts
+// one under the HOME it is made in.
+func stopPluginHost() {
+	if plugin.Running() {
+		plugin.Restart()
+	}
 }
 
 func TestClaudeAccountIsProvider(t *testing.T) {
@@ -394,6 +443,7 @@ func TestCopilotSignAndModels(t *testing.T) {
 			  {"id":"claude-opus-5","name":"Claude Opus 5","model_picker_category":"powerful","policy":{"state":"disabled"},"capabilities":{"type":"chat"}},
 			  {"id":"gpt-4.1","name":"GPT-4.1","model_picker_category":"versatile","policy":{"state":"enabled"},"capabilities":{"type":"chat"}},
 			  {"id":"gpt-4.1-2025-04-14","name":"GPT-4.1","policy":{"state":"enabled"},"capabilities":{"type":"chat"}},
+			  {"id":"mai-code-2-flash","name":"MAI-Code-2-Flash","vendor":"Experimental","model_picker_enabled":true,"model_picker_category":"lightweight","policy":{"state":"enabled"},"supported_endpoints":["/chat/completions","/responses"],"capabilities":{"type":"chat","supports":{"reasoning_effort":["high"]}}},
 			  {"id":"kimi-k3-base","name":"Kimi K3 (GitHub)","vendor":"Experimental","model_picker_category":"powerful","policy":{"state":"enabled"},"capabilities":{"type":"chat"}},
 			  {"id":"exec-agent-a","name":"Exec","model_picker_enabled":true,"capabilities":{"type":"chat"}},
 			  {"id":"text-embedding-3-small","name":"Emb","model_picker_enabled":true,"capabilities":{"type":"embeddings"}}]}`
@@ -432,11 +482,13 @@ func TestCopilotSignAndModels(t *testing.T) {
 	for _, m := range ms {
 		ids = append(ids, m.ID)
 	}
-	if strings.Join(ids, ",") != "gpt-5.5,claude-sonnet-5,gpt-4.1,auto" || len(ms[0].Efforts) != 2 {
+	// an Experimental vendor's the picker offers stays listed (#4343), one
+	// it doesn't (kimi-k3-base) stays out
+	if strings.Join(ids, ",") != "gpt-5.5,claude-sonnet-5,gpt-4.1,mai-code-2-flash,auto" || len(ms[0].Efforts) != 2 {
 		t.Fatalf("models: %v %+v", ids, ms)
 	}
 	p, _ = find(All(), "copilot")
-	if got := p.Available(); len(got) != 4 || got[0].ID != "gpt-5.5" {
+	if got := p.Available(); len(got) != 5 || got[0].ID != "gpt-5.5" {
 		t.Fatalf("available after fetch: %+v", got)
 	}
 
