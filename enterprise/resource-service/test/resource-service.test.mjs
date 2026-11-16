@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   buildSignedManifest,
+  validateManifestShape,
   verifySignedManifest,
 } from "../src/manifest.js";
 import { ResourceStore } from "../src/store.js";
@@ -559,4 +560,35 @@ test("Ed25519 manifest helper rejects unsigned mutations and invalid key types",
   assert.equal(verifySignedManifest(publicKey, manifest, content).valid, true);
   const wrongContent = Buffer.from("tampered content");
   assert.equal(verifySignedManifest(publicKey, manifest, wrongContent).valid, false);
+});
+
+test("a hook resource is a kind the catalog accepts; an unknown kind is not", () => {
+  // A hook is executable code, so the catalog learns the kind without
+  // executing it: publishing stays a metadata act, and the client decides
+  // whether to apply it.
+  const { privateKey } = crypto.generateKeyPairSync("ed25519");
+  const content = Buffer.from("#!/bin/sh\necho hello");
+  const fields = {
+    resourceId: "res_aaaaaaaaaaaaaaaa",
+    releaseId: "rel_aaaaaaaaaaaaaaaa",
+    resourceVersion: "2026.11.1",
+    kind: "hook",
+    hash: `sha256:${crypto.createHash("sha256").update(content).digest("hex")}`,
+    contentBytes: content.length,
+    mediaType: "text/plain",
+    publisher: "enterprise-platform",
+    createdAt: "2026-11-06T00:00:00.000Z",
+    assignments: ["org_engineering"],
+    deliveryMode: "recommended",
+    compatibility: { minClientVersion: "0.2.0" },
+    previousReleaseId: "",
+    signingKeyId: "resource-test-v1",
+  };
+  const manifest = buildSignedManifest(fields, privateKey);
+  assert.equal(manifest.kind, "hook");
+  validateManifestShape(manifest);
+  assert.throws(
+    () => validateManifestShape({ ...manifest, kind: "widget" }),
+    /kind/,
+  );
 });

@@ -875,6 +875,53 @@ export class SecurityStore {
     this.state = emptyStore();
     this.queue = Promise.resolve();
     this.initialized = false;
+    // A subject's mean usage over the events this store holds. Built once
+    // from the loaded state, then kept up to date; it is not persisted, so
+    // a restart rebuilds it rather than trusting a second copy.
+    this.usageBaselines = null;
+  }
+
+  // usageBaseline says what this subject's calls usually cost, from the
+  // events already accepted. Fewer than five samples is "unknown": a
+  // baseline made of one call would call the next one an anomaly.
+  usageBaseline(subject) {
+    if (!subject || typeof subject.type !== "string" || typeof subject.id !== "string") {
+      return { tokens: null, cost: null, samples: 0 };
+    }
+    if (!this.usageBaselines) this.#rebuildUsageBaselines();
+    const entry = this.usageBaselines.get(`${subject.type}\u0000${subject.id}`);
+    if (!entry || entry.tokensCount < 5) return { tokens: null, cost: null, samples: entry?.tokensCount || 0 };
+    return {
+      tokens: entry.tokensSum / entry.tokensCount,
+      cost: entry.costCount >= 5 ? entry.costSum / entry.costCount : null,
+      samples: entry.tokensCount,
+    };
+  }
+
+  #rebuildUsageBaselines() {
+    this.usageBaselines = new Map();
+    for (const record of Object.values(this.state.events)) {
+      this.#noteUsageBaseline(record.event);
+    }
+  }
+
+  #noteUsageBaseline(event) {
+    const usage = event?.usage;
+    if (!usage || !event.subject) return;
+    const key = `${event.subject.type}\u0000${event.subject.id}`;
+    let entry = this.usageBaselines.get(key);
+    if (!entry) {
+      entry = { tokensSum: 0, tokensCount: 0, costSum: 0, costCount: 0 };
+      this.usageBaselines.set(key, entry);
+    }
+    if (finiteNumber(usage.totalTokens) && usage.totalTokens > 0) {
+      entry.tokensSum += usage.totalTokens;
+      entry.tokensCount += 1;
+    }
+    if (finiteNumber(usage.cost) && usage.cost > 0) {
+      entry.costSum += usage.cost;
+      entry.costCount += 1;
+    }
   }
 
   async init() {
@@ -1009,6 +1056,9 @@ export class SecurityStore {
         receivedAt,
       };
       next.stats.acceptedEvents += 1;
+      // This event is now part of the subject's baseline for the next one.
+      if (!this.usageBaselines) this.#rebuildUsageBaselines();
+      this.#noteUsageBaseline(event);
 
       const storedFindings = [];
       const aggregateIds = [];

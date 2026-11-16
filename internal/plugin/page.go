@@ -5,11 +5,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/yetone/magpie/internal/lazyre"
 	"github.com/yetone/magpie/internal/proc"
 )
 
@@ -88,20 +88,21 @@ var ActionMenus = []string{"provider", "agent"}
 
 // actionID is what an action's id is: short, of lower-case letters,
 // digits and dashes, so the page can switch on it
-var actionID = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,39}$`)
+var actionID = lazyre.New(`^[a-z0-9][a-z0-9-]{0,39}$`)
 
 // maxActions is how many actions one plugin adds, at most.
 const maxActions = 8
 
 // PageReads are the reads a plugin's page can be granted, each in
 // magpie.permissions. None of them carries a secret.
-var PageReads = []string{"usage:summary", "providers:list"}
+var PageReads = []string{"usage:summary", "usage:day", "providers:list"}
 
 // PanelSlots are the places in magpie's own pages a plugin's panel can
 // go: under the Agents page's list, at the end of the Usage page, on
-// Settings' Plugins tab, and in a provider's editor (which tells the
-// panel the provider's id and name).
-var PanelSlots = []string{"agents", "usage", "settings", "provider"}
+// Settings' Plugins tab, in a provider's editor (which tells the
+// panel the provider's id and name), and on the Providers page under
+// the personal list (the Providers slot tells the panel nothing).
+var PanelSlots = []string{"agents", "usage", "settings", "provider", "providers"}
 
 // Replaceable are the built-in pages a plugin's page can take the place
 // of: the pages that are built-in plugins of their own.
@@ -366,8 +367,12 @@ func SetPageOptions(spec string, opts map[string]any) error {
 	if w, only := Window(t); w == nil || !only {
 		return SetOptions(spec, opts)
 	}
+	// under plugins.json's lock too, as SetOptions is: another magpie's
+	// change saved meanwhile stands (#4666)
+	listFileMu.Lock()
 	listMu.Lock()
 	defer listMu.Unlock()
+	defer listFileMu.Unlock()
 	l := Load()
 	i := indexOf(l, spec)
 	if i < 0 {

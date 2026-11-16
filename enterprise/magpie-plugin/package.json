@@ -1,0 +1,31 @@
+{
+  "name": "@magpie-enterprise/magpie-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Enterprise in magpie's window: joined device and sync, plus the native administrator view for providers, routing, gateway and requests",
+  "type": "module",
+  "main": "index.js",
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "exports": {
+    ".": "./index.js"
+  },
+  "magpie": {
+    "page": {
+      "title": "Enterprise",
+      "titles": {
+        "zh": "企业",
+        "zh-TW": "企業",
+        "ja": "エンタープライズ",
+        "de": "Unternehmen"
+      },
+      "file": "page/index.html",
+      "icon": "page/icon.svg",
+      "service": {
+        "port": 3477,
+        "option": "port"
+      }
+    }
+  }
+}

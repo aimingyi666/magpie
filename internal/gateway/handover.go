@@ -27,6 +27,10 @@ import (
 // been seen to keep, as `make dev`'s handover waits.
 var handedOffDrain = 15 * time.Minute
 
+// HandedOffDrain is handedOffDrain: the app that handed the gateway over
+// quits by then and a little after, whatever holds it up (gui.quitBy).
+func HandedOffDrain() time.Duration { return handedOffDrain }
+
 // shortDrain is how long the gateway's end waits for its requests when
 // nothing serves the port after it: a quit, or a restart that waits.
 var shortDrain = 2 * time.Second
@@ -134,6 +138,93 @@ func sameAddr(a net.Addr, addr string) bool {
 		}
 	}
 	return false
+}
+
+// inheritedAdmin is the administration listener the magpie before this one
+// handed over, taken by openAdmin when it listens where cfg.Addr names.
+var inheritedAdmin struct {
+	sync.Mutex
+	ln net.Listener
+}
+
+// InheritAdmin has this process's administration listener serve on ln, the
+// socket the magpie it replaces listened on, rather than binding its
+// address: the port is never closed between the two, and the one before
+// stops serving it once this one has it.
+func InheritAdmin(ln net.Listener) {
+	inheritedAdmin.Lock()
+	defer inheritedAdmin.Unlock()
+	if inheritedAdmin.ln != nil {
+		inheritedAdmin.ln.Close()
+	}
+	inheritedAdmin.ln = ln
+}
+
+// takeInheritedAdmin is the administration listener handed over when it
+// listens on addr; one on another address (the setting changed in between)
+// is closed, and the address is bound as usual.
+func takeInheritedAdmin(addr string) net.Listener {
+	inheritedAdmin.Lock()
+	defer inheritedAdmin.Unlock()
+	ln := inheritedAdmin.ln
+	if ln == nil {
+		return nil
+	}
+	inheritedAdmin.ln = nil
+	if !sameAddr(ln.Addr(), addr) {
+		log.Printf("gateway: the administration socket handed over listens on %s, not %s; listening anew", ln.Addr(), addr)
+		ln.Close()
+		return nil
+	}
+	return ln
+}
+
+// Listener is the socket the gateway serves on, nil before it serves.
+// A dev restart duplicates it into the process that replaces this one
+// (internal/gui/dev_handover_windows.go).
+func (s *Server) Listener() net.Listener {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	if t, ok := s.ln.(*tlsListener); ok {
+		return t.Listener
+	}
+	return s.ln
+}
+
+// AdminListener is the socket the administration API serves on, nil when
+// it serves none.
+func (s *Server) AdminListener() net.Listener {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	return s.adminLn
+}
+
+// AdminAddr is where the administration listener serves, "" when it
+// serves nowhere.
+func (s *Server) AdminAddr() string {
+	s.lnMu.Lock()
+	defer s.lnMu.Unlock()
+	if s.adminLn == nil {
+		return ""
+	}
+	return s.adminLn.Addr().String()
+}
+
+// AdminListenerFile is a copy of the socket the administration listener
+// serves on, to hand to the magpie that takes it over; nil when this magpie
+// serves none. The caller closes it once sent.
+func (s *Server) AdminListenerFile() (*os.File, error) {
+	s.lnMu.Lock()
+	ln := s.adminLn
+	s.lnMu.Unlock()
+	if ln == nil {
+		return nil, errors.New("no administration listener is served here")
+	}
+	tl, ok := ln.(*net.TCPListener)
+	if !ok {
+		return nil, errors.New("the administration listener isn't a TCP socket")
+	}
+	return tl.File()
 }
 
 // ListenerFile is a copy of the socket the gateway listens on, to hand to

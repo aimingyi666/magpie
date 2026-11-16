@@ -127,4 +127,84 @@ export class ResourceServiceClient {
     if (!plainObject(payload.report)) throw new ResourceServiceError();
     return payload.report;
   }
+
+  // A write names its actor and idempotency key: the resource service
+  // audits both, and a retried write with the same key changes nothing
+  // twice. Upstream validation codes are passed through where they are
+  // safe to show; a 5xx is "unavailable" and never a success.
+  async send(pathname, body, { actor, idempotencyKey }) {
+    if (!this.enabled) {
+      throw new ResourceServiceError();
+    }
+    let response;
+    try {
+      response = await fetch(new URL(pathname, this.config.url), {
+        method: "POST",
+        headers: {
+          accept: "application/json",
+          "content-type": "application/json",
+          authorization: `Bearer ${this.config.token}`,
+          "x-magpie-actor": actor,
+          "idempotency-key": idempotencyKey,
+        },
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(this.config.timeoutMs),
+      });
+    } catch {
+      throw new ResourceServiceError();
+    }
+    let payload;
+    try {
+      payload = await readJson(response, DEFAULT_MAX_RESPONSE_BYTES);
+    } catch {
+      payload = null;
+    }
+    if (response.status === 404) {
+      throw new ResourceServiceError("The resource service did not find the record", {
+        statusCode: 404,
+        code: "not_found",
+      });
+    }
+    if (!response.ok) {
+      const code = typeof payload?.error?.code === "string"
+        && /^[a-z][a-z0-9_.-]{0,63}$/.test(payload.error.code)
+        ? payload.error.code
+        : "resource_service_rejected";
+      throw new ResourceServiceError("The resource service rejected the change", {
+        statusCode: response.status >= 500 ? 503 : response.status,
+        code,
+      });
+    }
+    if (!plainObject(payload) || payload.ok !== true) throw new ResourceServiceError();
+    return payload;
+  }
+
+  createResource(body, options) {
+    return this.send("/api/v1/admin/resources", body, options);
+  }
+
+  createRelease(resourceId, body, options) {
+    return this.send(
+      `/api/v1/admin/resources/${encodeURIComponent(resourceId)}/releases`,
+      body,
+      options,
+    );
+  }
+
+  publishRelease(resourceId, body, options) {
+    return this.send(
+      `/api/v1/admin/resources/${encodeURIComponent(resourceId)}/publish`,
+      body,
+      options,
+    );
+  }
+
+  rollbackRelease(resourceId, body, options) {
+    return this.send(
+      `/api/v1/admin/resources/${encodeURIComponent(resourceId)}/rollback`,
+      body,
+      options,
+    );
+  }
 }

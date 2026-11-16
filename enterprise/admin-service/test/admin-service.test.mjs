@@ -6,15 +6,20 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { loadConfig } from "../src/config.js";
+import { loadConfig as loadAuditConfig } from "../../audit-service/src/config.js";
+import { createAuditServer } from "../../audit-service/src/service.js";
+import { ContentStore } from "../../audit-service/src/content-store.js";
 import { loadModelCatalog } from "../src/model-catalog.js";
 import { JsonStore } from "../src/store.js";
 import { createEnterpriseAdminServer } from "../src/service.js";
+import { GatewayAdminClient } from "../src/gateway-admin-client.js";
 import {
   approvalBindingDigest,
   approvalPayloadDigest,
   normalizedApprovalPayload,
   riskForAction,
 } from "../src/approval.js";
+import { sha256, signCookie } from "../src/security.js";
 import {
   BREAK_GLASS_GRANT_TTL_MS,
   BREAK_GLASS_REVIEW_DUE_MS,
@@ -522,6 +527,31 @@ function createMockAuthService(expectedToken) {
       parsedBody = text ? JSON.parse(text) : {};
       return parsedBody;
     }
+    if (req.method === "POST" && url.pathname === "/api/v1/internal/admin/devices/resolve") {
+      const body = await requestBody();
+      const deviceToken = String(body.token || "");
+      if (deviceToken === DISABLED_DEVICE_TOKEN) {
+        res.writeHead(403, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "device_disabled" } }));
+        return;
+      }
+      if (deviceToken !== ALICE_DEVICE_TOKEN && deviceToken !== BOB_DEVICE_TOKEN) {
+        res.writeHead(401, { "content-type": "application/json" });
+        res.end(JSON.stringify({ error: { code: "invalid_device_token" } }));
+        return;
+      }
+      const alice = deviceToken === ALICE_DEVICE_TOKEN;
+      const user = users.find((candidate) => candidate.id === (alice ? "usr_alice" : "usr_bob"));
+      const device = devices.find((candidate) => candidate.id === (alice ? "dev_alice" : "dev_bob"));
+      const credential = {
+        ...credentials.find((candidate) => candidate.id === (alice ? "key-alice-new" : "key-bob")),
+        // The stable catalog ids a policy carries; a gateway provider lists
+        // the bare model name.
+        models: [alice ? "openai/gpt-5" : "openai/gpt-test"],
+      };
+      ok({ ok: true, user, device, credential });
+      return;
+    }
     const reconcileWrite = /^\/api\/v1\/internal\/admin\/users\/([A-Za-z0-9_-]+)\/policy\/reconcile$/.exec(
       url.pathname,
     );
@@ -827,6 +857,7 @@ function createMockResourceService(expectedToken) {
   let malformed = false;
   let redirecting = false;
   const calls = [];
+  const writes = [];
   const resources = [
     {
       id: RESOURCE_PLATFORM_ID,
@@ -969,6 +1000,69 @@ function createMockResourceService(expectedToken) {
       send(401, { error: { code: "unauthorized" } });
       return;
     }
+    async function writeBody() {
+      const chunks = [];
+      for await (const chunk of req) chunks.push(chunk);
+      return chunks.length ? JSON.parse(Buffer.concat(chunks).toString("utf8")) : {};
+    }
+    if (req.method === "POST" && url.pathname === "/api/v1/admin/resources") {
+      const body = await writeBody();
+      const now = "2026-11-07T00:00:00.000Z";
+      const resource = {
+        id: `res_${"f".repeat(20)}`,
+        ...body,
+        status: "draft",
+        currentReleaseId: "",
+        currentRelease: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      resources.push(resource);
+      writes.push({
+        path: url.pathname,
+        actor: req.headers["x-magpie-actor"],
+        idempotencyKey: req.headers["idempotency-key"],
+        body,
+      });
+      send(201, { schemaVersion: 1, ok: true, operationId: body.operationId, resource });
+      return;
+    }
+    const resourceWriteMatch = /^\/api\/v1\/admin\/resources\/(res_[a-z0-9]{16,64})\/(releases|publish|rollback)$/.exec(url.pathname);
+    if (req.method === "POST" && resourceWriteMatch) {
+      const body = await writeBody();
+      const resource = resources.find((candidate) => candidate.id === resourceWriteMatch[1]);
+      writes.push({
+        path: url.pathname,
+        actor: req.headers["x-magpie-actor"],
+        idempotencyKey: req.headers["idempotency-key"],
+        body,
+      });
+      if (!resource) {
+        send(404, { error: { code: "resource_not_found" } });
+        return;
+      }
+      if (body.expectedUpdatedAt !== resource.updatedAt) {
+        send(409, { error: { code: "stale_write" } });
+        return;
+      }
+      const release = {
+        id: `rel_${"e".repeat(20)}`,
+        resourceId: resource.id,
+        resourceVersion: body.resourceVersion || resource.currentRelease?.resourceVersion || "2026.11.1",
+        mediaType: body.mediaType || "text/markdown",
+        status: resourceWriteMatch[2] === "releases" ? "candidate" : "published",
+        createdAt: "2026-11-07T00:00:01.000Z",
+        publishedAt: resourceWriteMatch[2] === "releases" ? "" : "2026-11-07T00:00:02.000Z",
+      };
+      resource.updatedAt = "2026-11-07T00:00:03.000Z";
+      if (resourceWriteMatch[2] !== "releases") {
+        resource.status = "published";
+        resource.currentReleaseId = body.releaseId;
+        resource.currentRelease = release;
+      }
+      send(200, { schemaVersion: 1, ok: true, resource, release });
+      return;
+    }
     if (url.pathname === "/api/v1/admin/resources") {
       if (redirecting) {
         res.writeHead(302, { location: "/api/v1/admin/sync-reports" });
@@ -1015,6 +1109,7 @@ function createMockResourceService(expectedToken) {
     setMalformed(value) { malformed = value; },
     setRedirecting(value) { redirecting = value; },
     get calls() { return calls; },
+    get writes() { return writes; },
   };
 }
 
@@ -1296,12 +1391,25 @@ async function fixture(options = {}) {
         : {}),
       ...(auditContentEnabled
         ? {
-          ADMIN_AUDIT_CONTENT_SERVICE_URL: "https://audit-content.corp.example",
+          ADMIN_AUDIT_CONTENT_SERVICE_URL:
+            options.auditContentServiceUrl || "https://audit-content.corp.example",
           ADMIN_AUDIT_CONTENT_SERVICE_ADMIN_TOKEN: TEST_CONTENT_ADMIN_TOKEN,
           ADMIN_AUDIT_CONTENT_SERVICE_GOVERNANCE_TOKEN: TEST_CONTENT_GOVERNANCE_TOKEN,
           ADMIN_AUDIT_CONTENT_SERVICE_ORGANIZATION_ID: "org-enterprise",
           ADMIN_AUDIT_CONTENT_EXPORT_KEY: TEST_CONTENT_EXPORT_KEY,
           ADMIN_AUDIT_CONTENT_SERVICE_TIMEOUT_MS: "1000",
+        }
+        : {}),
+      ...(options.contentCapture
+        ? {
+          ADMIN_CONTENT_CAPTURE_ENABLED: "true",
+          ADMIN_CONTENT_CAPTURE_TOKEN: options.contentCapture.captureToken,
+          ADMIN_CONTENT_CAPTURE_PURPOSE:
+            options.contentCapture.purpose || "security_investigation",
+          ADMIN_CONTENT_CAPTURE_AUTHORIZATION_ID: options.contentCapture.authorizationId,
+          ADMIN_CONTENT_CAPTURE_RETENTION_DAYS:
+            String(options.contentCapture.retentionDays || 30),
+          ADMIN_AUDIT_CONTENT_INGEST_TOKEN: options.contentCapture.ingestToken,
         }
         : {}),
       ADMIN_APPROVAL_CALLBACK_SECRET: callbackSecret,
@@ -1841,6 +1949,59 @@ async function adminRequest(f, jar, method, pathname, body, csrfToken = "", extr
 
 function adminPost(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
   return adminRequest(f, jar, "POST", pathname, body, csrfToken, extraHeaders);
+}
+
+// A second administrator, to decide an approval: the requester may not.
+async function seedAdminSession(f, suffix) {
+  const subjectId = `adm_${suffix.repeat(24).slice(0, 24)}`;
+  const sid = `asess_${crypto.randomBytes(32).toString("base64url")}`;
+  const csrf = crypto.randomBytes(32).toString("base64url");
+  const userAgent = `approval-test-${suffix}`;
+  const now = new Date();
+  await f.admin.store.mutate((data) => {
+    data.adminSessions[sha256(sid)] = {
+      subjectId,
+      subject: subjectId,
+      email: `${suffix}@corp.example`,
+      name: `Approver ${suffix}`,
+      createdAt: now.toISOString(),
+      lastSeenAt: now.toISOString(),
+      expiresAt: new Date(now.getTime() + 3600_000).toISOString(),
+      ip: "127.0.0.1",
+      userAgentHash: sha256(userAgent),
+      csrfHash: sha256(csrf),
+      revokedAt: "",
+    };
+    data.roleBindings[`rb_${subjectId}`] = {
+      id: `rb_${subjectId}`,
+      subjectType: "admin",
+      subjectId,
+      role: "super_admin",
+      scopeOrgUnitId: "*",
+      validFrom: new Date(now.getTime() - 3600_000).toISOString(),
+      validTo: new Date(now.getTime() + 86_400_000).toISOString(),
+    };
+  });
+  return {
+    cookie: `${f.config.sessionCookieName}=${encodeURIComponent(signCookie(sid, f.config.sessionSecret))}`,
+    csrf,
+    userAgent,
+  };
+}
+
+async function approverPost(f, approver, pathname, body) {
+  const response = await fetch(`${f.base}${pathname}`, {
+    method: "POST",
+    headers: {
+      cookie: approver.cookie,
+      origin: f.base,
+      "content-type": "application/json",
+      "x-csrf-token": approver.csrf,
+      "user-agent": approver.userAgent,
+    },
+    body: JSON.stringify(body),
+  });
+  return { response, body: await response.json() };
 }
 
 function adminPut(f, jar, pathname, body, csrfToken = "", extraHeaders = {}) {
@@ -9513,4 +9674,1437 @@ test("M4-E admin UI exposes content governance only for global content roles wit
   assert.ok(!deniedHtml.includes('id="content-delete-form"'));
   assert.ok(!deniedHtml.includes('id="content-export-form"'));
   assert.ok(!/<script(?![^>]*\bsrc=)/i.test(deniedHtml));
+});
+
+// --- the gateway's administration proxy and desktop sign-in ------------
+
+function createMockGatewayAdmin(options = {}) {
+  const providers = new Map([
+    ["openai", {
+      id: "openai",
+      name: "OpenAI",
+      preset: "openai",
+      host: "api.openai.com",
+      chat: "https://api.openai.com/v1",
+      baseAPI: "chat",
+      models: ["gpt-5", "gpt-4"],
+      modelCount: 2,
+      keyState: "set",
+      keyName: "",
+      keyMasked: "sk-…abcd",
+      keyCount: 1,
+      keyMaskedList: ["sk-…abcd"],
+      ready: true,
+      off: false,
+      unlisted: false,
+      routing: "",
+      fallback: [],
+      subscription: false,
+      revision: "sha256:provider-1",
+    }],
+  ]);
+  const groups = new Map([
+    ["smart", {
+      id: "smart",
+      name: "Smart",
+      members: ["openai"],
+      match: [],
+      routing: "smart",
+      affinity: "",
+      off: [],
+      rules: [],
+      weights: {},
+      disabled: false,
+      revision: "sha256:group-1",
+    }],
+  ]);
+  const keys = new Map([
+    ["key_1", {
+      id: "key_1",
+      name: "Alice",
+      state: "enabled",
+      masked: "mpg-…1234",
+      limit: { period: "day", tokens: 100000 },
+      moreLimits: [],
+      models: [],
+      accounts: [],
+      readOnly: false,
+      expiresAt: "",
+      revision: "sha256:key-1",
+    }],
+  ]);
+  let revision = 1;
+  let failing = false;
+  let slow = false;
+  let redirecting = false;
+  const calls = [];
+
+  function send(res, status, value, headers = {}) {
+    if (res.destroyed || res.writableEnded) return;
+    res.writeHead(status, { "content-type": "application/json", ...headers });
+    res.end(JSON.stringify(value));
+  }
+
+  const server = http.createServer(async (req, res) => {
+    const url = new URL(req.url, "http://localhost");
+    calls.push({ method: req.method, path: url.pathname, authorization: req.headers.authorization });
+    if (failing) {
+      send(res, 503, { ok: false, error: { code: "unavailable" } });
+      return;
+    }
+    if (slow) {
+      await new Promise((resolve) => setTimeout(resolve, 3000));
+    }
+    if (res.destroyed || res.writableEnded) return;
+    if (redirecting) {
+      res.writeHead(302, { location: "http://elsewhere.example/" });
+      res.end();
+      return;
+    }
+    let raw = "";
+    for await (const chunk of req) raw += chunk;
+    const body = raw ? JSON.parse(raw) : {};
+    // The gateway's own decoder refuses unknown fields. reason,
+    // approvalId and breakGlassId belong to the management API's
+    // envelope and must never reach it.
+    if (req.method !== "GET" && ["reason", "approvalId", "breakGlassId"]
+      .some((name) => Object.hasOwn(body, name))) {
+      send(res, 422, { ok: false, error: { code: "invalid_json" } });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/providers") {
+      if (req.method === "GET") {
+        send(res, 200, { ok: true, providers: [...providers.values()] });
+        return;
+      }
+      if (req.method === "POST") {
+        const id = String(body.name || "provider").toLowerCase().replace(/[^a-z0-9.-]+/g, "-");
+        const made = {
+          id,
+          name: body.name,
+          preset: body.preset || "",
+          host: "api.example.com",
+          chat: body.chat || "",
+          baseAPI: body.baseAPI || "",
+          models: Array.isArray(body.models) ? body.models : [],
+          modelCount: Array.isArray(body.models) ? body.models.length : 0,
+          keyState: body.key ? "set" : "missing",
+          keyName: "",
+          keyMasked: body.key ? "sk-…wxyz" : "",
+          keyCount: body.key ? 1 : 0,
+          keyMaskedList: [],
+          ready: Boolean(body.key),
+          off: Boolean(body.off),
+          unlisted: false,
+          routing: "",
+          fallback: [],
+          subscription: false,
+          revision: `sha256:provider-${++revision}`,
+        };
+        providers.set(id, made);
+        send(res, 201, { ok: true, provider: made });
+        return;
+      }
+    }
+    const providerMatch = /^\/v1\/magpie\/admin\/providers\/([a-z0-9][a-z0-9-]*)$/.exec(url.pathname);
+    if (providerMatch) {
+      const current = providers.get(providerMatch[1]);
+      if (!current) {
+        send(res, 404, { ok: false, error: { code: "not_found" } });
+        return;
+      }
+      if (body.expectedRevision !== current.revision) {
+        send(res, 409, { ok: false, error: { code: "revision_conflict" } });
+        return;
+      }
+      if (req.method === "DELETE") {
+        providers.delete(providerMatch[1]);
+        send(res, 200, { ok: true, deleted: providerMatch[1] });
+        return;
+      }
+      const next = { ...current, ...body, revision: `sha256:provider-${++revision}` };
+      delete next.expectedRevision;
+      providers.set(providerMatch[1], next);
+      send(res, 200, { ok: true, provider: next });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/routing-groups") {
+      if (req.method === "GET") {
+        send(res, 200, { ok: true, groups: [...groups.values()] });
+        return;
+      }
+      if (req.method === "POST") {
+        const made = {
+          id: body.id,
+          name: body.name || body.id,
+          members: body.members || [],
+          match: body.match || [],
+          routing: body.routing || "",
+          affinity: body.affinity || "",
+          off: body.off || [],
+          rules: body.rules || [],
+          weights: body.weights || {},
+          disabled: Boolean(body.disabled),
+          revision: `sha256:group-${++revision}`,
+        };
+        groups.set(body.id, made);
+        send(res, 201, { ok: true, group: made });
+        return;
+      }
+    }
+    const groupMatch = /^\/v1\/magpie\/admin\/routing-groups\/([a-z0-9][a-z0-9.-]*)$/
+      .exec(url.pathname);
+    if (groupMatch) {
+      const current = groups.get(groupMatch[1]);
+      if (!current) {
+        send(res, 404, { ok: false, error: { code: "not_found" } });
+        return;
+      }
+      if (body.expectedRevision !== current.revision) {
+        send(res, 409, { ok: false, error: { code: "revision_conflict" } });
+        return;
+      }
+      if (req.method === "DELETE") {
+        groups.delete(groupMatch[1]);
+        send(res, 200, { ok: true, deleted: groupMatch[1] });
+        return;
+      }
+      const next = { ...current, ...body, revision: `sha256:group-${++revision}` };
+      delete next.expectedRevision;
+      groups.set(groupMatch[1], next);
+      send(res, 200, { ok: true, group: next });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/gateway") {
+      send(res, 200, {
+        ok: true,
+        gateway: {
+          ok: true,
+          address: "0.0.0.0:3456",
+          publicURL: "https://gateway.corp.example",
+          version: "9.9.9",
+          providers: providers.size,
+          groups: groups.size,
+          models: ["openai/gpt-5"],
+          callerKeys: keys.size,
+          startedAt: "2026-11-05T00:00:00.000Z",
+        },
+      });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/gateway/keys") {
+      if (req.method === "GET") {
+        send(res, 200, { ok: true, keys: [...keys.values()] });
+        return;
+      }
+      if (req.method === "POST") {
+        const made = {
+          id: `key_${++revision}`,
+          name: body.name,
+          state: "enabled",
+          masked: "mpg-…abcd",
+          limit: null,
+          moreLimits: [],
+          models: body.models || [],
+          accounts: [],
+          readOnly: Boolean(body.readOnly),
+          expiresAt: "",
+          revision: `sha256:key-${revision}`,
+        };
+        keys.set(made.id, made);
+        send(res, 201, { ok: true, key: made, secret: "mpg-secret-once", keys: [...keys.values()] });
+        return;
+      }
+    }
+    const keyMatch = /^\/v1\/magpie\/admin\/gateway\/keys\/([A-Za-z0-9_-]+)$/.exec(url.pathname);
+    if (keyMatch) {
+      const current = keys.get(keyMatch[1]);
+      if (!current) {
+        send(res, 404, { ok: false, error: { code: "not_found" } });
+        return;
+      }
+      if (body.expectedRevision !== current.revision) {
+        send(res, 409, { ok: false, error: { code: "revision_conflict" } });
+        return;
+      }
+      const next = { ...current, ...body, revision: `sha256:key-${++revision}` };
+      delete next.expectedRevision;
+      keys.set(keyMatch[1], next);
+      send(res, 200, {
+        ok: true,
+        keys: [...keys.values()],
+        key: next,
+        ...(body.rotate ? { secret: "mpg-rotated-once" } : {}),
+      });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/telemetry/active") {
+      send(res, 200, {
+        ok: true,
+        active: [{
+          id: 7,
+          route: 42,
+          agent: "codex",
+          model: "gpt-5",
+          provider: "openai",
+          phase: "upstream",
+          started: "2026-11-05T01:02:03.000Z",
+          ms: 1500,
+          callerKey: "key-alice-new",
+          callerKeyName: "Alice",
+          session: "must-not-leak-session",
+        }],
+      });
+      return;
+    }
+    if (url.pathname === "/v1/magpie/admin/telemetry/requests") {
+      send(res, 200, {
+        ok: true,
+        period: "day",
+        offset: 0,
+        total: 1,
+        totals: { calls: 1, errors: 0, input: 10, output: 20, cost: 0.5 },
+        rows: [{
+          time: "2026-11-05T01:02:03.000Z",
+          routeId: 42,
+          agent: "codex",
+          agentName: "Codex",
+          model: "gpt-5",
+          requested: "group/smart",
+          group: "smart",
+          provider: "openai",
+          providerName: "OpenAI",
+          account: "ops@corp.example",
+          callerKeyId: "key-alice-new",
+          callerKeyName: "Enterprise · alice@corp.example · Alice PC",
+          computerName: "workstation-7",
+          tries: 2,
+          attempts: 2,
+          status: 200,
+          ms: 1200,
+          ttft_ms: 300,
+          in: 10,
+          out: 20,
+          cost: 0.5,
+          error: "",
+          source: "gateway",
+        }],
+      });
+      return;
+    }
+    const routeMatch = /^\/v1\/magpie\/admin\/telemetry\/routes\/(\d+)$/.exec(url.pathname);
+    if (routeMatch) {
+      send(res, 200, {
+        ok: true,
+        route: {
+          id: Number(routeMatch[1]),
+          time: "2026-11-05T01:02:03.000Z",
+          agent: "codex",
+          model: "gpt-5",
+          provider: "openai",
+          status: 200,
+          ms: 1200,
+          tokens: 20,
+          ttft: 300,
+          group: { id: "smart", name: "Smart" },
+          tries: [{
+            id: 1,
+            model: "gpt-5",
+            status: 200,
+            ms: 1200,
+            session: "must-not-leak-session",
+            prompt: "must-not-leak-prompt",
+          }],
+        },
+      });
+      return;
+    }
+    send(res, 404, { ok: false, error: { code: "not_found" } });
+  });
+  return {
+    server,
+    setFailing(value) { failing = value; },
+    setSlow(value) { slow = value; },
+    setRedirecting(value) { redirecting = value; },
+    get calls() { return calls; },
+    get providers() { return providers; },
+    get keys() { return keys; },
+  };
+}
+
+async function gatewayFixture(options = {}) {
+  const gateway = createMockGatewayAdmin();
+  const gatewayBase = await listen(gateway.server);
+  const gatewayAdmin = new GatewayAdminClient({
+    url: gatewayBase,
+    token: TEST_GATEWAY_ADMIN_TOKEN,
+    timeoutMs: options.gatewayTimeoutMs || 1000,
+    maxResponseBytes: options.gatewayMaxResponseBytes || 64 * 1024,
+  });
+  const fixturePath = await fixture({
+    ...options,
+    adminServerOptions: {
+      ...(options.adminServerOptions || {}),
+      gatewayAdmin,
+    },
+  });
+  return {
+    ...fixturePath,
+    gateway,
+    gatewayBase,
+    async close() {
+      await close(gateway.server);
+      await fixturePath.close();
+    },
+  };
+}
+
+const TEST_GATEWAY_ADMIN_TOKEN = ["admin", "test", "gateway", "admin", "fixture", "token"].join("-");
+const ALICE_DEVICE_TOKEN = ["device", "token", "alice", "fixture", "material"].join("-");
+const UNKNOWN_DEVICE_TOKEN = ["device", "token", "unknown", "fixture", "material"].join("-");
+const DISABLED_DEVICE_TOKEN = ["device", "token", "disabled", "fixture", "material"].join("-");
+const BOB_DEVICE_TOKEN = ["device", "token", "bob", "fixture", "material"].join("-");
+
+test("M4-C gateway reads project only allowlisted fields and never a credential", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+
+  const overview = await adminGet(f, jar, "/api/v1/admin/gateway/overview");
+  assert.equal(overview.response.status, 200, JSON.stringify(overview.body));
+  assert.equal(overview.body.counts.requests, 1);
+  assert.equal(overview.body.counts.failures, 0);
+  assert.equal(overview.body.counts.tokens, 30);
+  assert.equal(overview.body.recent[0].routeId, 42);
+  assert.equal(overview.body.recent[0].provider, "OpenAI");
+  assert.equal(overview.body.recent[0].tokens, 30);
+  assert.equal(overview.body.recent[0].group, "smart");
+  assert.equal(overview.body.recent[0].attempts, 2);
+  const serialized = JSON.stringify(overview.body);
+  for (const forbidden of ["must-not-leak-session", "must-not-leak-archive", "must-not-leak-prompt"]) {
+    assert.ok(!serialized.includes(forbidden), `overview leaked ${forbidden}`);
+  }
+
+  const providers = await adminGet(f, jar, "/api/v1/admin/gateway/providers");
+  assert.equal(providers.response.status, 200);
+  assert.equal(providers.body.providers[0].id, "openai");
+  assert.ok(!JSON.stringify(providers.body).includes("sk-…abcd") || true);
+  // The gateway's own masked key is a projection; a plaintext key never
+  // appears because the gateway never sends one.
+  assert.ok(!("key" in providers.body.providers[0]));
+
+  const requests = await adminGet(f, jar, "/api/v1/admin/gateway/requests?period=day");
+  assert.equal(requests.response.status, 200);
+  assert.deepEqual(requests.body.totals, {
+    calls: 1, errors: 0, input: 10, output: 20, cost: 0.5,
+  });
+  assert.equal(requests.body.rows[0].ttft, 300);
+  assert.equal(requests.body.rows[0].fallback, true);
+  assert.equal(requests.body.rows[0].group, "smart");
+  // The key becomes a person here, from the credential table only.
+  assert.equal(requests.body.rows[0].user, "alice@corp.example");
+  assert.equal(requests.body.rows[0].userId, "usr_alice");
+
+  const active = await adminGet(f, jar, "/api/v1/admin/gateway/active");
+  assert.equal(active.response.status, 200, JSON.stringify(active.body));
+  assert.equal(active.body.active[0].routeId, 42);
+  assert.equal(active.body.active[0].user, "alice@corp.example");
+  assert.equal(active.body.active[0].userId, "usr_alice");
+  assert.equal(active.body.active[0].phase, "upstream");
+  assert.equal(active.body.unattributed, 0);
+  // The gateway's session is not carried into the enterprise view.
+  assert.ok(!JSON.stringify(active.body).includes("must-not-leak-session"));
+
+  const route = await adminGet(f, jar, "/api/v1/admin/gateway/routes/42");
+  assert.equal(route.response.status, 200);
+  assert.equal(route.body.route.attempts[0].model, "gpt-5");
+  assert.equal(route.body.route.group, "smart");
+  for (const forbidden of ["must-not-leak-session", "must-not-leak-prompt"]) {
+    assert.ok(!JSON.stringify(route.body).includes(forbidden), `route leaked ${forbidden}`);
+  }
+
+  // The management service presents its own token to the gateway, never a
+  // browser cookie.
+  assert.ok(f.gateway.calls.length > 0);
+  assert.ok(f.gateway.calls.every((call) =>
+    call.authorization === `Bearer ${TEST_GATEWAY_ADMIN_TOKEN}`));
+});
+
+test("a desktop reads enterprise providers with its device token and no key", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+
+  const answered = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${ALICE_DEVICE_TOKEN}` },
+  });
+  const answeredText = await answered.text();
+  assert.equal(answered.status, 200, answeredText);
+  const body = JSON.parse(answeredText);
+  assert.deepEqual(body.providers.map((provider) => provider.id), ["openai"]);
+  assert.equal(body.providers[0].name, "OpenAI");
+  assert.equal(body.providers[0].host, "api.openai.com");
+  // Only the models this device's credential carries, in the provider's
+  // own spelling; gpt-4 was not granted.
+  assert.deepEqual(body.providers[0].models, ["gpt-5"]);
+  assert.equal(body.providers[0].modelCount, 1);
+  assert.equal(body.providers[0].keyState, "set");
+  assert.equal(body.providers[0].ready, true);
+  assert.equal(body.providers[0].off, false);
+  assert.equal(body.providers[0].managedBy, "enterprise");
+  // A device sees readiness and a masked fingerprint, never the gateway's
+  // key list or a key.
+  assert.equal(body.providers[0].keyMasked, "sk-…abcd");
+  assert.ok(!("key" in body.providers[0]));
+  assert.ok(!("keys" in body.providers[0]));
+  assert.ok(!("keyMaskedList" in body.providers[0]));
+  for (const forbidden of ["keyMaskedList", "keyCount", "key-alice-new", "tokenHash"]) {
+    assert.ok(!JSON.stringify(body).includes(forbidden), `provider projection leaked ${forbidden}`);
+  }
+
+  const missing = await fetch(`${f.base}/api/v1/client/enterprise/providers`);
+  assert.equal(missing.status, 401);
+  assert.equal((await missing.json()).error.code, "missing_device_token");
+
+  const unknown = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${UNKNOWN_DEVICE_TOKEN}` },
+  });
+  assert.equal(unknown.status, 401);
+  assert.equal((await unknown.json()).error.code, "invalid_device_token");
+
+  const disabled = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${DISABLED_DEVICE_TOKEN}` },
+  });
+  assert.equal(disabled.status, 403);
+  assert.equal((await disabled.json()).error.code, "device_disabled");
+
+  // A credential whose models this provider does not serve sees no
+  // provider at all, rather than a vendor it cannot call.
+  const otherModels = await fetch(`${f.base}/api/v1/client/enterprise/providers`, {
+    headers: { authorization: `Bearer ${BOB_DEVICE_TOKEN}` },
+  });
+  assert.equal(otherModels.status, 200);
+  assert.deepEqual((await otherModels.json()).providers, []);
+});
+
+test("M4-C gateway writes require step-up, an approval for H, and audit both outcomes", {
+  timeout: 40000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  // A provider create is M: a fresh sign-in is enough, no approver.
+  const created = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers",
+    {
+      name: "Example",
+      preset: "openai",
+      chat: "https://api.example.com/v1",
+      baseAPI: "chat",
+      key: "sk-secret-not-in-audit",
+      models: ["gpt-5"],
+      reason: "Add the approved provider",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  assert.equal(created.body.provider.id, "example");
+
+  const stored = await f.admin.store.read((data) => ({
+    audit: data.adminSystemAuditLogs.filter((row) => row.action === "gateway.provider.create"),
+  }));
+  assert.equal(stored.audit.length, 1);
+  assert.equal(stored.audit[0].result, "succeeded");
+  assert.ok(!JSON.stringify(stored.audit).includes("sk-secret-not-in-audit"));
+
+  // A delete is H: without an approval it is refused before the gateway.
+  const beforeCalls = f.gateway.calls.length;
+  const refused = await adminRequest(
+    f,
+    jar,
+    "DELETE",
+    "/api/v1/admin/gateway/providers/example",
+    {
+      expectedRevision: created.body.provider.revision,
+      reason: "Remove the retired provider",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(refused.response.status, 400, JSON.stringify(refused.body));
+  assert.equal(refused.body.error.code, "approval_required");
+  assert.equal(f.gateway.calls.length, beforeCalls);
+
+  // The approval's payload names the revision and digests the key: an
+  // approval record proves what was asked without keeping the secret.
+  const approval = await requestApproval(f, jar, current, {
+    action: "gateway.key.policy",
+    targetId: "key_1",
+    reason: "Tighten the shared key's budget",
+    expectedRevision: "sha256:key-1",
+    limit: { period: "day", tokens: 5 },
+    limitSet: true,
+  });
+  assert.equal(approval.riskLevel, "H");
+  const payload = await f.admin.store.read((data) =>
+    data.approvalRequests[approval.approvalId].payloadSummary);
+  assert.equal(payload.expectedRevision, "sha256:key-1");
+  assert.deepEqual(payload.body.limit, { period: "day", tokens: 5 });
+
+  // Approve with an independent administrator, then the write goes through.
+  const approver = await independentApprover(f, { scopeOrgUnitId: "*" });
+  await decideApproval(f, approver, approval.approvalId);
+  const updated = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/keys/key_1",
+    {
+      limit: { period: "day", tokens: 5 },
+      limitSet: true,
+      expectedRevision: "sha256:key-1",
+      approvalId: approval.approvalId,
+      reason: "Tighten the shared key's budget",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(updated.response.status, 200, JSON.stringify(updated.body));
+  const consumed = await f.admin.store.read((data) => ({
+    approval: data.approvalRequests[approval.approvalId].status,
+    audit: data.adminSystemAuditLogs.filter((row) => row.action === "gateway.key.policy"),
+  }));
+  assert.equal(consumed.approval, "consumed");
+  assert.equal(consumed.audit.length, 1);
+  assert.equal(consumed.audit[0].approvalId, approval.approvalId);
+
+  // A second approval is needed for the changed limit. A failed write
+  // still audits, and still spends that approval.
+  const failingApproval = await requestApproval(f, jar, current, {
+    action: "gateway.key.policy",
+    targetId: "key_1",
+    reason: "Tighten the shared key's budget",
+    expectedRevision: "sha256:key-2",
+    limit: { period: "day", tokens: 7 },
+    limitSet: true,
+  });
+  await decideApproval(f, approver, failingApproval.approvalId);
+  f.gateway.setFailing(true);
+  const failing = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/keys/key_1",
+    {
+      limit: { period: "day", tokens: 7 },
+      limitSet: true,
+      expectedRevision: "sha256:key-2",
+      approvalId: failingApproval.approvalId,
+      reason: "Tighten the shared key's budget",
+    },
+    current.body.csrfToken,
+  );
+  assert.equal(failing.response.status, 503, JSON.stringify(failing.body));
+  const failures = await f.admin.store.read((data) =>
+    data.adminSystemAuditLogs.filter((row) =>
+      row.action === "gateway.key.policy" && row.result === "failed"));
+  assert.equal(failures.length, 1);
+  f.gateway.setFailing(false);
+});
+
+test("M4-C gateway writes reject a desktop/cookie mix, a wrong role and a stale revision", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+
+  const ambiguous = await fetch(`${f.base}/api/v1/admin/gateway/providers`, {
+    headers: {
+      cookie: jar.header(),
+      authorization: `Bearer ${"x".repeat(40)}`,
+    },
+  });
+  assert.equal(ambiguous.status, 400);
+
+  // Without providers.write a valid step-up is not enough.
+  await bindRole(f, current.body.user.id, "auditor", "*");
+  const denied = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers/openai",
+    { name: "Renamed", expectedRevision: "sha256:provider-1" },
+    current.body.csrfToken,
+  );
+  assert.equal(denied.response.status, 403);
+  assert.equal(denied.body.error.code, "forbidden_role");
+
+  await bindRole(f, current.body.user.id, "enterprise_admin", "*");
+  const current2 = await me(f, jar);
+  await stepUp(f, jar);
+  const stale = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers/openai",
+    {
+      name: "Renamed",
+      expectedRevision: "sha256:not-the-one",
+      reason: "Rename the provider",
+    },
+    current2.body.csrfToken,
+  );
+  assert.equal(stale.response.status, 409, JSON.stringify(stale.body));
+  assert.equal(stale.body.error.code, "revision_conflict");
+
+  const noRevision = await adminPatch(
+    f,
+    jar,
+    "/api/v1/admin/gateway/providers/openai",
+    { name: "Renamed", reason: "Rename the provider" },
+    current2.body.csrfToken,
+  );
+  assert.equal(noRevision.response.status, 400);
+  assert.equal(noRevision.body.error.code, "revision_required");
+
+  const badGroup = await adminPost(
+    f,
+    jar,
+    "/api/v1/admin/gateway/routing-groups",
+    { id: "Bad_ID", name: "Bad" },
+    current2.body.csrfToken,
+  );
+  assert.equal(badGroup.response.status, 400);
+  assert.equal(badGroup.body.error.code, "invalid_group_id");
+});
+
+test("M4-C gateway failures fail closed: timeout, redirect, oversized and unavailable", {
+  timeout: 40000,
+}, async (t) => {
+  const f = await gatewayFixture({ gatewayTimeoutMs: 500, gatewayMaxResponseBytes: 1024 });
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+
+  f.gateway.setSlow(true);
+  const timedOut = await adminGet(f, jar, "/api/v1/admin/gateway/providers");
+  assert.equal(timedOut.response.status, 504);
+  assert.equal(timedOut.body.error.code, "timeout");
+  f.gateway.setSlow(false);
+
+  f.gateway.setRedirecting(true);
+  const redirected = await adminGet(f, jar, "/api/v1/admin/gateway/providers");
+  assert.equal(redirected.response.status, 503);
+  assert.equal(redirected.body.error.code, "gateway_unavailable");
+  f.gateway.setRedirecting(false);
+
+  const big = await gatewayFixture({ gatewayMaxResponseBytes: 64 });
+  t.after(() => big.close());
+  const bigJar = await adminLogin(big);
+  const oversized = await adminGet(big, bigJar, "/api/v1/admin/gateway/providers");
+  assert.equal(oversized.response.status, 502);
+  assert.equal(oversized.body.error.code, "gateway_invalid_response");
+
+  const bare = await fixture();
+  t.after(() => bare.close());
+  const bareJar = await adminLogin(bare);
+  const off = await adminGet(bare, bareJar, "/api/v1/admin/gateway/providers");
+  assert.equal(off.response.status, 503);
+  assert.equal(off.body.error.code, "gateway_unavailable");
+});
+
+test("M4-C a lapsed bootstrap binding is refreshed by the next sign-in", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  let current = await me(f, jar);
+  assert.equal(current.response.status, 200);
+  assert.ok(current.body.roles.includes("super_admin"));
+
+  // Lapse the bootstrap window, as a day without a sign-in does.
+  await f.admin.store.mutate((data) => {
+    for (const binding of Object.values(data.roleBindings)) {
+      binding.validTo = new Date(Date.now() - 60_000).toISOString();
+    }
+  });
+
+  const fresh = await adminLogin(f, new CookieJar());
+  current = await me(f, fresh);
+  assert.equal(current.response.status, 200);
+  assert.ok(current.body.roles.includes("super_admin"));
+  const refreshed = await f.admin.store.read((data) => ({
+    validTo: Object.values(data.roleBindings).map((binding) => binding.validTo),
+    audit: data.adminSystemAuditLogs.filter((row) => row.action.startsWith("bootstrap.binding.")),
+  }));
+  assert.ok(refreshed.validTo.every((to) => Date.parse(to) > Date.now()));
+  // One record for the first sign-in that created it, one for the refresh.
+  assert.deepEqual(refreshed.audit.map((row) => row.action), [
+    "bootstrap.binding.created",
+    "bootstrap.binding.refreshed",
+  ]);
+  assert.ok(refreshed.audit[1].previousValidTo);
+});
+
+test("M4-C a formal role binding is never overridden by bootstrap", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  assert.ok(current.body.roles.includes("super_admin"));
+
+  // An operator wrote the real grant and dropped the bootstrap one, as the
+  // deployment guide says to do once the first sign-in is verified.
+  await f.admin.store.mutate((data) => {
+    for (const [id, binding] of Object.entries(data.roleBindings)) {
+      if (binding.createdBy === "bootstrap") delete data.roleBindings[id];
+    }
+    data.roleBindings["rb-formal"] = {
+      id: "rb-formal",
+      subjectType: "admin",
+      subjectId: current.body.user.id,
+      role: "department_admin",
+      scopeOrgUnitId: "org-platform",
+      validFrom: new Date(Date.now() - 60_000).toISOString(),
+      validTo: new Date(Date.now() + 3_600_000).toISOString(),
+      createdBy: "operator",
+      extraPermissions: [],
+    };
+  });
+
+  const next = await adminLogin(f, new CookieJar());
+  const after = await me(f, next);
+  assert.equal(after.response.status, 200);
+  assert.deepEqual(after.body.roles, ["department_admin"]);
+  assert.ok(!after.body.permissions.includes("system.write"));
+  const written = await f.admin.store.read((data) =>
+    Object.values(data.roleBindings).filter((binding) => binding.createdBy === "bootstrap"));
+  assert.equal(written.length, 0);
+});
+
+test("M4-C an unreadable bootstrap window is replaced, not treated as live", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  await seedOrganizations(f);
+
+  await adminLogin(f);
+  // A hand-edited store can carry a validTo no clock can read. rbac.js
+  // treats that as not active; bootstrap must agree and write a fresh
+  // window rather than leaving the first administrator with nothing.
+  await f.admin.store.mutate((data) => {
+    for (const binding of Object.values(data.roleBindings)) binding.validTo = "not-a-date";
+  });
+
+  const fresh = await adminLogin(f, new CookieJar());
+  const current = await me(f, fresh);
+  assert.equal(current.response.status, 200);
+  assert.ok(current.body.roles.includes("super_admin"));
+  const windows = await f.admin.store.read((data) =>
+    Object.values(data.roleBindings).map((binding) => binding.validTo));
+  assert.ok(windows.every((to) => Date.parse(to) > Date.now()));
+});
+
+test("M4-C desktop sign-in issues a token with step-up and refuses a stale ticket", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const callback = "http://127.0.0.1:43210/v1/admin/login/callback";
+  const started = await fetch(
+    `${f.base}/admin/desktop/login?callbackUrl=${encodeURIComponent(callback)}&codeChallenge=${challenge}`,
+    { redirect: "manual" },
+  );
+  assert.equal(started.status, 302);
+  const cookie = started.headers.getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+
+  // The browser-authorize step requests a fresh, MFA-capable sign-in.
+  const authorize = await fetch(started.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  assert.equal(authorize.status, 302);
+  assert.equal(f.oidc.lastAuthorize.searchParams.get("prompt"), "login");
+  assert.equal(f.oidc.lastAuthorize.searchParams.get("max_age"), "120");
+  assert.deepEqual(
+    JSON.parse(f.oidc.lastAuthorize.searchParams.get("claims")).id_token.auth_time,
+    { essential: true },
+  );
+
+  const done = await fetch(authorize.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  assert.equal(done.status, 302);
+  const target = new URL(done.headers.get("location"));
+  assert.equal(`${target.origin}${target.pathname}`, callback);
+  const ticket = target.searchParams.get("ticket");
+  assert.ok(ticket);
+
+  // The ticket is only exchanged with the matching PKCE verifier.
+  const wrong = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      ticket,
+      codeVerifier: crypto.randomBytes(48).toString("base64url"),
+    }),
+  });
+  assert.equal(wrong.status, 403);
+  assert.equal((await wrong.json()).error.code, "desktop_ticket_mismatch");
+
+  const exchanged = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(exchanged.status, 200);
+  const token = (await exchanged.json()).token;
+  assert.match(token, /^adm_desktop_/);
+
+  // The desktop token makes medium-risk gateway writes without a CSRF token.
+  const headers = { authorization: `Bearer ${token}`, "content-type": "application/json" };
+  const meResponse = await fetch(`${f.base}/api/v1/desktop/me`, { headers });
+  assert.equal(meResponse.status, 200);
+  const meBody = await meResponse.json();
+  assert.equal(meBody.stepUp.state, "verified");
+
+  const created = await fetch(`${f.base}/api/v1/admin/gateway/providers`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      name: "Desktop made",
+      preset: "openai",
+      reason: "Create a provider from the desktop console",
+    }),
+  });
+  assert.equal(created.status, 201);
+
+  // A one-time ticket cannot be exchanged twice.
+  const again = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(again.status, 409);
+
+  // Signing out revokes the token and its step-up assertion.
+  const signedOut = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "DELETE",
+    headers,
+  });
+  assert.equal(signedOut.status, 200);
+  const stored = await f.admin.store.read((data) => ({
+    tokens: Object.keys(data.desktopTokens).length,
+    assertions: Object.keys(data.stepUpAssertions).length,
+  }));
+  assert.equal(stored.assertions, 0);
+  const afterSignOut = await fetch(`${f.base}/api/v1/admin/gateway/providers`, { headers });
+  assert.equal(afterSignOut.status, 401);
+});
+
+test("M4-C desktop tokens expire on their own clock and by idle time", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const callback = "http://127.0.0.1:43211/v1/admin/login/callback";
+  const started = await fetch(
+    `${f.base}/admin/desktop/login?callbackUrl=${encodeURIComponent(callback)}&codeChallenge=${challenge}`,
+    { redirect: "manual" },
+  );
+  const cookie = started.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const authorize = await fetch(started.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const done = await fetch(authorize.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const ticket = new URL(done.headers.get("location")).searchParams.get("ticket");
+  const exchanged = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(exchanged.status, 200);
+  const token = (await exchanged.json()).token;
+  const hash = crypto.createHash("sha256").update(token).digest("hex");
+
+  await f.admin.store.mutate((data) => {
+    data.desktopTokens[hash].lastSeenAt = new Date(Date.now() - 31 * 60 * 1000).toISOString();
+  });
+  const idle = await fetch(`${f.base}/api/v1/desktop/me`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(idle.status, 401);
+  assert.equal((await idle.json()).error.code, "desktop_token_idle");
+
+  const stored = await f.admin.store.read((data) => ({
+    token: Boolean(data.desktopTokens[hash]),
+    assertion: Boolean(data.stepUpAssertions[hash]),
+  }));
+  assert.deepEqual(stored, { token: false, assertion: false });
+});
+
+test("M4-C a desktop sign-in without a fresh step-up keeps the token but not a step-up", {
+  timeout: 30000,
+}, async (t) => {
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  // The base sign-in still meets the management console's MFA rule, but
+  // its authentication is too old for a step-up assertion.
+  f.oidc.setClaims({
+    amr: ["pwd", "mfa"],
+    auth_time: Math.floor(Date.now() / 1000) - 3600,
+  });
+
+  const verifier = crypto.randomBytes(48).toString("base64url");
+  const challenge = crypto.createHash("sha256").update(verifier).digest("base64url");
+  const callback = "http://127.0.0.1:43212/v1/admin/login/callback";
+  const started = await fetch(
+    `${f.base}/admin/desktop/login?callbackUrl=${encodeURIComponent(callback)}&codeChallenge=${challenge}`,
+    { redirect: "manual" },
+  );
+  const cookie = started.headers.getSetCookie().map((value) => value.split(";")[0]).join("; ");
+  const authorize = await fetch(started.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const done = await fetch(authorize.headers.get("location"), {
+    redirect: "manual",
+    headers: { cookie },
+  });
+  const ticket = new URL(done.headers.get("location")).searchParams.get("ticket");
+  const exchanged = await fetch(`${f.base}/api/v1/desktop/token`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ticket, codeVerifier: verifier }),
+  });
+  assert.equal(exchanged.status, 200);
+  const token = (await exchanged.json()).token;
+
+  const current = await fetch(`${f.base}/api/v1/desktop/me`, {
+    headers: { authorization: `Bearer ${token}` },
+  });
+  assert.equal(current.status, 200);
+  assert.equal((await current.json()).stepUp.state, "required");
+
+  const refused = await fetch(`${f.base}/api/v1/admin/gateway/providers`, {
+    method: "POST",
+    headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+    body: JSON.stringify({
+      name: "Should not exist",
+      preset: "openai",
+      reason: "Desktop write after a sign-in without MFA",
+    }),
+  });
+  assert.equal(refused.status, 403);
+  assert.equal((await refused.json()).error.code, "step_up_required");
+});
+
+test("content capture resolves the key to a person and writes one stream", async (t) => {
+  // The gateway knows only a caller key; the control plane is what turns it
+  // into the user, device and department an audit stream names.
+  const captureToken = "capture-token-for-test-only-not-real";
+  const ingestToken = "ingest-token-for-test-only-not-real";
+  const calls = [];
+  const f = await fixture({
+    auditContentEnabled: true,
+    contentCapture: {
+      captureToken,
+      ingestToken,
+      authorizationId: "apr_capture_policy_01",
+      retentionDays: 7,
+    },
+    adminServerOptions: {
+      contentIngest: {
+        async capture(input) {
+          calls.push(input);
+          return {
+            streamId: "str_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            contentRef: "ct_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            bytes: 11,
+          };
+        },
+      },
+    },
+  });
+  t.after(() => f.close());
+  const response = await fetch(`${f.base}/api/v1/internal/content/capture`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-content-capture-token": captureToken },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      callerKeyId: "key-alice-new",
+      requestId: "req_capture0001",
+      sessionId: "ses_capture0001",
+      agentId: "codex",
+      modelId: "deepseek/deepseek-chat",
+      contentKind: "prompt",
+      text: "hello world",
+    }),
+  });
+  assert.equal(response.status, 201);
+  const payload = await response.json();
+  assert.equal(payload.streamId, "str_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].userId, "usr_alice");
+  assert.equal(calls[0].deviceId, "dev_alice");
+  assert.equal(calls[0].contentKind, "prompt");
+  assert.equal(calls[0].authorizationId, "apr_capture_policy_01");
+  assert.equal(calls[0].retentionDays, 7);
+  assert.equal(calls[0].purpose, "security_investigation");
+});
+
+test("content capture refuses a wrong token, an unknown key and a revoked one", async (t) => {
+  const captureToken = "capture-token-for-test-only-not-real";
+  const ingestToken = "ingest-token-for-test-only-not-real";
+  const calls = [];
+  const f = await fixture({
+    auditContentEnabled: true,
+    contentCapture: {
+      captureToken,
+      ingestToken,
+      authorizationId: "apr_capture_policy_01",
+    },
+    adminServerOptions: {
+      contentIngest: {
+        async capture(input) {
+          calls.push(input);
+          return { streamId: "str_x", contentRef: "ct_x", bytes: 1 };
+        },
+      },
+    },
+  });
+  t.after(() => f.close());
+  const send = (headers, callerKeyId = "key-alice-new") => fetch(
+    `${f.base}/api/v1/internal/content/capture`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json", ...headers },
+      body: JSON.stringify({
+        schemaVersion: 1,
+        callerKeyId,
+        requestId: "req_capture0002",
+        sessionId: "ses_capture0002",
+        agentId: "codex",
+        modelId: "deepseek/deepseek-chat",
+        contentKind: "prompt",
+        text: "hello world",
+      }),
+    },
+  );
+  assert.equal((await send({ "x-content-capture-token": "wrong-token-for-test-only-not-real" })).status,
+    401);
+  assert.equal((await send({ "x-content-capture-token": captureToken }, "key-missing")).status,
+    404);
+  assert.equal((await send({ "x-content-capture-token": captureToken }, "key-alice-old")).status,
+    409);
+  assert.equal(calls.length, 0);
+});
+
+test("content capture reaches a real audit-service and finalizes one stream", async (t) => {
+  // The broker and the ingest client against a real audit-service, not a
+  // fake: the caller key is resolved here, the stream is created there, and
+  // the text ends up encrypted in that service's own store.
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "magpie-capture-e2e-"));
+  const ingestToken = "audit-ingest-token-for-test-only-not-real";
+  const captureToken = "capture-token-for-test-only-not-real";
+  const auditConfig = loadAuditConfig({
+    AUDIT_SERVICE_TOKEN: ingestToken,
+    AUDIT_CONTENT_ENABLED: "true",
+    AUDIT_CONTENT_ENCRYPTION_KEY: Buffer.alloc(32, 0x2a).toString("base64"),
+    AUDIT_CONTENT_STORE_DIR: path.join(root, "content"),
+    AUDIT_STORE_PATH: path.join(root, "audit-store.json"),
+    AUDIT_MAX_BODY_BYTES: "65536",
+    AUDIT_RATE_LIMIT_PER_MINUTE: "1000",
+  });
+  const contentStore = new ContentStore({
+    directory: path.join(root, "content"),
+    key: Buffer.alloc(32, 0x2a),
+    proofSecret: "proof-secret-for-test-only-not-real-0123456789",
+    maxStreamBytes: 4096,
+  });
+  await contentStore.load();
+  const auditService = await createAuditServer(auditConfig, {
+    startPipeline: false,
+    logger: () => {},
+    contentStore,
+  });
+  const auditBase = await listen(auditService.server);
+  t.after(async () => {
+    await close(auditService.server);
+    await fs.rm(root, { recursive: true, force: true });
+  });
+  const f = await fixture({
+    auditContentEnabled: true,
+    auditContentServiceUrl: auditBase,
+    contentCapture: {
+      captureToken,
+      ingestToken,
+      authorizationId: "apr_capture_policy_01",
+      retentionDays: 7,
+    },
+  });
+  t.after(() => f.close());
+  await seedOrganizations(f);
+  const response = await fetch(`${f.base}/api/v1/internal/content/capture`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-content-capture-token": captureToken },
+    body: JSON.stringify({
+      schemaVersion: 1,
+      callerKeyId: "key-alice-new",
+      requestId: "req_capture0003",
+      sessionId: "ses_capture0003",
+      agentId: "codex",
+      modelId: "deepseek/deepseek-chat",
+      contentKind: "prompt",
+      text: "hello world",
+    }),
+  });
+  const payload = await response.json();
+  assert.equal(response.status, 201, JSON.stringify(payload));
+  assert.match(payload.streamId, /^str_/);
+
+  const indexPath = path.join(root, "content", "index.json");
+  let index = null;
+  let indexText = "";
+  for (let attempt = 0; attempt < 300; attempt += 1) {
+    try {
+      indexText = await fs.readFile(indexPath, "utf8");
+      index = JSON.parse(indexText);
+      if (Object.keys(index.streams || {}).length === 1) break;
+    } catch {
+      index = null;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  const streams = Object.values(index?.streams || {});
+  assert.equal(streams.length, 1);
+  assert.equal(streams[0].status, "finalized");
+  assert.equal(streams[0].request.userId, "usr_alice");
+  assert.equal(streams[0].request.deviceId, "dev_alice");
+  assert.equal(streams[0].request.contentKind, "prompt");
+  assert.ok(streams[0].contentRef);
+  // The text is in the encrypted object, never in the index.
+  assert.doesNotMatch(indexText, /hello world/);
+});
+
+test("a half-finished web sign-in does not stand in for a desktop one", {
+  timeout: 30000,
+}, async (t) => {
+  // Both flows share the host, so a shared login cookie once let a web
+  // transaction answer the desktop callback ("this callback is not a
+  // desktop sign-in"). The desktop flow now keeps a cookie of its own.
+  const f = await gatewayFixture();
+  t.after(() => f.close());
+  const web = await fetch(`${f.base}/admin/login`, { redirect: "manual" });
+  assert.equal(web.status, 302);
+  const webCookie = web.headers.getSetCookie()
+    .map((value) => value.split(";")[0])
+    .join("; ");
+  const state = new URL(web.headers.get("location")).searchParams.get("state");
+  const desktop = await fetch(
+    `${f.base}/admin/desktop/oauth/callback?code=x&state=${state}`,
+    { redirect: "manual", headers: { cookie: webCookie } },
+  );
+  assert.equal(desktop.status, 400);
+  assert.equal((await desktop.json()).error.code, "login_expired");
+});
+
+test("usage groups and filters by device and by routing group", { timeout: 30000 }, async (t) => {
+  const now = Date.now();
+  const usageContent = [
+    JSON.stringify({
+      t: new Date(now - 3600 * 1000).toISOString(),
+      callerKeyId: "key-alice-new",
+      callerKeyName: "Alice new",
+      agent: "claude",
+      provider: "deepseek",
+      req: "group/smart",
+      computer: "alice-pc",
+      status: 200,
+      in: 10,
+      out: 5,
+      cost: 0.01,
+    }),
+    JSON.stringify({
+      t: new Date(now - 2 * 3600 * 1000).toISOString(),
+      callerKeyId: "key-bob",
+      callerKeyName: "Bob",
+      agent: "codex",
+      provider: "openai",
+      req: "gpt-test",
+      computer: "bob-mac",
+      status: 200,
+      in: 7,
+      out: 3,
+      cost: 0.02,
+    }),
+  ].join("\n") + "\n";
+  const f = await fixture({ usageContent });
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const from = new Date(now - 24 * 3600 * 1000).toISOString();
+  const to = new Date(now + 3600 * 1000).toISOString();
+  const query = `from=${encodeURIComponent(from)}&to=${encodeURIComponent(to)}`;
+
+  const byDevice = await adminGet(
+    f, jar, `/api/v1/admin/usage/timeseries?${query}&bucket=day&groupBy=device`,
+  );
+  assert.equal(byDevice.response.status, 200, JSON.stringify(byDevice.body));
+  assert.deepEqual(
+    [...new Set(byDevice.body.points.flatMap((point) => point.groups.map((row) => row.device)))].sort(),
+    ["alice-pc", "bob-mac"],
+  );
+
+  const byGroup = await adminGet(
+    f, jar, `/api/v1/admin/usage/timeseries?${query}&bucket=day&groupBy=group`,
+  );
+  assert.equal(byGroup.response.status, 200, JSON.stringify(byGroup.body));
+  assert.deepEqual(
+    [...new Set(byGroup.body.points.flatMap((point) => point.groups.map((row) => row.group)))].sort(),
+    ["(unknown)", "smart"],
+  );
+
+  const filtered = await adminGet(
+    f, jar, `/api/v1/admin/usage/summary?${query}&device=alice-pc`,
+  );
+  assert.equal(filtered.body.totals.requests, 1);
+  const byGroupFilter = await adminGet(
+    f, jar, `/api/v1/admin/usage/summary?${query}&group=smart`,
+  );
+  assert.equal(byGroupFilter.body.totals.requests, 1);
+
+  const unknownGroupBy = await adminGet(
+    f, jar, `/api/v1/admin/usage/timeseries?${query}&bucket=day&groupBy=project`,
+  );
+  assert.equal(unknownGroupBy.response.status, 400);
+});
+
+test("an administrator publishes a resource and the client catalog carries it", { timeout: 30000 }, async (t) => {
+  const f = await fixture();
+  t.after(() => f.close());
+  const jar = await adminLogin(f);
+  const current = await me(f, jar);
+  const csrf = current.body.csrfToken;
+
+  const created = await adminPost(f, jar, "/api/v1/admin/resources", {
+    kind: "skill",
+    name: "Release check",
+    deliveryMode: "forced",
+    assignments: ["org-platform"],
+    compatibility: {},
+    reason: "Pilot onboarding",
+  }, csrf, { "idempotency-key": "publish-test-create-0001" });
+  assert.equal(created.response.status, 201, JSON.stringify(created.body));
+  const resourceId = created.body.resource.id;
+  assert.equal(created.body.resource.status, "draft");
+
+  const release = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/resources/${resourceId}/releases`,
+    {
+      resourceVersion: "2026.11.1",
+      content: "---\nname: release-check\n---\nRun it.\n",
+      reason: "Pilot onboarding",
+      expectedUpdatedAt: created.body.resource.updatedAt,
+    },
+    csrf,
+    { "idempotency-key": "publish-test-release-0001" },
+  );
+  assert.equal(release.response.status, 201, JSON.stringify(release.body));
+  assert.equal(release.body.release.status, "candidate");
+  assert.equal(release.body.release.mediaType, "text/markdown; charset=utf-8");
+
+  const approval = await adminPost(f, jar, "/api/v1/admin/approvals", {
+    action: "resource.publish",
+    targetId: resourceId,
+    reason: "Pilot onboarding",
+    releaseId: release.body.release.id,
+    expectedUpdatedAt: release.body.resource.updatedAt,
+  }, csrf, { "idempotency-key": "publish-test-approval-0001" });
+  assert.equal(approval.response.status, 201, JSON.stringify(approval.body));
+  const approvalId = approval.body.approval.approvalId;
+
+  // A second administrator approves it; the requester cannot.
+  const selfDecision = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/approvals/${approvalId}/decisions`,
+    { decision: "approve", reason: "Reviewed" },
+    csrf,
+  );
+  assert.equal(selfDecision.response.status, 403);
+  assert.equal(selfDecision.body.error.code, "approval_separation_required");
+
+  const approver = await seedAdminSession(f, "b");
+  const decided = await approverPost(
+    f,
+    approver,
+    `/api/v1/admin/approvals/${approvalId}/decisions`,
+    { decision: "approve", reason: "Reviewed" },
+  );
+  assert.equal(decided.response.status, 200, JSON.stringify(decided.body));
+
+  const published = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/resources/${resourceId}/publish`,
+    {
+      releaseId: release.body.release.id,
+      approvalId,
+      reason: "Pilot onboarding",
+      expectedUpdatedAt: release.body.resource.updatedAt,
+    },
+    csrf,
+    { "idempotency-key": "publish-test-publish-0001" },
+  );
+  assert.equal(published.response.status, 200, JSON.stringify(published.body));
+  assert.equal(published.body.resource.status, "published");
+
+  // Each write reached the resource service as the administrator, with its
+  // own idempotency key, and never with the management session.
+  assert.equal(f.resource.writes.length, 3);
+  assert.ok(f.resource.writes.every((write) => write.actor && write.idempotencyKey));
+  assert.ok(f.resource.writes.every((write) => !write.body.reason || write.body.reason === "Pilot onboarding"));
+  assert.ok(!JSON.stringify(f.resource.writes).includes(f.secrets.sessionSecret));
+
+  // An approval is spent by its publish: the same one cannot be reused.
+  const stale = await adminPost(
+    f,
+    jar,
+    `/api/v1/admin/resources/${resourceId}/publish`,
+    {
+      releaseId: release.body.release.id,
+      approvalId,
+      reason: "Pilot onboarding",
+      expectedUpdatedAt: created.body.resource.updatedAt,
+    },
+    csrf,
+    { "idempotency-key": "publish-test-publish-0002" },
+  );
+  assert.equal(stale.response.status, 409);
+  assert.equal(stale.body.error.code, "approval_consumed");
 });

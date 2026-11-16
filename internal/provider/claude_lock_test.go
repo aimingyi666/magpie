@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/yetone/magpie/internal/claudelock"
 	"github.com/yetone/magpie/internal/filelock"
 )
 
@@ -134,9 +135,9 @@ func TestClaudeSwitchStaleAndHeldLocks(t *testing.T) {
 	})
 	t.Run("held", func(t *testing.T) {
 		home, cred := claudeLockAccounts(t)
-		w := claudeLockWait
-		claudeLockWait = 300 * time.Millisecond
-		t.Cleanup(func() { claudeLockWait = w })
+		w := claudelock.Wait
+		claudelock.Wait = 300 * time.Millisecond
+		t.Cleanup(func() { claudelock.Wait = w })
 		if err := os.Mkdir(home+"/.claude.lock", 0o755); err != nil {
 			t.Fatal(err)
 		}
@@ -267,4 +268,52 @@ func TestSavedClaudeRunHoldsItsLock(t *testing.T) {
 	if m, _ := filepath.Glob(claudeRunMarks("max@x.com")); len(m) != 0 {
 		t.Fatalf("run locks left behind: %v", m)
 	}
+}
+
+// Forgetting an account whose directory a run of another magpie process
+// holds is refused (#3254): the folder and the saved sign-in stay. A lock
+// file whose run ended holds nothing, and the forget goes on.
+func TestClaudeForgetRefusedWhileAnotherMagpieRunsTheFolder(t *testing.T) {
+	t.Run("held", func(t *testing.T) {
+		claudeThree(t)
+		if err := os.MkdirAll(claudeAccountDir("max@x.com"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		w := claudeRunWait
+		claudeRunWait = 300 * time.Millisecond
+		t.Cleanup(func() { claudeRunWait = w })
+		unlock, held := filelock.Lock(claudeAccountDir("max@x.com")+".run-99999-1.lock", time.Second)
+		if !held {
+			t.Fatal("not held")
+		}
+		defer unlock()
+		if err := ForgetLogin("claude", "max@x.com"); !errors.Is(err, errClaudeRunning) {
+			t.Fatalf("got %v", err)
+		}
+		if _, err := os.Stat(claudeAccountDir("max@x.com")); err != nil {
+			t.Fatalf("the account's directory was removed under the run: %v", err)
+		}
+		if a := savedAuth(t, "max@x.com"); !strings.Contains(a, "r-max") {
+			t.Fatalf("the saved sign-in went with the refused forget: %q", a)
+		}
+	})
+	t.Run("ended", func(t *testing.T) {
+		claudeThree(t)
+		if err := os.MkdirAll(claudeAccountDir("max@x.com"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		mark := claudeAccountDir("max@x.com") + ".run-99999-1.lock"
+		if err := os.MkdirAll(filepath.Dir(mark), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(mark, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := ForgetLogin("claude", "max@x.com"); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Stat(claudeAccountDir("max@x.com")); !os.IsNotExist(err) {
+			t.Fatalf("the forgotten account's directory kept: %v", err)
+		}
+	})
 }

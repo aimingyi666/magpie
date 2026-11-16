@@ -95,6 +95,10 @@ export class AuthServiceClient {
     return this.get("/api/v1/internal/admin/credentials", "credentials");
   }
 
+  resolveDevice(token) {
+    return this.post("/api/v1/internal/admin/devices/resolve", { token });
+  }
+
   disableUser(userId) {
     return this.post(`/api/v1/internal/admin/users/${encodeURIComponent(userId)}/disable`);
   }

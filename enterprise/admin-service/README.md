@@ -27,7 +27,7 @@
 `gateway-control` 受控适配器已实现并通过 15 项 Mock/故障测试，现已由 auth-service 自动
 调用；Docker/真实共享卷验收仍未完成。C4-03a 的正式只读模型目录已实现：管理服务从只读
 文件加载 schema v1 目录、校验摘要，并在写入前把 group/provider 选择器展开为稳定模型 ID；
-当前总计 123 项管理测试通过（86 项管理服务集成测试 + 5 项内容治理客户端专项 + 5 项内容治理存储专项 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）。
+当前总计 133 项管理测试通过（96 项管理服务集成测试 + 5 项内容治理客户端专项 + 5 项内容治理存储专项 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 + 6 项 SIEM 专项）。
 auth-service 的
 C4-03b/C4-03c 用户级策略核心、自动 apply/readback、issuance journal、失败补偿和同步后
 交付已实现并通过 25 项测试。C4-03d 部分实现：管理页已提供额度/模型策略写表单，自动携带
@@ -81,15 +81,22 @@ APR-01c 已提供独立 OIDC Client 的 step-up：`prompt=login`、`max_age`、e
   对话正文或任何 Key/token 材料。
 - M4-E 内容治理客户端只由 admin-service 服务端使用独立审计令牌访问 `audit-service`；
   浏览器的读取正文/下载导出 token 均为一次性且不持久化。
-- M3-C-2 只读资源/同步 API：`GET /api/v1/admin/resources`（`resources.read`）、
+- M3-C-2 资源/同步 API：`GET /api/v1/admin/resources`（`resources.read`）、
   `GET /api/v1/admin/resources/{resourceId}`、`GET /api/v1/admin/resource-sync/reports`
   和 `GET /api/v1/admin/resource-sync/reports/{deviceId}`（`devices.read`）。资源按 `"*"`
   或管理员组织范围可见；同步报告要求设备存在、设备属于可见用户且报告的 `userId` 与设备
   一致，否则隐藏。详情对范围外或不可解析记录分别返回 `403 forbidden_scope` /
   `404 target_not_found`。
-- 资源服务客户端使用独立 `ADMIN_RESOURCE_SERVICE_TOKEN`，只发 GET、不跟随重定向、默认
-  5 秒超时和 4 MiB 响应上限。响应只含白名单字段；资源内容、签名私钥、服务令牌、上游
-  actor 字段、设备令牌和同步凭证不会离开管理服务。
+- 资源发布写接口（`resources.write`，CSRF/桌面令牌、`reason` 必填）：
+  `POST /api/v1/admin/resources` 建草稿、`POST .../resources/{id}/releases` 建候选版本、
+  `POST .../resources/{id}/publish` 发布、`POST .../resources/{id}/rollback` 回滚。
+  发布和回滚还要求一个**已批准**的审批（`resource.publish` / `resource.rollback`，
+  绑定版本 id 与 `expectedUpdatedAt`，非请求人批准，一次性消费）；管理服务校验后才把
+  审批 id 交给资源服务。发布了资源的设备在下一次同步取到；客户端插件每 5 分钟自动同步一次。
+- 资源服务客户端使用独立 `ADMIN_RESOURCE_SERVICE_TOKEN`，不跟随重定向、默认
+  5 秒超时和 4 MiB 响应上限。读只发 GET；写只发上面的四个 POST，并带
+  `X-Magpie-Actor` 与 `Idempotency-Key`。响应只含白名单字段；资源内容、签名私钥、
+  服务令牌、上游 actor 字段、设备令牌和同步凭证不会离开管理服务。
 - 四个受控管理写接口：停用/启用用户、吊销设备、轮换当前凭证。每次写操作校验会话、CSRF、
   权限、目标组织子树和 `reason`；auth-service 故障稳定映射为 `502 dependency_unavailable`。
 - 两个额度/模型策略写接口：`PUT .../policy/quota` 和 `PATCH .../policy/models`。管理服务
@@ -307,6 +314,16 @@ ADMIN_BOOTSTRAP_VALID_HOURS=24
 首次成功登录会创建一条有到期时间的 `super_admin` 角色绑定。验证管理员能登录后，应尽快写入
 正式角色绑定并移除 bootstrap 配置。bootstrap 不是长期授权机制。
 
+续期规则（`upsertBootstrapBinding`）：
+
+- 绑定过期后，下一次登录会写一条新窗口，不会把首位管理员永久锁在门外；首次创建记为
+  `bootstrap.binding.created`，续期记为 `bootstrap.binding.refreshed`，两者都进
+  `adminSystemAuditLogs`，带上一窗口的 `validTo`。
+- 一旦该管理员有一条**非 bootstrap** 的正式角色绑定，bootstrap 就不再写入、也不再续期：
+  移除配置立即生效，正式绑定到期后不会被人悄悄重新激活。
+- `validTo` 读不出来时按「未知」处理，与 `rbac.js` 的 `activeRoleBindings` 一致：该绑定
+  不算有效，bootstrap 会写一条新窗口并留下审计，而不是留下一个谁也进不去的账号。
+
 ## 数据
 
 默认存储为 `ADMIN_STORE_PATH` 指向的 JSON 文件，包含：
@@ -366,6 +383,7 @@ OIDC Client Secret、服务令牌或 Gateway Key。
 | `GET` | `/api/v1/admin/devices` | 当前范围内设备元数据 |
 | `GET` | `/api/v1/admin/credentials` | 当前范围内凭证元数据；不含 Key/hash |
 | `GET` | `/api/v1/admin/models` | 返回正式只读模型目录的安全投影和 `catalog` 摘要；未配置目录时才退回 `ADMIN_MODELS` 兼容显示 |
+| `GET` | `/api/v1/client/enterprise/providers` | 桌面客户端专用；校验设备令牌后返回企业供应商的安全投影（名称、地址、该凭证可用的模型、就绪状态、脱敏指纹），不含 Key；模型按凭证白名单过滤，命不中任何模型的供应商不返回 |
 | `GET` | `/api/v1/admin/usage/summary` | Token、费用、成功率及人/部门/模型/Agent 汇总 |
 | `GET` | `/api/v1/admin/usage/timeseries` | `bucket=hour\|day`、`groupBy=user\|department\|model\|agent\|all` 的趋势 |
 | `GET` | `/api/v1/admin/health` | 管理服务读取 auth-service 最小状态 |
@@ -561,8 +579,8 @@ Get-ChildItem src\*.js | ForEach-Object {
 & $node --test test\*.test.mjs
 ```
 
-2026-11-03 的实际结果：`123 passed, 0 failed`（86 项管理服务集成测试 + 5 项内容治理
-客户端专项测试 + 5 项内容治理存储专项测试 + 7 项目录专项测试 + 7 项通知渠道专项测试 +
+2026-11-06 合并 main 后的实际结果：`133 passed, 0 failed`（96 项管理服务集成测试 + 5 项
+内容治理客户端专项测试 + 5 项内容治理存储专项测试 + 7 项目录专项测试 + 7 项通知渠道专项测试 +
 7 项通知规则专项测试 + 6 项 SIEM 专项测试）。
 使用 Mock IdP、Mock auth-service 和临时
 `usage.jsonl`，覆盖登录、MFA、已验证邮箱、ACR 请求、CSRF、角色撤销、部门子树、兄弟部门
@@ -602,11 +620,11 @@ operation/audit 链路；双层加密导出、一次性 body grant 和下载 tok
 删除证明验证以及依赖失败失败关闭。NOTIFY-01d 新增覆盖规则
 CRUD、组织范围、`expectedUpdatedAt` 冲突、抑制窗口、聚合维度、阈值/延迟升级、单条升级失败
 隔离、aggregates/suppressions/escalations 查询、dead-letter 幂等重放和运营页面静态契约。
-管理服务当前为 `123 passed, 0 failed`（86 项管理集成 + 5 项内容治理客户端 +
+管理服务当前为 `133 passed, 0 failed`（96 项管理集成 + 5 项内容治理客户端 +
 5 项内容治理存储 + 7 项目录专项 + 7 项通知渠道专项 + 7 项通知规则专项 +
 6 项 SIEM 专项），
 auth-service 为 `26 passed, 0 failed`，gateway-control 为 `15 passed, 0 failed`，三者合计
-`145 passed, 0 failed`。
+`160 passed, 0 failed`。
 
 尚未验证：
 

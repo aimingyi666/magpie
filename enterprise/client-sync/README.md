@@ -21,6 +21,33 @@ MDM、真实 Codex 客户端配置验收和生产验收仍未完成；M4-M6 仍�
 它不是浏览器 SDK。浏览器不能直接写本机 `~/.codex`、`~/.claude` 或
 `~/.config/magpie`；本机文件必须由带设备身份的 Magpie/helper 安装。
 
+## 资源落到哪里
+
+配置了 `agents` 后，同步会把资源写进 Agent 自己的文件；没配置时只缓存。
+
+`agents` 的值是该 Agent 自己的配置目录：Claude Code 的 `~/.claude`，Codex 的
+`~/.codex`。
+
+| 资源 | 落盘位置 |
+| --- | --- |
+| `instructions` | `<agent root>/CLAUDE.md`（Claude Code）或 `AGENTS.md`（Codex）里的受管块 |
+| `skill` | 两个 Agent 都写 `<agent root>/skills/<name>/SKILL.md` |
+| `subagent` | `<claude root>/agents/<name>.md`（Codex 没有已知的用户级子代理文件） |
+| `mcp` | Claude Code：配置目录旁的 `~/.claude.json`；Codex：`<codex root>/config.toml` 的 `[mcp_servers.<name>]` 受管块 |
+| `redact` | `managedRedactPath`：magpie 配置目录下的 `managed-redact.json` |
+| `hook` | `<claude root>/settings.json`、`<codex root>/hooks.json`；写过的条目记在同步目录的 `agent-hooks.json` |
+
+- `skill` / `subagent` 的名字取内容 frontmatter 的 `name:`，没有时用资源 id 的合法化形式。
+- 每个写出的文件带 `<!-- magpie:managed:resource <id> -->` 标记；同名但不由 magpie
+  写的文件一律拒绝覆盖，也不会被删除。
+- `mcp` 合并进 `.mcp.json`，保留员工自己的服务器和顶层字段；条目带
+  `x-magpie-resource` 标记，同名但无标记则冲突。
+- 资源从 desired state 移除时，对应的文件/条目会被收回；`instructions` 的受管块同样。
+- Codex 接收 `instructions`、`skill`、`mcp` 和 `hook`；它没有 magpie 已知的用户级
+  子代理文件，`subagent` 对它报 `unsupported`，不猜格式。
+- `redact` 策略只写文件，不启用任何东西：magpie 在每次请求时读取它，企业要求基线时
+  secrets 与个人数据类别不能被用户在设置里关掉。
+
 ## 最小用法
 
 ```js

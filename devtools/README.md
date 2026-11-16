@@ -21,6 +21,8 @@ CI -> 自动创建 PR -> 通过受保护 `main` 合并”。所以 `main` 不是
 - [`enterprise-implementation-status.md`](enterprise-implementation-status.md)：当前已实现、已测试和未验证能力。
 - [`enterprise-deployment.md`](enterprise-deployment.md)：团队部署、上游同步、分支保护、MDM 和发布流程。
 - [`enterprise-operating-model.md`](enterprise-operating-model.md)：项目 RACI、协作节奏、GitHub 规则、环境晋级、发布证据、成本容量、培训和试点退出。
+- [`internal-saas-plan.md`](internal-saas-plan.md)：内部人员自助接入形态的方案草案（默认策略模板、IdP 组映射、客户端一键登录），并说明为什么内部场景不做多租户。
+- [`corp-plugin-protocol.md`](corp-plugin-protocol.md)：magpie 企业客户端插件与自建服务端的 API 契约（认证、供应商、资源库、用量/脱敏上传）及安全边界；实现见 [`../enterprise/corp-plugin`](../enterprise/corp-plugin)，服务端参考实现见 [`../enterprise/corp-server`](../enterprise/corp-server)。
 
 ## 企业版当前实施基线
 
@@ -54,8 +56,9 @@ Mock/集成测试通过；生产验收尚未完成。M3-A 的资源目录、不�
 视图，但资源发布/回滚 UI、审批联动、本地 helper 安装器/产品流、目标 Agent 文件映射、Windows ACL、MDM、
 真实 IdP、浏览器 E2E、Docker/Compose 实机、灰度/自动回滚和生产验收未完成。M3-B 的审批
 nonce 仅单进程内存、注册表与审计不是同一事务，且 Compose 尚未实机验收。当前本地/Mock
-回归为 admin 109 项、auth 26 项、gateway-control 15 项、resource 15 项、mcp-gateway 14 项、
-client-sync 26 项、local-mcp 60 项，合计 265 项通过。
+回归为 admin 119 项、auth 26 项、gateway-control 15 项、resource 15 项、mcp-gateway 14 项、
+client-sync 26 项、local-mcp 60 项、audit-service 34 项、magpie-plugin 30 项，合计 339 项通过，
+由 CI 的 `enterprise` job 逐包执行。
 C4-01/C4-02/C4-03a/C4-03b/C4-03c 尚未合入 `main`，且真实环境验收未完成，不能据此
 宣称管理员已经可以在生产自助调额或授予模型。
 `APR-01a/b` 的服务端审批、职责分离、一次性消费和 HMAC/Mock 外部审批回调，

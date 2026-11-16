@@ -39,6 +39,20 @@ import {
 const ALERT_ID_PATTERN = /^sal_[a-f0-9]{24}$/;
 const ALERT_STATUSES_SET = new Set(ALERT_STATUSES);
 const ALERT_SEVERITIES_SET = new Set(ALERT_SEVERITIES);
+
+// withUsageBaseline fills in what this subject's calls usually cost when
+// the event does not say. A baseline the producer sent is kept as it is.
+function withUsageBaseline(event, baseline) {
+  if (!event?.usage) return event;
+  const usage = { ...event.usage };
+  if (usage.baselineTokens === undefined && Number.isFinite(baseline?.tokens)) {
+    usage.baselineTokens = baseline.tokens;
+  }
+  if (usage.baselineCost === undefined && Number.isFinite(baseline?.cost)) {
+    usage.baselineCost = baseline.cost;
+  }
+  return { ...event, usage };
+}
 import { createDetectionPolicy, describeRules } from "./rules.js";
 import { renderPrometheusMetrics } from "./metrics.js";
 import { SecurityStore, SecurityStoreError } from "./store.js";
@@ -459,11 +473,30 @@ export async function createSecurityServer(config, options = {}) {
         }
         const body = await readJsonBody(req, config.maxBodyBytes);
         const event = validateDetectionEvent(body);
+        // A future date makes an alert whose detectedAt is after the time
+        // it was opened, which the store refuses on the next start: the
+        // whole service would then fail to load its own store. A minute
+        // covers clock skew between the gateway and this service.
+        const receivedAt = new Date(clock());
+        if (Date.parse(event.occurredAt) > receivedAt.getTime() + 60_000) {
+          throw new SecurityApiError(
+            400,
+            "event_in_future",
+            "occurredAt is more than a minute in the future",
+          );
+        }
+        // What this subject's calls usually cost, from the events already
+        // accepted. The event itself is stored as it arrived; the baseline
+        // only feeds the evaluator, so a replayed event keeps its
+        // fingerprint.
+        const baseline = store.usageBaseline(event.subject);
         const result = await store.ingest(event, {
           requestId: reqId,
           now: new Date(clock()),
           evaluate: (detectionEvent, { now }) => {
-            const findings = evaluateDetectionEvent(detectionEvent, policy, { now });
+            const findings = evaluateDetectionEvent(
+              withUsageBaseline(detectionEvent, baseline), policy, { now },
+            );
             if (findings.some((finding) => finding.eventId !== detectionEvent.eventId)) {
               throw new Error("rule evaluator returned a finding for another event");
             }

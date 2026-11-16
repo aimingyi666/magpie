@@ -117,6 +117,29 @@ export function loadConfig(env = process.env) {
       `ADMIN_RESOURCE_SERVICE_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
     );
   }
+  // The gateway's own administration API: an internal address and a token
+  // of its own, together or not at all.
+  const gatewayAdminUrl = String(env.ADMIN_GATEWAY_ADMIN_URL || "").trim();
+  const gatewayAdminToken = String(env.ADMIN_GATEWAY_ADMIN_TOKEN || "").trim();
+  if (Boolean(gatewayAdminUrl) !== Boolean(gatewayAdminToken)) {
+    throw new Error(
+      "ADMIN_GATEWAY_ADMIN_URL and ADMIN_GATEWAY_ADMIN_TOKEN are required together",
+    );
+  }
+  if (gatewayAdminToken && gatewayAdminToken.length < MIN_SECRET_LENGTH) {
+    throw new Error(
+      `ADMIN_GATEWAY_ADMIN_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+    );
+  }
+  if (gatewayAdminUrl) {
+    const parsed = new URL(gatewayAdminUrl);
+    if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+      throw new Error("ADMIN_GATEWAY_ADMIN_URL must use http or https");
+    }
+    if (parsed.username || parsed.password || parsed.search || parsed.hash) {
+      throw new Error("ADMIN_GATEWAY_ADMIN_URL must not carry credentials, a query or a fragment");
+    }
+  }
   // M4-E: the admin UI reaches audit-service only through this optional
   // content boundary. Metadata/body access uses the admin token; retention,
   // deletion, legal holds and exports use the governance token.
@@ -193,6 +216,58 @@ export function loadConfig(env = process.env) {
     }
     if (auditContentServiceExportKeyBytes.length !== 32) {
       throw new Error("ADMIN_AUDIT_CONTENT_EXPORT_KEY must be 32-byte base64 or hex");
+    }
+  }
+  // Automatic content capture: the gateway hands over a caller key and a
+  // text, and this service resolves the person, applies the standing
+  // collection policy and writes audit-service. Off unless every part is
+  // configured: a half-configured capture would either drop every stream or
+  // write one under the wrong authorization.
+  const contentCaptureEnabled = bool(env, "ADMIN_CONTENT_CAPTURE_ENABLED", false);
+  const contentCaptureToken = String(env.ADMIN_CONTENT_CAPTURE_TOKEN || "").trim();
+  const contentCapturePurpose = String(
+    env.ADMIN_CONTENT_CAPTURE_PURPOSE || "security_investigation",
+  ).trim();
+  const contentCaptureAuthorizationId = String(
+    env.ADMIN_CONTENT_CAPTURE_AUTHORIZATION_ID || "",
+  ).trim();
+  const contentCaptureRetentionDays = integer(
+    env,
+    "ADMIN_CONTENT_CAPTURE_RETENTION_DAYS",
+    30,
+    1,
+    3650,
+  );
+  const auditContentIngestToken = String(
+    env.ADMIN_AUDIT_CONTENT_INGEST_TOKEN || "",
+  ).trim();
+  if (contentCaptureEnabled) {
+    if (contentCaptureToken.length < MIN_SECRET_LENGTH) {
+      throw new Error(
+        `ADMIN_CONTENT_CAPTURE_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+      );
+    }
+    if (auditContentIngestToken.length < MIN_SECRET_LENGTH) {
+      throw new Error(
+        `ADMIN_AUDIT_CONTENT_INGEST_TOKEN must be at least ${MIN_SECRET_LENGTH} characters`,
+      );
+    }
+    if (contentCaptureToken === auditContentIngestToken) {
+      throw new Error(
+        "ADMIN_CONTENT_CAPTURE_TOKEN and ADMIN_AUDIT_CONTENT_INGEST_TOKEN must differ",
+      );
+    }
+    if (!auditContentServiceUrl) {
+      throw new Error(
+        "ADMIN_AUDIT_CONTENT_SERVICE_URL is required when content capture is on",
+      );
+    }
+    if (!/^[A-Za-z0-9][A-Za-z0-9._:@-]{7,127}$/.test(contentCaptureAuthorizationId)) {
+      throw new Error("ADMIN_CONTENT_CAPTURE_AUTHORIZATION_ID is invalid");
+    }
+    if (!["security_investigation", "incident_response", "compliance_review",
+      "legal_investigation"].includes(contentCapturePurpose)) {
+      throw new Error("ADMIN_CONTENT_CAPTURE_PURPOSE is unsupported");
     }
   }
   const stepUpClientId = String(env.ADMIN_STEP_UP_OIDC_CLIENT_ID || "").trim();
@@ -323,6 +398,21 @@ export function loadConfig(env = process.env) {
     sessionTtlSeconds: integer(env, "ADMIN_SESSION_TTL_HOURS", 8, 1, 8) * 3600,
     idleTimeoutSeconds: integer(env, "ADMIN_IDLE_TIMEOUT_MINUTES", 30, 5, 120) * 60,
     rateLimitPerMinute: integer(env, "ADMIN_RATE_LIMIT_PER_MINUTE", 120, 10, 10000),
+    desktop: {
+      // Where a desktop admin signs in from. The callback must be a
+      // loopback address: the ticket lands in the browser's address bar,
+      // and only the machine asking for it may receive it.
+      enabled: bool(env, "ADMIN_DESKTOP_LOGIN_ENABLED", true),
+      allowedCallbackHosts: list(env, "ADMIN_DESKTOP_CALLBACK_HOSTS").length
+        ? list(env, "ADMIN_DESKTOP_CALLBACK_HOSTS").map((value) => value.toLowerCase())
+        : ["127.0.0.1", "localhost", "[::1]"],
+      allowedCallbackPorts: list(env, "ADMIN_DESKTOP_CALLBACK_PORTS")
+        .map((value) => Number(value))
+        .filter((value) => Number.isInteger(value) && value > 0 && value <= 65535),
+      ticketTtlSeconds: integer(env, "ADMIN_DESKTOP_TICKET_TTL_SECONDS", 120, 30, 600),
+      tokenTtlSeconds: integer(env, "ADMIN_DESKTOP_TOKEN_TTL_HOURS", 8, 1, 8) * 3600,
+      idleTimeoutSeconds: integer(env, "ADMIN_DESKTOP_IDLE_MINUTES", 30, 5, 120) * 60,
+    },
     allowedIps: allowedIpValues.map((value) => parseAllowedIp(value)),
     bootstrap: {
       subjectIds: list(env, "ADMIN_BOOTSTRAP_SUBJECTS"),
@@ -347,6 +437,36 @@ export function loadConfig(env = process.env) {
         4 * 1024 * 1024,
         16 * 1024,
         32 * 1024 * 1024,
+      ),
+    },
+    gatewayAdmin: {
+      enabled: Boolean(gatewayAdminUrl),
+      url: gatewayAdminUrl ? url(env, "ADMIN_GATEWAY_ADMIN_URL") : "",
+      token: gatewayAdminToken,
+      timeoutMs: integer(env, "ADMIN_GATEWAY_ADMIN_TIMEOUT_MS", 10000, 500, 60000),
+      maxResponseBytes: integer(
+        env,
+        "ADMIN_GATEWAY_ADMIN_MAX_RESPONSE_BYTES",
+        4 * 1024 * 1024,
+        16 * 1024,
+        32 * 1024 * 1024,
+      ),
+    },
+    contentCapture: {
+      enabled: contentCaptureEnabled,
+      token: contentCaptureToken,
+      purpose: contentCapturePurpose,
+      authorizationId: contentCaptureAuthorizationId,
+      retentionDays: contentCaptureRetentionDays,
+      ingestToken: auditContentIngestToken,
+      url: auditContentServiceUrl,
+      timeoutMs: integer(env, "ADMIN_CONTENT_CAPTURE_TIMEOUT_MS", 5000, 500, 30000),
+      maxTextBytes: integer(
+        env,
+        "ADMIN_CONTENT_CAPTURE_MAX_TEXT_BYTES",
+        256 * 1024,
+        1024,
+        4 * 1024 * 1024,
       ),
     },
     auditContentService: {

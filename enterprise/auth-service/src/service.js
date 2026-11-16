@@ -1465,6 +1465,25 @@ export async function createEnterpriseAuthServer(config, options = {}) {
         json(res, 200, { ok: true, credentials });
         return;
       }
+      // The management service resolves a desktop device token here before
+      // it answers that client anything: the gateway key stays in this
+      // service, and the caller only learns who the device belongs to and
+      // which models the credential carries.
+      if (req.method === "POST" && url.pathname === "/api/v1/internal/admin/devices/resolve") {
+        const body = requireJsonObject(await readJson(req));
+        const token = cleanText(body.token, "token", 512);
+        const resolved = await store.read((data) => {
+          const { device, user } = deviceFromToken(data, token);
+          const credential = data.credentials[device.gatewayKeyId];
+          return {
+            user: publicUser(user),
+            device: publicDevice(device),
+            credential: credential ? publicCredential(credential, data.devices) : null,
+          };
+        });
+        json(res, 200, { ok: true, ...resolved });
+        return;
+      }
 
       const reconcileRoute = /^\/api\/v1\/internal\/admin\/users\/(usr_[A-Za-z0-9_-]+)\/policy\/reconcile$/.exec(
         url.pathname,

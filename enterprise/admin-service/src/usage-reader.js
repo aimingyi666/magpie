@@ -36,12 +36,20 @@ function normalizeRecord(value, maxFields) {
   if (costValue != null && (!Number.isFinite(costValue) || costValue < 0)) {
     throw new UsageReadError("The usage source contains an invalid cost");
   }
+  const requested = text(value.req, 240);
   return {
     time,
     agent: text(value.agent, 160),
     provider: text(value.provider, 160),
     callerKeyId: text(value.callerKeyId, 240),
     callerKeyName: text(value.callerKeyName, 240),
+    // The device a call came from, as the client named it. A call made on
+    // the gateway's own machine carries no name.
+    device: text(value.computer, 160),
+    // A routing group is what the client asked for ("group/<name>"); the
+    // model that served it is separate.
+    routeGroup: requested.startsWith("group/") ? requested.slice("group/".length) : "",
+    requested,
     model: text(value.req) || text(value.model, 240),
     status: count(value.status),
     inputTokens: count(value.in),

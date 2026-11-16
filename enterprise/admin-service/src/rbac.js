@@ -17,6 +17,9 @@ export const ROLES = Object.freeze({
     "notifications.read",
     "notifications.rules.read",
     "notifications.operations.read",
+    "providers.read",
+    "routing.read",
+    "gateway.read",
   ],
   enterprise_admin: [
     "users.read",
@@ -55,6 +58,12 @@ export const ROLES = Object.freeze({
     "notifications.rules.read",
     "notifications.rules.write",
     "notifications.operations.read",
+    "providers.read",
+    "providers.write",
+    "routing.read",
+    "routing.write",
+    "gateway.read",
+    "gateway.write",
   ],
   auditor: [
     "users.read",
@@ -69,6 +78,9 @@ export const ROLES = Object.freeze({
     "notifications.channels.read",
     "notifications.rules.read",
     "notifications.operations.read",
+    "providers.read",
+    "routing.read",
+    "gateway.read",
   ],
   security_admin: [
     "devices.read",
@@ -144,6 +156,12 @@ export const ROLES = Object.freeze({
     "notifications.rules.read",
     "notifications.rules.write",
     "notifications.operations.read",
+    "providers.read",
+    "providers.write",
+    "routing.read",
+    "routing.write",
+    "gateway.read",
+    "gateway.write",
   ],
 });
 

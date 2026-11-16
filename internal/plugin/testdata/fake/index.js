@@ -74,18 +74,29 @@ export const FakePlugin = async ({ client }) => ({
     cfg.provider[ID] = {
       name: "FakeCo",
       npm: "@ai-sdk/openai-compatible",
-      api: "https://fake.invalid/v1",
+      // $FAKE_API: the base the provider says its requests go to, as a
+      // plugin in front of a vendor's own API says it (a Mistral Vibe
+      // plugin's https://api.mistral.ai/v1, #5464); the loader's fetch
+      // still sends to $FAKE_BASE
+      api: process.env.FAKE_API || "https://fake.invalid/v1",
       models: {
         "fake-1": { name: "Fake One", limit: { context: 1000, output: 100 } },
         "fake-claude": { name: "Fake Claude", provider: { npm: "@ai-sdk/anthropic" }, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 2000, output: 200 } },
         "fake-gemini": { name: "Fake Gemini", provider: { npm: "@ai-sdk/google" }, reasoning: true, modalities: { input: ["text"], output: ["text"] }, limit: { context: 3000, output: 300 } },
       },
     }
+    // $FAKE_KIRO: a Claude model named as Kiro's plugin names it, on
+    // Anthropic's Messages API
+    if (process.env.FAKE_KIRO) cfg.provider[ID].models["claude-opus-5.5"] = { name: "Claude Opus 5.5", provider: { npm: "@ai-sdk/anthropic" }, reasoning: true, modalities: { input: ["text", "image"], output: ["text"] }, limit: { context: 200000, output: 32000 } }
     // $FAKE_RESPONSES: one model more, on OpenAI's Responses (Grok's)
     // $FAKE_FAST=1: fake-1 has a fast one, as Cursor's plugin 0.1.x lists
     // a model's -fast (=tier: see the models hook)
     if (process.env.FAKE_FAST === "1") cfg.provider[ID].models["fake-1-fast"] = { name: "Fake One Fast", limit: { context: 1000, output: 100 } }
     if (process.env.FAKE_RESPONSES) cfg.provider[ID].models["fake-resp"] = { name: "Fake Responses", provider: { npm: "@ai-sdk/openai" }, limit: { context: 4000, output: 400 } }
+    // $FAKE_ALSO: a model on chat completions whose vendor serves it on
+    // Responses and Anthropic's messages too, as Open Design's amr-link
+    // serves every model (plugins#888)
+    if (process.env.FAKE_ALSO) cfg.provider[ID].models["fake-also"] = { name: "Fake Also", also: ["@ai-sdk/anthropic", "@ai-sdk/openai"], limit: { context: 4000, output: 400 } }
     // $FAKE_GROK: a Grok model on Responses, as Grok's plugin serves it
     if (process.env.FAKE_GROK) cfg.provider[ID].models["grok-4.7"] = { name: "Grok 4.7", provider: { npm: "@ai-sdk/openai" }, limit: { context: 4000, output: 400 } }
     // $FAKE_SENSENOVA: SenseNova's image model as its plugin lists it from
@@ -95,6 +106,21 @@ export const FakePlugin = async ({ client }) => ({
     if (process.env.FAKE_SENSENOVA) {
       cfg.provider[ID].models["sensenova-u1.5-lite"] = { name: "sensenova-u1.5-lite", limit: { context: 131072, output: 32768 } }
       cfg.provider[ID].models["flux-2"] = { name: "Flux 2", provider: { npm: "@ai-sdk/anthropic" }, limit: { context: 1000, output: 100 } }
+    }
+    // $FAKE_DECLARED_DRAWS: image models whose names say nothing, on the
+    // provider's openai-compatible: one that says it gives images alone,
+    // and one that answers in text and images, which chats (maonekone)
+    if (process.env.FAKE_DECLARED_DRAWS) {
+      cfg.provider[ID].models["jimeng-4.0"] = { name: "Jimeng 4.0", modalities: { input: ["text", "image"], output: ["image"] }, limit: { context: 1000, output: 100 } }
+      cfg.provider[ID].models["fake-canvas"] = { name: "Fake Canvas", modalities: { input: ["text"], output: ["text", "image"] }, limit: { context: 1000, output: 100 } }
+    }
+    // $FAKE_LOOMY: iFlytek's Loomy gateway's three image generators as its
+    // /v1/models lists them (#4913), on the provider's openai-compatible;
+    // all three draw on its images API
+    if (process.env.FAKE_LOOMY) {
+      cfg.provider[ID].models["Hy-Image-3.5-preview"] = { name: "Hy-Image-3.5-preview", limit: { context: 131072, output: 32768 } }
+      cfg.provider[ID].models["doubao-seedream-5-lite"] = { name: "doubao-seedream-5-lite", limit: { context: 131072, output: 32768 } }
+      cfg.provider[ID].models["qwen-image-3.0-pro"] = { name: "qwen-image-3.0-pro", limit: { context: 131072, output: 32768 } }
     }
     // $FAKE_GOOGLE: the provider's models are on Gemini's API, as XYenon's
     // Google AI Studio plugin gives them all (@ai-sdk/google), so it has
@@ -238,7 +264,7 @@ export const FakePlugin = async ({ client }) => ({
         // where magpie said the agent works, as the plugin read it; its own
         // headers go on too, as a plugin that sends on what it got sends
         // them, for the host to take off
-        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
+        for (const k of ["x-magpie-work-dir", "x-magpie-work-git", "x-magpie-fallback", "x-magpie-session", "x-magpie-subagent", "x-magpie-effort"]) if (h.has(k)) h.set("x-saw-" + k.slice(9), h.get(k))
         // $FAKE_QUEUE: that model is queued at the vendor, as Qoder's free
         // models are: waited out (here until magpie gives up) unless magpie
         // said it needn't be, then said at once with the queue's 503
@@ -309,6 +335,26 @@ export const FakePlugin = async ({ client }) => ({
         ],
       }
     },
+    // $FAKE_CALLS: the account's calls made outside magpie, as Cursor's
+    // plugin lists them (auth.calls), from since on; the account key
+    // "calls-throw" can't reach the vendor
+    ...(process.env.FAKE_CALLS
+      ? {
+          calls: async (getAuth, provider, { since }) => {
+            const a = await getAuth()
+            if (a.key === "calls-throw") throw new Error("FakeCo's usage events answered 503")
+            return {
+              calls: [
+                { rid: "ev-1", t: since + 1000, model: "fake-1", in: 12, out: 3, cache_read: 40, cache_write: 2, cost: 0.004, session: "conv-1" },
+                // no rid, no time, odd counts: dropped or read as none
+                { t: since + 2000, model: "fake-1", in: 1 },
+                { rid: "ev-no-time", model: "fake-1" },
+                { rid: "ev-2", t: since + 3000, model: "fake-2", in: "9", out: -1, cost: "1" },
+              ],
+            }
+          },
+        }
+      : {}),
     // $FAKE_CHECKIN: the plugin presses the daily check-in itself, each
     // press written as a line of the account's key to that file (a signed-in
     // account's name/uid, so two of one name tell apart), and the
@@ -354,7 +400,7 @@ export const FakePlugin = async ({ client }) => ({
     id: ID,
     models: async (p, { auth }) => {
       // $FAKE_MODELS_LOG: each time the hook is asked is a line there
-      if (process.env.FAKE_MODELS_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_MODELS_LOG, "asked\n")
+      if (process.env.FAKE_MODELS_LOG) (await import("node:fs")).appendFileSync(process.env.FAKE_MODELS_LOG, "asked " + (auth?.refresh ?? auth?.key ?? "-") + "\n")
       if (auth?.refresh === "r-dead" || auth?.key === "dead") throw new Error("the vendor refused the sign-in")
       if (auth?.refresh === "r-models-gone") throw Object.assign(new Error("the vendor refused the sign-in"), { signIn: "expired" })
       // a sign-in past its time, said in words only, as Grok's plugin says it
@@ -362,11 +408,23 @@ export const FakePlugin = async ({ client }) => ({
       // the vendor unreachable: the list kept, as Zed's plugin keeps it
       if (auth?.refresh === "r-unreachable") await fetch("http://127.0.0.1:9/models").catch(() => {})
       if (auth?.type === "oauth" && auth.refresh?.startsWith("rot-")) {
+        // $FAKE_MODELS_HOLD: say the hook came ($FAKE_MODELS_HOLD.in), and
+        // spend the token only once that file is there
+        const hold = process.env.FAKE_MODELS_HOLD
+        if (hold) {
+          const fs = await import("node:fs")
+          fs.writeFileSync(hold + ".in", "")
+          while (!fs.existsSync(hold)) await new Promise((r) => setTimeout(r, 10))
+        }
         await client.auth.set({ path: { id: ID }, body: { ...auth, refresh: auth.refresh + "+" } })
       }
       // fake-1 costs the plan nothing, as a WorkBuddy model of x0.00
-      // credits ($FAKE_NO_FREE: a list with no free model, as ZCode's is)
+      // credits ($FAKE_NO_FREE: a list with no free model, as ZCode's was
+      // before 0.1.58 and a coding-plan-only account's is)
       if (!process.env.FAKE_NO_FREE) p.models["fake-1"].free = true
+      // $FAKE_ZCODE_FREE: the Start Plan's trial entries marked free, as
+      // zcode 0.1.58 on lists them (plugins#438)
+      if (process.env.FAKE_ZCODE_FREE) for (const id of ["GLM-5.3-Flash-Trial", "GLM-5.3-Trial"]) if (p.models[id]) p.models[id].free = true
       // fake-claude's credits are a number, discounted; fake-gemini's as
       // WorkBuddy's picker writes them
       if (p.models["fake-claude"]) Object.assign(p.models["fake-claude"], { rate: 0.5, rateWas: 1 })
@@ -378,6 +436,11 @@ export const FakePlugin = async ({ client }) => ({
       if (process.env.FAKE_ZEN) {
         p.models["mimo-v2.6-flash-free"] = { ...p.models["fake-1"], id: "mimo-v2.6-flash-free", name: "MiMo V2.6 Flash Free", api: { ...p.models["fake-1"].api, id: "mimo-v2.6-flash-free" }, free: true, variants: {},
           capabilities: {"temperature":true,"reasoning":true,"attachment":true,"toolcall":true,"input":{"text":true,"image":true,"audio":true,"video":true,"pdf":false},"output":{"text":true,"image":false,"audio":false,"video":false,"pdf":false},"interleaved":{"field":"reasoning_content"}} }
+        // a model as Command Code's plugin lists its plan's (#4436): it
+        // says what the model takes (text; audio, video, pdf no) and says
+        // nothing of images (m.images not a boolean there)
+        p.models["cc-plan-1"] = { ...p.models["fake-1"], id: "cc-plan-1", name: "CC Plan 1", api: { ...p.models["fake-1"].api, id: "cc-plan-1" }, free: true,
+          capabilities: {"temperature":true,"reasoning":true,"toolcall":true,"input":{"text":true,"audio":false,"video":false,"pdf":false},"output":{"text":true}} }
       }
       // $FAKE_KINDS: models as XYenon's magpie-google-ai-studio lists them
       // (#3279): the embedding as the report gives it (output text false,

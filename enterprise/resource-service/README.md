@@ -17,6 +17,8 @@ skill
 instructions
 subagent
 template
+redact
+hook
 ```
 
 支持的交付模式：

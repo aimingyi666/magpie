@@ -97,6 +97,73 @@ func TestPluginSignIn(t *testing.T) {
 	}
 }
 
+// A corporate gateway signs several people in to one provider at once: a
+// sign-in that asks for concurrent keeps the provider's other waiting
+// sign-ins, and each ends with its own account (#shared WorkBuddy).
+func TestPluginSignInConcurrent(t *testing.T) {
+	bun := testenv.Bun(t)
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", bun)
+	t.Cleanup(plugin.Settle)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	abs, _ := filepath.Abs("../plugin/testdata/fake/index.js")
+	if _, err := plugin.Add(ctx, abs); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plugin.Providers(ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	start := func(team string) SignInState {
+		t.Helper()
+		st, err := StartPluginSignInWith("fakeco", 1,
+			map[string]string{"where": "work", "team": team},
+			SignInOptions{Concurrent: true})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return st
+	}
+	first, second := start("alice/1"), start("bob/2")
+	if first.ID == second.ID {
+		t.Fatal("two sign-ins were given one id")
+	}
+	if got, _ := SignInStatus(first.ID); got.State != "waiting" {
+		t.Fatalf("the second canceled the first: %+v", got)
+	}
+	for _, s := range []struct{ id, team string }{{first.ID, "alice"}, {second.ID, "bob"}} {
+		if err := SubmitSignInCallback(s.id, "good"); err != nil {
+			t.Fatalf("%s: %v", s.team, err)
+		}
+	}
+	wait := func(id string) SignInState {
+		t.Helper()
+		for range 100 {
+			if st, _ := SignInStatus(id); st.State != "waiting" && st.State != "installing" {
+				return st
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		t.Fatal("the sign-in is still waiting")
+		return SignInState{}
+	}
+	if got := wait(first.ID); got.State != "done" || got.User != "alice@fake" {
+		t.Fatalf("first: %+v", got)
+	}
+	if got := wait(second.ID); got.State != "done" || got.User != "bob@fake" {
+		t.Fatalf("second: %+v", got)
+	}
+	var users []string
+	for _, l := range Logins("fakeco") {
+		users = append(users, l.User)
+	}
+	slices.Sort(users)
+	if !slices.Equal(users, []string{"alice@fake", "bob@fake"}) {
+		t.Fatalf("accounts = %v", users)
+	}
+}
+
 // A plugin's provider takes more than one account, as a built-in
 // subscription does: each signed in beside the others, one first and the
 // rest on behind it or off, any put first, and removing one signs it out.
@@ -286,5 +353,23 @@ func TestPluginEmptyKeyOnlyKeyless(t *testing.T) {
 	}
 	if _, err := PluginAPIKey(context.Background(), "nobody", 0, nil, ""); err == nil || err.Error() != "enter the key" {
 		t.Errorf("an unknown plugin with no key: %v", err)
+	}
+}
+
+// An API method whose own questions ask its key (keyAsked) is signed in
+// with its answers and no key: the window asks none beside them.
+func TestPluginEmptyKeyKeyAsked(t *testing.T) {
+	claudeHome(t)
+	t.Setenv("MAGPIE_BUN", "")
+	spec := "@example/opencode-acme-auth"
+	os.MkdirAll(settings.Dir(), 0o700)
+	if err := os.WriteFile(filepath.Join(settings.Dir(), "plugins.json"), []byte(`{"plugins":[{"spec":"`+spec+`"}]}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	plugin.UseCached([]plugin.Provider{{ID: "acme", Spec: spec, Name: "Acme",
+		Methods: []plugin.Method{{Type: "api", Label: "Session token", KeyAsked: true}}}})
+	t.Cleanup(func() { plugin.UseCached(nil) })
+	if _, err := PluginAPIKey(context.Background(), "acme", 0, map[string]string{"token": "t"}, ""); err != nil && err.Error() == "enter the key" {
+		t.Errorf("a keyAsked method with no key: %v", err)
 	}
 }
